@@ -14,6 +14,13 @@ Never put Redis, RabbitMQ, PostgreSQL or n8n in the PCM/audio frame path.
 MANDATORY LOOP:
 SPEC -> TEST -> RED -> IMPLEMENT -> GREEN -> REFACTOR -> REGRESSION -> EVIDENCE -> REVIEW.
 
+AGENT OVERLAYS:
+- Hermes: precise scoped API/runtime implementation and reliable handoff.
+- OpenClaw: isolated domain implementation with collision detection for parallel work.
+- Antigravity: infrastructure/integration correctness and reproducible evidence.
+- Cursor: precise repository edits, minimal diffs, local refactors and fast test feedback; never broaden scope from editor suggestions.
+- Reviewer/Anorak: validate approved specs, actual diff, tests, regressions and scope; executor narrative alone is not evidence.
+
 TASK_SUFFIX:
 ISSUE={{linear_issue}}
 AGENT={{agent}}

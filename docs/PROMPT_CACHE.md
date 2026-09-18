@@ -32,3 +32,17 @@ BRANCH={{branch}}
 CURRENT_CONTEXT={{shared_memory_context}}
 
 Execute the smallest safe implementation. Stop only if HUMAN_GATE applies.
+
+
+CI_GATE:
+Before returning a microtask to Review:
+1. push corrections to the existing task branch;
+2. GitHub Actions must execute automatically;
+3. Scope Policy must be green;
+4. Diff Quality must be green;
+5. Go Quality must be green when Go files exist;
+6. Redis RabbitMQ Infra must be green when infrastructure files exist;
+7. a failing check means continue the correction loop in the same issue/branch;
+8. only after CI is green, mark the PR Ready for Review and move Linear to In Review.
+
+CI is the primary reproducible execution evidence. Manual logs may supplement CI but do not replace a failing or missing required automated check.

@@ -34,3 +34,21 @@ Required for product/architecture changes, destructive migrations, security/auth
 ## Review
 PASS -> Done -> unblock dependents.
 FAIL -> In Progress -> same owner -> targeted fix -> Review.
+
+
+## CI gate
+
+Every implementation PR must pass the repository GitHub Actions workflow before returning to Review.
+
+Required automated checks:
+- Scope Policy
+- Diff Quality
+- Go Quality when Go sources are present
+- Redis RabbitMQ Infra when dev infrastructure is present
+
+Rules:
+- A red CI check means the issue stays or returns to In Progress.
+- Executor-written claims are supporting context, not a substitute for CI.
+- The branch must remain inside the Linear issue ALLOWED_SCOPE.
+- Fix the same branch; do not open a replacement PR unless explicitly instructed.
+- After corrections, push the branch, wait for automated checks, then mark the PR Ready for Review and move Linear to In Review.

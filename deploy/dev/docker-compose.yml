@@ -45,6 +45,23 @@ services:
     volumes:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$RABBITMQ_DEFAULT_USER" ] || [ -z "$$RABBITMQ_DEFAULT_PASS" ]; then
+          echo "[-] ERROR: RABBITMQ_DEFAULT_USER and RABBITMQ_DEFAULT_PASS are required in environment" >&2
+          exit 1
+        fi
+        (
+          while ! su-exec rabbitmq rabbitmqctl status >/dev/null 2>&1; do
+            sleep 1
+          done
+          su-exec rabbitmq rabbitmqctl add_user "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS" || su-exec rabbitmq rabbitmqctl change_password "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS"
+          su-exec rabbitmq rabbitmqctl set_user_tags "$$RABBITMQ_DEFAULT_USER" administrator
+          su-exec rabbitmq rabbitmqctl set_permissions -p "$${RABBITMQ_DEFAULT_VHOST:-/}" "$$RABBITMQ_DEFAULT_USER" ".*" ".*" ".*"
+        ) &
+        exec docker-entrypoint.sh rabbitmq-server
     healthcheck:
       test:
         - CMD-SHELL

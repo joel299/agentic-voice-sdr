@@ -167,14 +167,8 @@ if [ "$ALIVE_STATUS" != "ok" ]; then
 fi
 echo "    [✓] RabbitMQ aliveness check ok."
 
-echo "[+] 5.3. Applying declarative RabbitMQ topology from definitions.json..."
-docker exec agentic-rabbitmq-dev rabbitmqctl import_definitions /etc/rabbitmq/definitions.json > /dev/null
-echo "    [✓] Declarative definitions imported."
-
-echo "[+] 5.4. Validating required Exchanges..."
+echo "[+] 5.3. Validating required Exchanges (loaded automatically on startup)..."
 EXCHANGES_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/exchanges/%2F")
-
-
 for ex in "voice.commands" "voice.events" "voice.dlx"; do
   EXISTS=$(echo "$EXCHANGES_JSON" | python3 -c "import sys, json; exs = [e['name'] for e in json.load(sys.stdin)]; print('${ex}' in exs)")
   if [ "$EXISTS" != "True" ]; then
@@ -184,7 +178,7 @@ for ex in "voice.commands" "voice.events" "voice.dlx"; do
   echo "    [✓] Exchange '${ex}' confirmed."
 done
 
-echo "[+] 5.5. Validating required Queues and DLX configuration..."
+echo "[+] 5.4. Validating required Queues and DLX configuration (loaded automatically on startup)..."
 QUEUES_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/queues/%2F")
 for q in "call.dispatch" "call.retry" "tool.jobs" "transcript.persist" "voice.dead"; do
   EXISTS=$(echo "$QUEUES_JSON" | python3 -c "import sys, json; qs = [x['name'] for x in json.load(sys.stdin)]; print('${q}' in qs)")
@@ -211,7 +205,7 @@ print(args.get('x-dead-letter-exchange') == 'voice.dlx' and args.get('x-dead-let
   fi
 done
 
-echo "[+] 5.6. Testing end-to-end messaging pipeline..."
+echo "[+] 5.5. Testing end-to-end messaging pipeline..."
 # Publish message to voice.commands -> call.dispatch
 PAYLOAD='{"properties":{},"routing_key":"call.dispatch","payload":"{\"test\":\"smoke_call_dispatch\"}","payload_encoding":"string"}'
 curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
@@ -232,6 +226,7 @@ if [ "$MSG_FOUND" != "True" ]; then
 fi
 echo "    [✓] Publishing to voice.commands and consuming from call.dispatch verified."
 
+echo "[+] 5.6. Testing dead letter queue (voice.dlx -> voice.dead)..."
 # Publish directly to voice.dlx -> voice.dead
 DLX_PAYLOAD='{"properties":{},"routing_key":"voice.dead","payload":"{\"test\":\"smoke_voice_dead\"}","payload_encoding":"string"}'
 curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \

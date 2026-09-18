@@ -9,6 +9,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_DIR="${REPO_ROOT}/deploy/dev"
 
+# Source local .env if present
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env"
+  set +a
+elif [ -f "${DEPLOY_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${DEPLOY_DIR}/.env"
+  set +a
+fi
+
+# Strict check: fail clearly if required credentials are not in environment
+if [ -z "${REDIS_PASSWORD:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: REDIS_PASSWORD" >&2
+  echo "    Redis requires a password via environment/secret. Please export REDIS_PASSWORD or configure .env." >&2
+  exit 1
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_USER:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_USER" >&2
+  echo "    RabbitMQ requires an admin user via environment/secret. Please export RABBITMQ_DEFAULT_USER or configure .env." >&2
+  exit 1
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_PASS:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_PASS" >&2
+  echo "    RabbitMQ requires a password via environment/secret. Please export RABBITMQ_DEFAULT_PASS or configure .env." >&2
+  exit 1
+fi
+
 TEARDOWN=0
 for arg in "$@"; do
   if [ "$arg" = "--down" ]; then
@@ -46,10 +78,10 @@ echo "[+] Starting Docker Compose dev stack..."
 docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d
 
 # 3. Wait for services to become healthy
-echo "[+] Waiting for containers to become healthy (timeout: 60s)..."
+echo "[+] Waiting for containers to become healthy (timeout: 90s)..."
 wait_healthy() {
   local container="$1"
-  local max_attempts=30
+  local max_attempts=45
   local attempt=1
 
   while [ "$attempt" -le "$max_attempts" ]; do
@@ -81,10 +113,8 @@ echo "======================================================================"
 echo " Verifying Redis"
 echo "======================================================================"
 
-REDIS_PASS="${REDIS_PASSWORD:-devpassword}"
-
-echo "[+] 4.1. Testing Redis PING..."
-PING_RESP=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" ping 2>/dev/null || true)
+echo "[+] 4.1. Testing Redis PING with environment password..."
+PING_RESP=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" ping 2>/dev/null || true)
 if [ "$PING_RESP" != "PONG" ]; then
   echo "[-] ERROR: Redis PING failed, expected 'PONG', got '${PING_RESP}'"
   exit 1
@@ -92,8 +122,8 @@ fi
 echo "    [✓] Redis responded PONG."
 
 echo "[+] 4.2. Validating maxmemory and maxmemory-policy..."
-MAXMEM=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" config get maxmemory 2>/dev/null | tail -n 1)
-POLICY=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" config get maxmemory-policy 2>/dev/null | tail -n 1)
+MAXMEM=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" config get maxmemory 2>/dev/null | tail -n 1)
+POLICY=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" config get maxmemory-policy 2>/dev/null | tail -n 1)
 echo "    [i] maxmemory: ${MAXMEM} bytes"
 echo "    [i] maxmemory-policy: ${POLICY}"
 
@@ -104,13 +134,13 @@ fi
 echo "    [✓] Redis eviction policy confirmed as allkeys-lru."
 
 echo "[+] 4.3. Validating basic KV operations in volatile cache..."
-docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" set "test:smoke:key" "ok_gru61" ex 60 > /dev/null
-VAL=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" get "test:smoke:key" 2>/dev/null)
+docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" set "test:smoke:key" "ok_gru61" ex 60 > /dev/null
+VAL=$(docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" get "test:smoke:key" 2>/dev/null)
 if [ "$VAL" != "ok_gru61" ]; then
   echo "[-] ERROR: Redis KV test failed, got '${VAL}'"
   exit 1
 fi
-docker exec agentic-redis-dev redis-cli -a "$REDIS_PASS" del "test:smoke:key" > /dev/null
+docker exec agentic-redis-dev redis-cli -a "$REDIS_PASSWORD" del "test:smoke:key" > /dev/null
 echo "    [✓] Redis SET/GET/DEL operations verified."
 
 # 5. RabbitMQ Verification
@@ -119,8 +149,8 @@ echo "======================================================================"
 echo " Verifying RabbitMQ"
 echo "======================================================================"
 
-RABBIT_USER="${RABBITMQ_DEFAULT_USER:-guest}"
-RABBIT_PASS="${RABBITMQ_DEFAULT_PASS:-guest}"
+RABBIT_USER="${RABBITMQ_DEFAULT_USER}"
+RABBIT_PASS="${RABBITMQ_DEFAULT_PASS}"
 RABBIT_PORT="${RABBITMQ_MANAGEMENT_PORT:-15672}"
 API_BASE="http://127.0.0.1:${RABBIT_PORT}/api"
 
@@ -137,8 +167,14 @@ if [ "$ALIVE_STATUS" != "ok" ]; then
 fi
 echo "    [✓] RabbitMQ aliveness check ok."
 
-echo "[+] 5.3. Validating required Exchanges..."
+echo "[+] 5.3. Applying declarative RabbitMQ topology from definitions.json..."
+docker exec agentic-rabbitmq-dev rabbitmqctl import_definitions /etc/rabbitmq/definitions.json > /dev/null
+echo "    [✓] Declarative definitions imported."
+
+echo "[+] 5.4. Validating required Exchanges..."
 EXCHANGES_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/exchanges/%2F")
+
+
 for ex in "voice.commands" "voice.events" "voice.dlx"; do
   EXISTS=$(echo "$EXCHANGES_JSON" | python3 -c "import sys, json; exs = [e['name'] for e in json.load(sys.stdin)]; print('${ex}' in exs)")
   if [ "$EXISTS" != "True" ]; then
@@ -148,7 +184,7 @@ for ex in "voice.commands" "voice.events" "voice.dlx"; do
   echo "    [✓] Exchange '${ex}' confirmed."
 done
 
-echo "[+] 5.4. Validating required Queues and DLX configuration..."
+echo "[+] 5.5. Validating required Queues and DLX configuration..."
 QUEUES_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/queues/%2F")
 for q in "call.dispatch" "call.retry" "tool.jobs" "transcript.persist" "voice.dead"; do
   EXISTS=$(echo "$QUEUES_JSON" | python3 -c "import sys, json; qs = [x['name'] for x in json.load(sys.stdin)]; print('${q}' in qs)")
@@ -175,7 +211,7 @@ print(args.get('x-dead-letter-exchange') == 'voice.dlx' and args.get('x-dead-let
   fi
 done
 
-echo "[+] 5.5. Testing end-to-end messaging pipeline..."
+echo "[+] 5.6. Testing end-to-end messaging pipeline..."
 # Publish message to voice.commands -> call.dispatch
 PAYLOAD='{"properties":{},"routing_key":"call.dispatch","payload":"{\"test\":\"smoke_call_dispatch\"}","payload_encoding":"string"}'
 curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \

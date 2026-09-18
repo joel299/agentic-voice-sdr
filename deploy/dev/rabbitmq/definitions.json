@@ -5,26 +5,6 @@
       "name": "/"
     }
   ],
-  "users": [
-    {
-      "name": "guest",
-      "password_hash": "N/+dk3VT4oewGnzWfSfbe+WgBxEBiiUL/BRMZcUifagR3IxO",
-      "hashing_algorithm": "rabbit_password_hashing_sha256",
-      "tags": [
-        "administrator"
-      ],
-      "limits": {}
-    }
-  ],
-  "permissions": [
-    {
-      "user": "guest",
-      "vhost": "/",
-      "configure": ".*",
-      "write": ".*",
-      "read": ".*"
-    }
-  ],
   "exchanges": [
     {
       "name": "voice.commands",

@@ -5,10 +5,38 @@
 # ==============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Source local .env if present
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env"
+  set +a
+elif [ -f "${REPO_ROOT}/deploy/dev/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/deploy/dev/.env"
+  set +a
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_USER:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_USER" >&2
+  echo "    Please export RABBITMQ_DEFAULT_USER or configure .env" >&2
+  exit 1
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_PASS:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_PASS" >&2
+  echo "    Please export RABBITMQ_DEFAULT_PASS or configure .env" >&2
+  exit 1
+fi
+
 RABBITMQ_HOST="${RABBITMQ_HOST:-127.0.0.1}"
 RABBITMQ_MANAGEMENT_PORT="${RABBITMQ_MANAGEMENT_PORT:-15672}"
-RABBITMQ_USER="${RABBITMQ_DEFAULT_USER:-guest}"
-RABBITMQ_PASS="${RABBITMQ_DEFAULT_PASS:-guest}"
+RABBITMQ_USER="${RABBITMQ_DEFAULT_USER}"
+RABBITMQ_PASS="${RABBITMQ_DEFAULT_PASS}"
 RABBITMQ_VHOST="${RABBITMQ_DEFAULT_VHOST:-/}"
 
 # URL-encoded vhost for HTTP API (/ -> %2F)

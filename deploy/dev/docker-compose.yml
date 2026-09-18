@@ -8,28 +8,22 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
     environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+      - REDIS_PASSWORD
       - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-256mb}
       - REDIS_MAXMEMORY_POLICY=${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
     command:
-      - redis-server
-      - --requirepass
-      - ${REDIS_PASSWORD:-devpassword}
-      - --maxmemory
-      - ${REDIS_MAXMEMORY:-256mb}
-      - --maxmemory-policy
-      - ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
-      - --save
-      - ""
-      - --appendonly
-      - "no"
+      - sh
+      - -c
+      - |
+        if [ -z "$$REDIS_PASSWORD" ]; then
+          echo "[-] ERROR: REDIS_PASSWORD is required in environment" >&2
+          exit 1
+        fi
+        exec redis-server --requirepass "$$REDIS_PASSWORD" --maxmemory "$${REDIS_MAXMEMORY:-256mb}" --maxmemory-policy "$${REDIS_MAXMEMORY_POLICY:-allkeys-lru}" --save "" --appendonly no
     healthcheck:
       test:
-        - CMD
-        - redis-cli
-        - -a
-        - ${REDIS_PASSWORD:-devpassword}
-        - ping
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG
       interval: 5s
       timeout: 3s
       retries: 5
@@ -45,8 +39,8 @@ services:
       - "${RABBITMQ_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     environment:
-      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER:-guest}
-      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS:-guest}
+      - RABBITMQ_DEFAULT_USER
+      - RABBITMQ_DEFAULT_PASS
       - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_DEFAULT_VHOST:-/}
     volumes:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
@@ -55,10 +49,10 @@ services:
       test:
         - CMD-SHELL
         - rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 12
+      start_period: 20s
     networks:
       - voice-dev-net
 

@@ -1,0 +1,156 @@
+{
+  "rabbit_version": "3.13.7",
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "users": [
+    {
+      "name": "guest",
+      "password_hash": "N/+dk3VT4oewGnzWfSfbe+WgBxEBiiUL/BRMZcUifagR3IxO",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": [
+        "administrator"
+      ],
+      "limits": {}
+    }
+  ],
+  "permissions": [
+    {
+      "user": "guest",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "voice.commands",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "voice.events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "voice.dlx",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "call.dispatch",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "call.retry",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "tool.jobs",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "transcript.persist",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "voice.dead",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.dispatch",
+      "destination_type": "queue",
+      "routing_key": "call.dispatch",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry",
+      "destination_type": "queue",
+      "routing_key": "call.retry",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "tool.jobs",
+      "destination_type": "queue",
+      "routing_key": "tool.jobs",
+      "arguments": {}
+    },
+    {
+      "source": "voice.events",
+      "vhost": "/",
+      "destination": "transcript.persist",
+      "destination_type": "queue",
+      "routing_key": "transcript.persist",
+      "arguments": {}
+    },
+    {
+      "source": "voice.dlx",
+      "vhost": "/",
+      "destination": "voice.dead",
+      "destination_type": "queue",
+      "routing_key": "voice.dead",
+      "arguments": {}
+    },
+    {
+      "source": "voice.dlx",
+      "vhost": "/",
+      "destination": "voice.dead",
+      "destination_type": "queue",
+      "routing_key": "#",
+      "arguments": {}
+    }
+  ]
+}

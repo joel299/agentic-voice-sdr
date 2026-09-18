@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope-policy:
+    name: Scope Policy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate task branch scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="origin/${{ github.base_ref }}"
+          HEAD_REF="${{ github.head_ref }}"
+          git fetch origin "${{ github.base_ref }}" --depth=1
+
+          mapfile -t FILES < <(git diff --name-only "${BASE}...HEAD")
+          printf 'Changed files:\n'
+          printf ' - %s\n' "${FILES[@]}"
+
+          allowed() {
+            local file="$1"
+            case "$HEAD_REF" in
+              agent/hermes/api-runtime-bootstrap)
+                [[ "$file" == "go.mod" || "$file" == "go.sum" || "$file" == cmd/api/* || "$file" == internal/platform/config/* || "$file" == internal/httpapi/* ]]
+                ;;
+              agent/openclaw/callsession-state-machine)
+                [[ "$file" == internal/domain/call/* ]]
+                ;;
+              agent/antigravity/redis-rabbitmq-dev-infra)
+                [[ "$file" == ".env.example" || "$file" == deploy/dev/* || "$file" == scripts/infra/* || "$file" == docs/infra/* ]]
+                ;;
+              agent/cursor/audiosocket-frame-codec)
+                [[ "$file" == internal/telephony/audiosocket/* ]]
+                ;;
+              *)
+                return 0
+                ;;
+            esac
+          }
+
+          FAILED=0
+          for file in "${FILES[@]}"; do
+            if ! allowed "$file"; then
+              echo "::error file=$file::File is outside ALLOWED_SCOPE for branch $HEAD_REF"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"
+
+  diff-quality:
+    name: Diff Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whitespace errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git show --check --oneline HEAD
+          fi
+
+  go-quality:
+    name: Go Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Go sources
+        id: go
+        shell: bash
+        run: |
+          if find . -type f -name '*.go' -not -path './.git/*' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Go 1.27
+        if: steps.go.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Prepare module for isolated parallel PR
+        if: steps.go.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f go.mod ]]; then
+            go mod init github.com/joel299/agentic-voice-sdr
+          fi
+          go mod tidy
+
+      - name: Gofmt
+        if: steps.go.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNFORMATTED="$(gofmt -l $(find . -type f -name '*.go' -not -path './.git/*'))"
+          if [[ -n "$UNFORMATTED" ]]; then
+            echo "$UNFORMATTED"
+            echo "::error::Go files are not gofmt formatted"
+            exit 1
+          fi
+
+      - name: Go vet
+        if: steps.go.outputs.present == 'true'
+        run: go vet ./...
+
+      - name: Unit and integration tests
+        if: steps.go.outputs.present == 'true'
+        run: go test -count=1 ./...
+
+      - name: Race detector
+        if: steps.go.outputs.present == 'true'
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        if: steps.go.outputs.present == 'true'
+        run: go build ./...
+
+  infra-quality:
+    name: Redis RabbitMQ Infra
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect infra
+        id: infra
+        shell: bash
+        run: |
+          if [[ -f deploy/dev/docker-compose.yml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate shell syntax
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in scripts/infra/*.sh; do
+            [[ -e "$script" ]] || continue
+            bash -n "$script"
+          done
+
+      - name: Validate Docker Compose
+        if: steps.infra.outputs.present == 'true'
+        run: docker compose -f deploy/dev/docker-compose.yml config
+
+      - name: Redis + RabbitMQ smoke test
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/infra/smoke-test.sh
+          ./scripts/infra/smoke-test.sh --down

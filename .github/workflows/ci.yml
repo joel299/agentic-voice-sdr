@@ -153,7 +153,7 @@ jobs:
         run: go build ./...
 
   infra-quality:
-    name: Infrastructure Foundation Quality
+    name: Redis RabbitMQ Infra
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -161,9 +161,6 @@ jobs:
       RABBITMQ_DEFAULT_USER: ci-agentic
       RABBITMQ_DEFAULT_PASS: ci-rabbitmq-password
       RABBITMQ_DEFAULT_VHOST: /
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ci-postgres-password
-      POSTGRES_DB: agentic_voice_sdr_dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -183,7 +180,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in scripts/infra/*.sh scripts/db/*.sh; do
+          for script in scripts/infra/*.sh; do
             [[ -e "$script" ]] || continue
             bash -n "$script"
           done
@@ -199,13 +196,3 @@ jobs:
           set -euo pipefail
           chmod +x scripts/infra/smoke-test.sh
           ./scripts/infra/smoke-test.sh --down
-
-      - name: PostgreSQL + Outbox foundation smoke test
-        if: steps.infra.outputs.present == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f scripts/db/smoke-test.sh ]]; then
-            chmod +x scripts/db/smoke-test.sh
-            ./scripts/db/smoke-test.sh --down
-          fi

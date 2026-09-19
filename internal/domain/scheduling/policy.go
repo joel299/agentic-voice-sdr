@@ -85,6 +85,9 @@ func NewRetryPolicy(config RetryPolicyConfig) (*RetryPolicy, error) {
 
 	windows := make(map[time.Weekday][]BusinessWindow, len(config.Windows))
 	for weekday, entries := range config.Windows {
+		if weekday < time.Sunday || weekday > time.Saturday {
+			return nil, &InvalidBusinessWindowError{Weekday: weekday, Reason: "weekday must be between Sunday and Saturday"}
+		}
 		if len(entries) == 0 {
 			return nil, &InvalidBusinessWindowError{Weekday: weekday, Reason: "day has no windows"}
 		}
@@ -122,8 +125,8 @@ func (p *RetryPolicy) NextRetry(attempt int) (time.Time, error) {
 func (p *RetryPolicy) ValidateCallback(requested time.Time) error {
 	local := requested.In(p.location)
 	for _, window := range p.windows[local.Weekday()] {
-		open := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, p.location).Add(window.Open)
-		close := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, p.location).Add(window.Close)
+		open := p.localBoundary(local, window.Open)
+		close := p.localBoundary(local, window.Close)
 		if !local.Before(open) && local.Before(close) {
 			return nil
 		}
@@ -135,10 +138,9 @@ func (p *RetryPolicy) nextBusinessTime(candidate time.Time) (time.Time, error) {
 	base := candidate.In(p.location)
 	for dayOffset := 0; dayOffset <= 7; dayOffset++ {
 		day := base.AddDate(0, 0, dayOffset)
-		midnight := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, p.location)
 		for _, window := range p.windows[day.Weekday()] {
-			open := midnight.Add(window.Open)
-			close := midnight.Add(window.Close)
+			open := p.localBoundary(day, window.Open)
+			close := p.localBoundary(day, window.Close)
 			if dayOffset == 0 && base.Before(open) {
 				return open, nil
 			}
@@ -151,4 +153,18 @@ func (p *RetryPolicy) nextBusinessTime(candidate time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, &InvalidBusinessWindowError{Reason: "no next configured business window"}
+}
+
+func (p *RetryPolicy) localBoundary(day time.Time, offset time.Duration) time.Time {
+	totalSeconds := int64(offset / time.Second)
+	return time.Date(
+		day.Year(),
+		day.Month(),
+		day.Day(),
+		int(totalSeconds/3600),
+		int((totalSeconds%3600)/60),
+		int(totalSeconds%60),
+		int(offset%time.Second),
+		p.location,
+	)
 }

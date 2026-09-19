@@ -21,7 +21,7 @@ func sampleTestDefinition(name string) ToolDefinition {
 		},
 		AllowedContexts:     []string{"outbound_call", "test_context"},
 		Timeout:             5 * time.Second,
-		RetryPolicy:         RetryPolicyMetadata{MaxRetries: 2, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond},
+		RetryPolicy:         &RetryPolicyMetadata{MaxRetries: 2, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond},
 		IdempotencyStrategy: "test_strategy",
 		AuditPolicy:         AuditPolicy{LogPayload: true, MaskPII: true, AuditLevel: "info"},
 		ProviderAdapter:     ProviderAdapterIdentifier{ProviderName: "test_provider", AdapterType: "test_adapter"},
@@ -40,6 +40,13 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: nil,
 		},
 		{
+			name: "valid definition with explicit zero retries policy",
+			mutate: func(td *ToolDefinition) {
+				td.RetryPolicy = &RetryPolicyMetadata{MaxRetries: 0}
+			},
+			wantErr: nil,
+		},
+		{
 			name: "empty name",
 			mutate: func(td *ToolDefinition) {
 				td.Name = ""
@@ -47,16 +54,37 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: ErrInvalidDefinition,
 		},
 		{
-			name: "name with space",
+			name: "name with ASCII space",
 			mutate: func(td *ToolDefinition) {
 				td.Name = "calendar check"
 			},
 			wantErr: ErrInvalidDefinition,
 		},
 		{
-			name: "name with tab",
+			name: "name with ASCII tab",
 			mutate: func(td *ToolDefinition) {
 				td.Name = "calendar\tcheck"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with ASCII newline",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "calendar\ncheck"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with Unicode non-breaking space",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "calendar.\u00A0create_event"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with Unicode em space",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "calendar.\u2003create_event"
 			},
 			wantErr: ErrInvalidDefinition,
 		},
@@ -167,26 +195,30 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: ErrInvalidDefinition,
 		},
 		{
+			name: "nil retry policy",
+			mutate: func(td *ToolDefinition) {
+				td.RetryPolicy = nil
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
 			name: "negative retry max_retries",
 			mutate: func(td *ToolDefinition) {
-				td.RetryPolicy.MaxRetries = -1
+				td.RetryPolicy = &RetryPolicyMetadata{MaxRetries: -1}
 			},
 			wantErr: ErrInvalidDefinition,
 		},
 		{
 			name: "zero initial backoff when max_retries > 0",
 			mutate: func(td *ToolDefinition) {
-				td.RetryPolicy.MaxRetries = 3
-				td.RetryPolicy.InitialBackoff = 0
+				td.RetryPolicy = &RetryPolicyMetadata{MaxRetries: 3, InitialBackoff: 0}
 			},
 			wantErr: ErrInvalidDefinition,
 		},
 		{
 			name: "max_backoff less than initial_backoff",
 			mutate: func(td *ToolDefinition) {
-				td.RetryPolicy.MaxRetries = 3
-				td.RetryPolicy.InitialBackoff = 500 * time.Millisecond
-				td.RetryPolicy.MaxBackoff = 100 * time.Millisecond
+				td.RetryPolicy = &RetryPolicyMetadata{MaxRetries: 3, InitialBackoff: 500 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
 			},
 			wantErr: ErrInvalidDefinition,
 		},

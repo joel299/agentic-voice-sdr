@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type RetryPolicyMetadata struct {
@@ -62,7 +63,7 @@ type ToolDefinition struct {
 	OutputSchema        SchemaDefinition          `json:"output_schema"`
 	AllowedContexts     []string                  `json:"allowed_contexts"`
 	Timeout             time.Duration             `json:"timeout"`
-	RetryPolicy         RetryPolicyMetadata       `json:"retry_policy"`
+	RetryPolicy         *RetryPolicyMetadata      `json:"retry_policy"`
 	IdempotencyStrategy string                    `json:"idempotency_strategy"`
 	AuditPolicy         AuditPolicy               `json:"audit_policy"`
 	ProviderAdapter     ProviderAdapterIdentifier `json:"provider_adapter"`
@@ -72,8 +73,10 @@ func validateToolName(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: name cannot be empty", ErrInvalidDefinition)
 	}
-	if strings.ContainsAny(name, " \t\n\r") {
-		return fmt.Errorf("%w: name cannot contain whitespace", ErrInvalidDefinition)
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			return fmt.Errorf("%w: name cannot contain whitespace", ErrInvalidDefinition)
+		}
 	}
 	parts := strings.Split(name, ".")
 	if len(parts) != 2 {
@@ -109,6 +112,9 @@ func (td ToolDefinition) Validate() error {
 	if td.Timeout <= 0 {
 		return fmt.Errorf("%w: timeout must be greater than zero", ErrInvalidDefinition)
 	}
+	if td.RetryPolicy == nil {
+		return fmt.Errorf("%w: retry_policy cannot be nil", ErrInvalidDefinition)
+	}
 	if err := td.RetryPolicy.Validate(); err != nil {
 		return err
 	}
@@ -130,6 +136,11 @@ func (td ToolDefinition) Clone() ToolDefinition {
 		ctxCopy = make([]string, len(td.AllowedContexts))
 		copy(ctxCopy, td.AllowedContexts)
 	}
+	var retryCopy *RetryPolicyMetadata
+	if td.RetryPolicy != nil {
+		val := *td.RetryPolicy
+		retryCopy = &val
+	}
 	return ToolDefinition{
 		Name:                td.Name,
 		Description:         td.Description,
@@ -137,7 +148,7 @@ func (td ToolDefinition) Clone() ToolDefinition {
 		OutputSchema:        td.OutputSchema.Clone(),
 		AllowedContexts:     ctxCopy,
 		Timeout:             td.Timeout,
-		RetryPolicy:         td.RetryPolicy,
+		RetryPolicy:         retryCopy,
 		IdempotencyStrategy: td.IdempotencyStrategy,
 		AuditPolicy:         td.AuditPolicy,
 		ProviderAdapter:     td.ProviderAdapter,

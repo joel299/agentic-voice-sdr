@@ -3,6 +3,7 @@ package tools
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestInMemoryRegistryRegisterAndGet(t *testing.T) {
@@ -140,17 +141,19 @@ func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	inputDef.InputSchema.Properties = map[string]string{"req_param": "string"}
 	inputDef.OutputSchema.Required = []string{"result"}
 	inputDef.OutputSchema.Properties = map[string]string{"result": "string"}
+	inputDef.RetryPolicy = &RetryPolicyMetadata{MaxRetries: 3, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 1 * time.Second}
 
 	if err := r.Register(inputDef); err != nil {
 		t.Fatalf("failed to register tool: %v", err)
 	}
 
-	// 1. Mutate original input struct fields after Register
+	// 1. Mutate original input struct fields and pointers after Register
 	inputDef.AllowedContexts[0] = "MUTATED"
 	inputDef.InputSchema.Required[0] = "MUTATED"
 	inputDef.InputSchema.Properties["req_param"] = "MUTATED"
 	inputDef.OutputSchema.Required[0] = "MUTATED"
 	inputDef.OutputSchema.Properties["result"] = "MUTATED"
+	inputDef.RetryPolicy.MaxRetries = 999
 
 	got, err := r.Get("memory.search")
 	if err != nil {
@@ -172,11 +175,15 @@ func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	if got.OutputSchema.Properties["result"] == "MUTATED" {
 		t.Fatal("registry output schema properties map was mutated via input reference!")
 	}
+	if got.RetryPolicy.MaxRetries == 999 {
+		t.Fatal("registry retry policy pointer was mutated via input reference!")
+	}
 
-	// 2. Mutate returned struct fields after Get
+	// 2. Mutate returned struct fields and pointers after Get
 	got.AllowedContexts[0] = "MUTATED_AFTER_GET"
 	got.InputSchema.Properties["req_param"] = "MUTATED_AFTER_GET"
 	got.OutputSchema.Properties["result"] = "MUTATED_AFTER_GET"
+	got.RetryPolicy.MaxRetries = 888
 
 	got2, _ := r.Get("memory.search")
 	if got2.AllowedContexts[0] == "MUTATED_AFTER_GET" {
@@ -188,11 +195,15 @@ func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	if got2.OutputSchema.Properties["result"] == "MUTATED_AFTER_GET" {
 		t.Fatal("registry output schema properties was mutated via returned Get reference!")
 	}
+	if got2.RetryPolicy.MaxRetries == 888 {
+		t.Fatal("registry retry policy pointer was mutated via returned Get reference!")
+	}
 
 	// 3. Mutate returned List elements
 	list := r.List()
 	list[0].AllowedContexts[0] = "MUTATED_LIST"
 	list[0].InputSchema.Properties["req_param"] = "MUTATED_LIST"
+	list[0].RetryPolicy.MaxRetries = 777
 
 	got3, _ := r.Get("memory.search")
 	if got3.AllowedContexts[0] == "MUTATED_LIST" {
@@ -200,5 +211,8 @@ func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	}
 	if got3.InputSchema.Properties["req_param"] == "MUTATED_LIST" {
 		t.Fatal("registry state input schema properties was mutated via returned List reference!")
+	}
+	if got3.RetryPolicy.MaxRetries == 777 {
+		t.Fatal("registry state retry policy pointer was mutated via returned List reference!")
 	}
 }

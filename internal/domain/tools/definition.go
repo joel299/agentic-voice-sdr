@@ -12,15 +12,47 @@ type RetryPolicyMetadata struct {
 	MaxBackoff     time.Duration `json:"max_backoff"`
 }
 
+func (rpm RetryPolicyMetadata) Validate() error {
+	if rpm.MaxRetries < 0 {
+		return fmt.Errorf("%w: max_retries cannot be negative", ErrInvalidDefinition)
+	}
+	if rpm.MaxRetries > 0 {
+		if rpm.InitialBackoff <= 0 {
+			return fmt.Errorf("%w: initial_backoff must be greater than zero when max_retries > 0", ErrInvalidDefinition)
+		}
+		if rpm.MaxBackoff < rpm.InitialBackoff {
+			return fmt.Errorf("%w: max_backoff cannot be less than initial_backoff", ErrInvalidDefinition)
+		}
+	}
+	return nil
+}
+
 type AuditPolicy struct {
 	LogPayload bool   `json:"log_payload"`
 	MaskPII    bool   `json:"mask_pii"`
 	AuditLevel string `json:"audit_level"`
 }
 
+func (ap AuditPolicy) Validate() error {
+	if strings.TrimSpace(ap.AuditLevel) == "" {
+		return fmt.Errorf("%w: audit_level cannot be empty", ErrInvalidDefinition)
+	}
+	return nil
+}
+
 type ProviderAdapterIdentifier struct {
 	ProviderName string `json:"provider_name"`
 	AdapterType  string `json:"adapter_type"`
+}
+
+func (pai ProviderAdapterIdentifier) Validate() error {
+	if strings.TrimSpace(pai.ProviderName) == "" {
+		return fmt.Errorf("%w: provider_name cannot be empty", ErrInvalidDefinition)
+	}
+	if strings.TrimSpace(pai.AdapterType) == "" {
+		return fmt.Errorf("%w: adapter_type cannot be empty", ErrInvalidDefinition)
+	}
+	return nil
 }
 
 type ToolDefinition struct {
@@ -36,12 +68,26 @@ type ToolDefinition struct {
 	ProviderAdapter     ProviderAdapterIdentifier `json:"provider_adapter"`
 }
 
-func (td ToolDefinition) Validate() error {
-	if strings.TrimSpace(td.Name) == "" {
+func validateToolName(name string) error {
+	if name == "" {
 		return fmt.Errorf("%w: name cannot be empty", ErrInvalidDefinition)
 	}
-	if strings.Contains(td.Name, " ") {
+	if strings.ContainsAny(name, " \t\n\r") {
 		return fmt.Errorf("%w: name cannot contain whitespace", ErrInvalidDefinition)
+	}
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 {
+		return fmt.Errorf("%w: name must be in namespace.action format (got %q)", ErrInvalidDefinition, name)
+	}
+	if parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("%w: namespace and action in name cannot be empty (got %q)", ErrInvalidDefinition, name)
+	}
+	return nil
+}
+
+func (td ToolDefinition) Validate() error {
+	if err := validateToolName(td.Name); err != nil {
+		return err
 	}
 	if strings.TrimSpace(td.Description) == "" {
 		return fmt.Errorf("%w: description cannot be empty", ErrInvalidDefinition)
@@ -62,6 +108,18 @@ func (td ToolDefinition) Validate() error {
 	}
 	if td.Timeout <= 0 {
 		return fmt.Errorf("%w: timeout must be greater than zero", ErrInvalidDefinition)
+	}
+	if err := td.RetryPolicy.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(td.IdempotencyStrategy) == "" {
+		return fmt.Errorf("%w: idempotency strategy cannot be empty", ErrInvalidDefinition)
+	}
+	if err := td.AuditPolicy.Validate(); err != nil {
+		return err
+	}
+	if err := td.ProviderAdapter.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

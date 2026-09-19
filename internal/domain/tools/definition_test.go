@@ -6,21 +6,25 @@ import (
 	"time"
 )
 
-func validDefinition() ToolDefinition {
+func sampleTestDefinition(name string) ToolDefinition {
 	return ToolDefinition{
-		Name:        "calendar.check_availability",
-		Description: "Check calendar availability",
+		Name:        name,
+		Description: "Test tool description for " + name,
 		InputSchema: SchemaDefinition{
 			Type:       "object",
-			Required:   []string{"start_time"},
-			Properties: map[string]string{"start_time": "string"},
+			Required:   []string{"req_param"},
+			Properties: map[string]string{"req_param": "string"},
 		},
 		OutputSchema: SchemaDefinition{
 			Type:       "object",
-			Properties: map[string]string{"available": "boolean"},
+			Properties: map[string]string{"result": "string"},
 		},
-		AllowedContexts: []string{"outbound_call"},
-		Timeout:         5 * time.Second,
+		AllowedContexts:     []string{"outbound_call", "test_context"},
+		Timeout:             5 * time.Second,
+		RetryPolicy:         RetryPolicyMetadata{MaxRetries: 2, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond},
+		IdempotencyStrategy: "test_strategy",
+		AuditPolicy:         AuditPolicy{LogPayload: true, MaskPII: true, AuditLevel: "info"},
+		ProviderAdapter:     ProviderAdapterIdentifier{ProviderName: "test_provider", AdapterType: "test_adapter"},
 	}
 }
 
@@ -43,9 +47,44 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: ErrInvalidDefinition,
 		},
 		{
-			name: "name with whitespace",
+			name: "name with space",
 			mutate: func(td *ToolDefinition) {
 				td.Name = "calendar check"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with tab",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "calendar\tcheck"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name without namespace prefix",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "tool"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with leading dot",
+			mutate: func(td *ToolDefinition) {
+				td.Name = ".tool"
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with trailing dot",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "tool."
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "name with double dot",
+			mutate: func(td *ToolDefinition) {
+				td.Name = "tool..name"
 			},
 			wantErr: ErrInvalidDefinition,
 		},
@@ -71,6 +110,28 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: ErrInvalidDefinition,
 		},
 		{
+			name: "empty property name in input schema",
+			mutate: func(td *ToolDefinition) {
+				td.InputSchema.Properties = map[string]string{"": "string"}
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "empty property type in input schema",
+			mutate: func(td *ToolDefinition) {
+				td.InputSchema.Properties = map[string]string{"param": ""}
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "required field missing from properties map",
+			mutate: func(td *ToolDefinition) {
+				td.InputSchema.Required = []string{"non_existent_field"}
+				td.InputSchema.Properties = map[string]string{"existing_field": "string"}
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
 			name: "empty output schema type",
 			mutate: func(td *ToolDefinition) {
 				td.OutputSchema.Type = ""
@@ -85,9 +146,9 @@ func TestToolDefinitionValidation(t *testing.T) {
 			wantErr: ErrInvalidDefinition,
 		},
 		{
-			name: "allowed context with empty string",
+			name: "allowed context with whitespace string",
 			mutate: func(td *ToolDefinition) {
-				td.AllowedContexts = []string{"  "}
+				td.AllowedContexts = []string{"   "}
 			},
 			wantErr: ErrInvalidDefinition,
 		},
@@ -105,11 +166,63 @@ func TestToolDefinitionValidation(t *testing.T) {
 			},
 			wantErr: ErrInvalidDefinition,
 		},
+		{
+			name: "negative retry max_retries",
+			mutate: func(td *ToolDefinition) {
+				td.RetryPolicy.MaxRetries = -1
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "zero initial backoff when max_retries > 0",
+			mutate: func(td *ToolDefinition) {
+				td.RetryPolicy.MaxRetries = 3
+				td.RetryPolicy.InitialBackoff = 0
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "max_backoff less than initial_backoff",
+			mutate: func(td *ToolDefinition) {
+				td.RetryPolicy.MaxRetries = 3
+				td.RetryPolicy.InitialBackoff = 500 * time.Millisecond
+				td.RetryPolicy.MaxBackoff = 100 * time.Millisecond
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "empty idempotency strategy",
+			mutate: func(td *ToolDefinition) {
+				td.IdempotencyStrategy = ""
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "empty audit level",
+			mutate: func(td *ToolDefinition) {
+				td.AuditPolicy.AuditLevel = ""
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "empty provider name",
+			mutate: func(td *ToolDefinition) {
+				td.ProviderAdapter.ProviderName = ""
+			},
+			wantErr: ErrInvalidDefinition,
+		},
+		{
+			name: "empty provider adapter type",
+			mutate: func(td *ToolDefinition) {
+				td.ProviderAdapter.AdapterType = ""
+			},
+			wantErr: ErrInvalidDefinition,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			td := validDefinition()
+			td := sampleTestDefinition("calendar.check_availability")
 			tt.mutate(&td)
 			err := td.Validate()
 			if tt.wantErr == nil {

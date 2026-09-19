@@ -8,7 +8,7 @@ type SchemaDefinition struct {
 	Title       string            `json:"title,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Required    []string          `json:"required,omitempty"`
-	Properties  map[string]string `json:"properties,omitempty"`
+	Properties  map[string]string `json:"properties,omitempty"` // property_name -> property_type
 }
 
 func (s SchemaDefinition) Validate() error {
@@ -18,6 +18,19 @@ func (s SchemaDefinition) Validate() error {
 	for i, r := range s.Required {
 		if r == "" {
 			return fmt.Errorf("%w: required field at index %d cannot be empty", ErrInvalidDefinition, i)
+		}
+		if s.Properties != nil {
+			if _, exists := s.Properties[r]; !exists {
+				return fmt.Errorf("%w: required field '%s' not found in properties map", ErrInvalidDefinition, r)
+			}
+		}
+	}
+	for k, v := range s.Properties {
+		if k == "" {
+			return fmt.Errorf("%w: property name cannot be empty", ErrInvalidDefinition)
+		}
+		if v == "" {
+			return fmt.Errorf("%w: property type for '%s' cannot be empty", ErrInvalidDefinition, k)
 		}
 	}
 	return nil

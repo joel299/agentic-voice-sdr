@@ -3,30 +3,11 @@ package tools
 import (
 	"errors"
 	"testing"
-	"time"
 )
-
-func sampleDef(name string) ToolDefinition {
-	return ToolDefinition{
-		Name:        name,
-		Description: "Sample tool " + name,
-		InputSchema: SchemaDefinition{
-			Type:       "object",
-			Required:   []string{"id"},
-			Properties: map[string]string{"id": "string"},
-		},
-		OutputSchema: SchemaDefinition{
-			Type:       "object",
-			Properties: map[string]string{"success": "boolean"},
-		},
-		AllowedContexts: []string{"outbound_call", "whatsapp_followup"},
-		Timeout:         5 * time.Second,
-	}
-}
 
 func TestInMemoryRegistryRegisterAndGet(t *testing.T) {
 	r := NewInMemoryRegistry()
-	def := sampleDef("calendar.check_availability")
+	def := sampleTestDefinition("calendar.check_availability")
 
 	if err := r.Register(def); err != nil {
 		t.Fatalf("failed to register valid tool: %v", err)
@@ -43,7 +24,7 @@ func TestInMemoryRegistryRegisterAndGet(t *testing.T) {
 
 func TestInMemoryRegistryRejectsDuplicates(t *testing.T) {
 	r := NewInMemoryRegistry()
-	def := sampleDef("whatsapp.send_message")
+	def := sampleTestDefinition("whatsapp.send_message")
 
 	if err := r.Register(def); err != nil {
 		t.Fatalf("first register failed: %v", err)
@@ -60,7 +41,7 @@ func TestInMemoryRegistryRejectsDuplicates(t *testing.T) {
 
 func TestInMemoryRegistryRejectsInvalidDefinition(t *testing.T) {
 	r := NewInMemoryRegistry()
-	def := sampleDef("")
+	def := sampleTestDefinition("invalid_name")
 
 	err := r.Register(def)
 	if err == nil {
@@ -84,7 +65,7 @@ func TestInMemoryRegistryGetUnknown(t *testing.T) {
 
 func TestInMemoryRegistryAllowlistAndContextValidation(t *testing.T) {
 	r := NewInMemoryRegistry()
-	def := sampleDef("lead.update")
+	def := sampleTestDefinition("lead.update")
 	def.AllowedContexts = []string{"outbound_call"}
 
 	if err := r.Register(def); err != nil {
@@ -108,13 +89,16 @@ func TestInMemoryRegistryAllowlistAndContextValidation(t *testing.T) {
 		t.Fatalf("expected ErrToolNotAllowedInContext, got: %v", err)
 	}
 
-	// Arbitrary unregistered tool (Allowlist-first check)
-	if r.IsAllowedInContext("arbitrary.tool", "outbound_call") {
-		t.Fatal("arbitrary unregistered tool must NOT be allowed")
-	}
-	err = r.ValidateAllowedInContext("arbitrary.tool", "outbound_call")
-	if err == nil || !errors.Is(err, ErrUnknownTool) {
-		t.Fatalf("expected ErrUnknownTool for unregistered tool, got: %v", err)
+	// Allowlist-first check: Arbitrary unregistered tools MUST be rejected
+	arbitraryTools := []string{"dangerous.execute", "admin.delete_everything", "unknown.tool"}
+	for _, tool := range arbitraryTools {
+		if r.IsAllowedInContext(tool, "outbound_call") {
+			t.Fatalf("arbitrary unregistered tool %s must NOT be allowed", tool)
+		}
+		err := r.ValidateAllowedInContext(tool, "outbound_call")
+		if err == nil || !errors.Is(err, ErrUnknownTool) {
+			t.Fatalf("expected ErrUnknownTool for unregistered tool %s, got: %v", tool, err)
+		}
 	}
 }
 
@@ -124,7 +108,7 @@ func TestInMemoryRegistryDeterministicList(t *testing.T) {
 	// Insert in non-alphabetical order
 	names := []string{"whatsapp.send_message", "calendar.check_availability", "memory.store", "lead.update"}
 	for _, n := range names {
-		if err := r.Register(sampleDef(n)); err != nil {
+		if err := r.Register(sampleTestDefinition(n)); err != nil {
 			t.Fatalf("failed to register %s: %v", n, err)
 		}
 	}
@@ -150,19 +134,23 @@ func TestInMemoryRegistryDeterministicList(t *testing.T) {
 func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	r := NewInMemoryRegistry()
 
-	inputDef := sampleDef("memory.search")
+	inputDef := sampleTestDefinition("memory.search")
 	inputDef.AllowedContexts = []string{"outbound_call"}
-	inputDef.InputSchema.Required = []string{"query"}
-	inputDef.InputSchema.Properties = map[string]string{"query": "string"}
+	inputDef.InputSchema.Required = []string{"req_param"}
+	inputDef.InputSchema.Properties = map[string]string{"req_param": "string"}
+	inputDef.OutputSchema.Required = []string{"result"}
+	inputDef.OutputSchema.Properties = map[string]string{"result": "string"}
 
 	if err := r.Register(inputDef); err != nil {
 		t.Fatalf("failed to register tool: %v", err)
 	}
 
-	// Mutate original input slice & map after registration
+	// 1. Mutate original input struct fields after Register
 	inputDef.AllowedContexts[0] = "MUTATED"
 	inputDef.InputSchema.Required[0] = "MUTATED"
-	inputDef.InputSchema.Properties["query"] = "MUTATED"
+	inputDef.InputSchema.Properties["req_param"] = "MUTATED"
+	inputDef.OutputSchema.Required[0] = "MUTATED"
+	inputDef.OutputSchema.Properties["result"] = "MUTATED"
 
 	got, err := r.Get("memory.search")
 	if err != nil {
@@ -175,28 +163,42 @@ func TestInMemoryRegistryImmutabilityDefensiveCopy(t *testing.T) {
 	if got.InputSchema.Required[0] == "MUTATED" {
 		t.Fatal("registry input schema required slice was mutated via input reference!")
 	}
-	if got.InputSchema.Properties["query"] == "MUTATED" {
+	if got.InputSchema.Properties["req_param"] == "MUTATED" {
 		t.Fatal("registry input schema properties map was mutated via input reference!")
 	}
+	if got.OutputSchema.Required[0] == "MUTATED" {
+		t.Fatal("registry output schema required slice was mutated via input reference!")
+	}
+	if got.OutputSchema.Properties["result"] == "MUTATED" {
+		t.Fatal("registry output schema properties map was mutated via input reference!")
+	}
 
-	// Mutate returned definition
+	// 2. Mutate returned struct fields after Get
 	got.AllowedContexts[0] = "MUTATED_AFTER_GET"
-	got.InputSchema.Properties["query"] = "MUTATED_AFTER_GET"
+	got.InputSchema.Properties["req_param"] = "MUTATED_AFTER_GET"
+	got.OutputSchema.Properties["result"] = "MUTATED_AFTER_GET"
 
 	got2, _ := r.Get("memory.search")
 	if got2.AllowedContexts[0] == "MUTATED_AFTER_GET" {
 		t.Fatal("registry allowed contexts was mutated via returned Get reference!")
 	}
-	if got2.InputSchema.Properties["query"] == "MUTATED_AFTER_GET" {
+	if got2.InputSchema.Properties["req_param"] == "MUTATED_AFTER_GET" {
 		t.Fatal("registry input schema properties was mutated via returned Get reference!")
 	}
+	if got2.OutputSchema.Properties["result"] == "MUTATED_AFTER_GET" {
+		t.Fatal("registry output schema properties was mutated via returned Get reference!")
+	}
 
-	// Mutate List elements
+	// 3. Mutate returned List elements
 	list := r.List()
 	list[0].AllowedContexts[0] = "MUTATED_LIST"
+	list[0].InputSchema.Properties["req_param"] = "MUTATED_LIST"
 
 	got3, _ := r.Get("memory.search")
 	if got3.AllowedContexts[0] == "MUTATED_LIST" {
 		t.Fatal("registry state was mutated via returned List reference!")
+	}
+	if got3.InputSchema.Properties["req_param"] == "MUTATED_LIST" {
+		t.Fatal("registry state input schema properties was mutated via returned List reference!")
 	}
 }

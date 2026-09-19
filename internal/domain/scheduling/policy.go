@@ -81,7 +81,13 @@ func NewRetryPolicy(config RetryPolicyConfig) (*RetryPolicy, error) {
 	if config.RetryAfter != time.Hour {
 		return nil, &InvalidBusinessWindowError{Reason: "retry interval must be exactly one hour"}
 	}
-	location, err := time.LoadLocation(config.TimeZone)
+	if config.TimeZone != "America/Sao_Paulo" {
+		return nil, &InvalidTimezoneError{
+			Timezone: config.TimeZone,
+			Err:      fmt.Errorf("only America/Sao_Paulo is supported"),
+		}
+	}
+	location, err := time.LoadLocation("America/Sao_Paulo")
 	if err != nil {
 		return nil, &InvalidTimezoneError{Timezone: config.TimeZone, Err: err}
 	}

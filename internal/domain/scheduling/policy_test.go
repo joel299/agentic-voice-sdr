@@ -243,3 +243,37 @@ func TestNewRetryPolicyRejectsRetryIntervalsOtherThanOneHour(t *testing.T) {
 		})
 	}
 }
+
+func TestNewRetryPolicyTimezoneContractTable(t *testing.T) {
+	tests := []struct {
+		name     string
+		timezone string
+		wantErr  bool
+	}{
+		{name: "operational timezone", timezone: "America/Sao_Paulo"},
+		{name: "New York is outside contract", timezone: "America/New_York", wantErr: true},
+		{name: "UTC is outside contract", timezone: "UTC", wantErr: true},
+		{name: "London is outside contract", timezone: "Europe/London", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewRetryPolicy(RetryPolicyConfig{
+				MaxAttempts: 3,
+				RetryAfter:  time.Hour,
+				TimeZone:    tt.timezone,
+				Windows:     testWindows(),
+			})
+			var timezoneErr *InvalidTimezoneError
+			if tt.wantErr {
+				if !errors.As(err, &timezoneErr) {
+					t.Fatalf("NewRetryPolicy() error = %v, want *InvalidTimezoneError", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewRetryPolicy() error = %v", err)
+			}
+		})
+	}
+}

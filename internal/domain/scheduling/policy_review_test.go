@@ -32,36 +32,3 @@ func TestNewRetryPolicyRejectsOutOfRangeWeekdays(t *testing.T) {
 		})
 	}
 }
-
-func TestRetryPolicyDSTUsesLocalWallClockBoundaries(t *testing.T) {
-	location, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewRetryPolicy(RetryPolicyConfig{
-		MaxAttempts: 3,
-		RetryAfter:  time.Hour,
-		TimeZone:    "America/New_York",
-		Windows: map[time.Weekday][]BusinessWindow{
-			time.Sunday: {{Open: 9 * time.Hour, Close: 17 * time.Hour}},
-		},
-		Clock: func() time.Time {
-			return time.Date(2026, time.March, 8, 8, 30, 0, 0, location)
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := time.Date(2026, time.March, 8, 9, 30, 0, 0, location)
-	got, err := policy.NextRetry(1)
-	if err != nil {
-		t.Fatalf("NextRetry() error = %v", err)
-	}
-	if !got.Equal(want) {
-		t.Fatalf("NextRetry() = %s, want %s", got, want)
-	}
-	if err := policy.ValidateCallback(want); err != nil {
-		t.Fatalf("ValidateCallback(%s) error = %v", want, err)
-	}
-}

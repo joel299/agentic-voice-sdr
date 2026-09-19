@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1221,16 +1222,19 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 	}
 }
 
-func TestUnresolvedOwnershipFailClosed(t *testing.T) {
-	configDir := filepath.Join("/etc/asterisk/pjsip.d", fmt.Sprintf("unresolved_test_dir_%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		configDir = filepath.Join(os.TempDir(), fmt.Sprintf("unresolved_test_dir_%d", time.Now().UnixNano()))
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			t.Fatalf("failed to create config directory: %v", err)
-		}
-	}
-	defer os.RemoveAll(configDir)
+type mockRootFileInfo struct {
+	path string
+}
 
+func (m mockRootFileInfo) Name() string       { return filepath.Base(m.path) }
+func (m mockRootFileInfo) Size() int64        { return 4096 }
+func (m mockRootFileInfo) Mode() os.FileMode  { return 0755 | os.ModeDir }
+func (m mockRootFileInfo) ModTime() time.Time { return time.Now() }
+func (m mockRootFileInfo) IsDir() bool        { return true }
+func (m mockRootFileInfo) Sys() any           { return &syscall.Stat_t{Uid: 0, Gid: 0} }
+
+func TestUnresolvedOwnershipFailClosed(t *testing.T) {
+	tempDir := t.TempDir()
 	reloadExecuted := false
 	runner := &mockRunnerFunc{
 		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
@@ -1239,7 +1243,11 @@ func TestUnresolvedOwnershipFailClosed(t *testing.T) {
 		},
 	}
 
-	reloader := sip.NewRealAsteriskReloader(configDir, runner)
+	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+
+	reloader.SetDirStatFunc(func(path string) (os.FileInfo, error) {
+		return mockRootFileInfo{path: path}, nil
+	})
 
 	reloader.SetGroupLookupFunc(func(name string) (*user.Group, error) {
 		return nil, fmt.Errorf("group %s unavailable", name)
@@ -1260,7 +1268,7 @@ func TestUnresolvedOwnershipFailClosed(t *testing.T) {
 		t.Fatalf("security violation: Asterisk reload was executed when ownership policy could not be resolved")
 	}
 
-	targetPath := filepath.Join(configDir, trunkName+".conf")
+	targetPath := filepath.Join(tempDir, trunkName+".conf")
 	if _, statErr := os.Stat(targetPath); statErr == nil {
 		t.Fatalf("security violation: target config file %s exists on disk after unresolved ownership policy failure", targetPath)
 	}

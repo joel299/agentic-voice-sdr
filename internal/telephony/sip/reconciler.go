@@ -75,12 +75,16 @@ type ChownFunc func(name string, uid, gid int) error
 // GroupLookupFunc abstracts system group lookup for testability.
 type GroupLookupFunc func(name string) (*user.Group, error)
 
+// DirStatFunc abstracts directory stat querying for testability.
+type DirStatFunc func(path string) (os.FileInfo, error)
+
 // RealAsteriskReloader is the operational concrete implementation for Asterisk PJSIP integration.
 type RealAsteriskReloader struct {
 	configDir     string
 	runner        CommandRunner
 	chownFn       ChownFunc
 	groupLookupFn GroupLookupFunc
+	dirStatFn     DirStatFunc
 }
 
 // NewRealAsteriskReloader creates an operational RealAsteriskReloader instance.
@@ -96,6 +100,7 @@ func NewRealAsteriskReloader(configDir string, runner CommandRunner) *RealAsteri
 		runner:        runner,
 		chownFn:       os.Chown,
 		groupLookupFn: user.LookupGroup,
+		dirStatFn:     os.Stat,
 	}
 }
 
@@ -105,6 +110,14 @@ func (r *RealAsteriskReloader) SetGroupLookupFunc(fn GroupLookupFunc) {
 		fn = user.LookupGroup
 	}
 	r.groupLookupFn = fn
+}
+
+// SetDirStatFunc overrides the default os.Stat function for testing directory stat resolution.
+func (r *RealAsteriskReloader) SetDirStatFunc(fn DirStatFunc) {
+	if fn == nil {
+		fn = os.Stat
+	}
+	r.dirStatFn = fn
 }
 
 // SetChownFunc overrides the default os.Chown function for testing or custom security policy verification.
@@ -139,8 +152,13 @@ func (r *RealAsteriskReloader) applySecureFilePermissions(filePath string) error
 	targetGid := -1
 
 	// 2. Try deriving UID/GID from configDir or parent directory
+	dirStatFunc := r.dirStatFn
+	if dirStatFunc == nil {
+		dirStatFunc = os.Stat
+	}
+
 	if r.configDir != "" {
-		if info, err := os.Stat(r.configDir); err == nil {
+		if info, err := dirStatFunc(r.configDir); err == nil {
 			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 				if stat.Uid != 0 {
 					targetUid = int(stat.Uid)
@@ -154,7 +172,7 @@ func (r *RealAsteriskReloader) applySecureFilePermissions(filePath string) error
 		if targetGid <= 0 {
 			parent := filepath.Dir(r.configDir)
 			if parent != "" && parent != "/" {
-				if info, err := os.Stat(parent); err == nil {
+				if info, err := dirStatFunc(parent); err == nil {
 					if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 						if stat.Gid != 0 {
 							targetGid = int(stat.Gid)

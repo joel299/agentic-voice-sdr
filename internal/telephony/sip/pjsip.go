@@ -13,11 +13,6 @@ const pjsipTmplText = `; =======================================================
 ; Generated automatically by Agentic Voice SDR SIP Reconciler
 ; ==============================================================================
 
-[transport-{{ .Transport }}]
-type=transport
-protocol={{ .Transport }}
-bind=0.0.0.0:{{ if eq .Transport "tls" }}5061{{ else }}5060{{ end }}
-
 {{ if eq .AuthType "userpass" }}[trunk-{{ .Name }}-auth]
 type=auth
 auth_type=userpass

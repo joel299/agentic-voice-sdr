@@ -73,6 +73,7 @@ type AsteriskReloader interface {
 	ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error
 	RemovePJSIPConfig(ctx context.Context, trunkName string) error
 	CheckAsteriskHealth(ctx context.Context) (bool, error)
+	CheckTransport(ctx context.Context, transport TransportType) (bool, error)
 	CheckEndpoint(ctx context.Context, trunkName string) (bool, error)
 	CheckRegistration(ctx context.Context, trunkName string) (string, bool, error)
 }
@@ -119,7 +120,7 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
@@ -146,7 +147,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 	bakPath := targetPath + ".bak"
 
 	// Step 1: Write temp file with 0600 permissions
-	if err := os.WriteFile(tmpPath, []byte(pjsipConf), 0600); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(pjsipConf), 0644); err != nil {
 		return fmt.Errorf("failed to write temp PJSIP config file %s: %w", tmpPath, err)
 	}
 
@@ -297,13 +298,34 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	return nil
 }
 
+// CheckTransport queries Asterisk CLI to confirm the specified shared transport is provisioned in Asterisk.
+func (r *RealAsteriskReloader) CheckTransport(ctx context.Context, transport TransportType) (bool, error) {
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show transport transport-%s", transport))
+	if err != nil {
+		return false, fmt.Errorf("asterisk CLI query failed for transport transport-%s: %w", transport, err)
+	}
+
+	lowerOut := strings.ToLower(out)
+	if strings.Contains(lowerOut, "unable to find object") || strings.Contains(lowerOut, "no objects found") || strings.Contains(lowerOut, "not found") {
+		return false, fmt.Errorf("transport transport-%s not configured in Asterisk", transport)
+	}
+	if strings.Contains(lowerOut, "transport:") || strings.Contains(lowerOut, "objects found: 1") || strings.Contains(lowerOut, fmt.Sprintf("transport-%s", transport)) {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("transport transport-%s not found in Asterisk output: %s", transport, out)
+}
+
 // CheckAsteriskHealth checks if Asterisk service process is responsive.
 func (r *RealAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, error) {
-	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "core show status")
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "core show version")
+	if err != nil {
+		out, err = r.runner.RunCommand(ctx, "asterisk", "-rx", "core show uptime")
+	}
 	if err != nil {
 		return false, fmt.Errorf("asterisk health check failed: %w, output: %s", err, out)
 	}
-	if strings.Contains(strings.ToLower(out), "asterisk") {
+	if strings.Contains(strings.ToLower(out), "asterisk") || strings.Contains(strings.ToLower(out), "system uptime") {
 		return true, nil
 	}
 	return false, fmt.Errorf("asterisk status output invalid: %s", out)
@@ -311,6 +333,17 @@ func (r *RealAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, e
 
 // CheckEndpoint queries Asterisk CLI to confirm the endpoint was loaded into Asterisk runtime.
 func (r *RealAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show endpoint trunk-%s", trunkName))
+		if err == nil {
+			lowerOut := strings.ToLower(out)
+			if (strings.Contains(lowerOut, "endpoint:") || strings.Contains(lowerOut, strings.ToLower(trunkName))) && !strings.Contains(lowerOut, "unable to find object") {
+				return true, nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show endpoint trunk-%s", trunkName))
 	if err != nil {
 		return false, fmt.Errorf("failed to query endpoint status: %w", err)
@@ -348,13 +381,14 @@ func (r *RealAsteriskReloader) CheckRegistration(ctx context.Context, trunkName 
 
 // Manager coordinates SIP trunk configuration, validation, reconciliation, and status tracking.
 type Manager struct {
-	mu           sync.RWMutex
-	trunkLocks   map[string]*sync.Mutex
-	trunks       map[string]TrunkConfig
-	statuses     map[string]StatusReport
-	pjsipConfigs map[string]string
-	dialer       NetworkDialer
-	reloader     AsteriskReloader
+	mu             sync.RWMutex
+	globalReloadMu sync.Mutex
+	trunkLocks     map[string]*sync.Mutex
+	trunks         map[string]TrunkConfig
+	statuses       map[string]StatusReport
+	pjsipConfigs   map[string]string
+	dialer         NetworkDialer
+	reloader       AsteriskReloader
 }
 
 // NewManager creates a new SIP Manager instance. Returns error if required dependencies are nil.
@@ -396,6 +430,10 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	trunkLock := m.getTrunkLock(cfg.Name)
 	trunkLock.Lock()
 	defer trunkLock.Unlock()
+
+	// Acquire global reload mutex to serialize Asterisk runtime reload/verification transactions
+	m.globalReloadMu.Lock()
+	defer m.globalReloadMu.Unlock()
 
 	if err := cfg.Validate(); err != nil {
 		report := StatusReport{
@@ -512,6 +550,15 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 			healthErr = fmt.Errorf("asterisk health status is unhealthy")
 		}
 		return rollbackTransaction(fmt.Errorf("asterisk health check failed: %w", healthErr), StatusConnectionError)
+	}
+
+	// Step 5b: Check Shared Transport Provisioned in Asterisk
+	tpActive, tpErr := m.reloader.CheckTransport(ctx, cfg.Transport)
+	if tpErr != nil || !tpActive {
+		if tpErr == nil {
+			tpErr = fmt.Errorf("shared transport transport-%s not provisioned in Asterisk", cfg.Transport)
+		}
+		return rollbackTransaction(fmt.Errorf("asterisk transport check failed: %w", tpErr), StatusConfigured)
 	}
 
 	// Step 6: Check Endpoint Existence in Asterisk

@@ -3,11 +3,12 @@ package sip_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
@@ -46,6 +47,8 @@ func (m *mockDialer) LookupHost(ctx context.Context, host string) ([]string, err
 
 type MockAsteriskReloader struct {
 	Healthy           bool
+	TransportInactive bool
+	TransportErr      error
 	EndpointActive    bool
 	RegistrationState string
 	ReloadErr         error
@@ -98,6 +101,16 @@ func (m *MockAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, e
 		return false, m.HealthErr
 	}
 	return m.Healthy, nil
+}
+
+func (m *MockAsteriskReloader) CheckTransport(ctx context.Context, transport sip.TransportType) (bool, error) {
+	if m.TransportErr != nil {
+		return false, m.TransportErr
+	}
+	if m.TransportInactive {
+		return false, fmt.Errorf("transport transport-%s not provisioned in Asterisk", transport)
+	}
+	return true, nil
 }
 
 func (m *MockAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
@@ -550,11 +563,14 @@ type mockRunner struct {
 
 func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
 	cmdStr := strings.Join(args, " ")
-	if strings.Contains(cmdStr, "core show status") {
+	if strings.Contains(cmdStr, "core show version") || strings.Contains(cmdStr, "core show status") || strings.Contains(cmdStr, "core show uptime") {
 		if r.statusOutput != "" {
 			return r.statusOutput, nil
 		}
 		return "Asterisk 20.5.0", nil
+	}
+	if strings.Contains(cmdStr, "pjsip show transport") {
+		return "Transport: transport-udp/udp", nil
 	}
 	if strings.Contains(cmdStr, "pjsip show endpoint") {
 		if r.endpointOutput != "" {
@@ -737,46 +753,26 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 }
 
 type concurrentTestReloader struct {
-	base          sip.AsteriskReloader
-	mu            sync.Mutex
-	stageChannels map[string]chan struct{}
-	enteredStage  chan string
+	base         sip.AsteriskReloader
+	enteredStage chan string
+	proceedStage chan struct{}
 }
 
 func newConcurrentTestReloader(base sip.AsteriskReloader) *concurrentTestReloader {
 	return &concurrentTestReloader{
-		base:          base,
-		stageChannels: make(map[string]chan struct{}),
-		enteredStage:  make(chan string, 10),
+		base:         base,
+		enteredStage: make(chan string, 10),
+		proceedStage: make(chan struct{}, 10),
 	}
 }
 
-func (r *concurrentTestReloader) allowStage(trunkName string) {
-	r.mu.Lock()
-	ch, ok := r.stageChannels[trunkName]
-	if !ok {
-		ch = make(chan struct{})
-		r.stageChannels[trunkName] = ch
-	}
-	r.mu.Unlock()
-	select {
-	case <-ch:
-		// already closed
-	default:
-		close(ch)
-	}
+func (r *concurrentTestReloader) allowStage() {
+	r.proceedStage <- struct{}{}
 }
 
 func (r *concurrentTestReloader) StagePJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
 	r.enteredStage <- trunkName
-	r.mu.Lock()
-	ch, ok := r.stageChannels[trunkName]
-	if !ok {
-		ch = make(chan struct{})
-		r.stageChannels[trunkName] = ch
-	}
-	r.mu.Unlock()
-	<-ch
+	<-r.proceedStage
 	return r.base.StagePJSIPConfig(ctx, trunkName, pjsipConf)
 }
 
@@ -794,6 +790,9 @@ func (r *concurrentTestReloader) RemovePJSIPConfig(ctx context.Context, trunkNam
 }
 func (r *concurrentTestReloader) CheckAsteriskHealth(ctx context.Context) (bool, error) {
 	return r.base.CheckAsteriskHealth(ctx)
+}
+func (r *concurrentTestReloader) CheckTransport(ctx context.Context, transport sip.TransportType) (bool, error) {
+	return r.base.CheckTransport(ctx, transport)
 }
 func (r *concurrentTestReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
 	return r.base.CheckEndpoint(ctx, trunkName)
@@ -846,7 +845,7 @@ func TestSameTrunkConcurrentSerialization(t *testing.T) {
 		t.Fatalf("expected first staged trunk to be %s, got %s", trunkName, firstStaged)
 	}
 
-	// While Goroutine 1 is blocked in stage (holding per-trunk mutex for trunksame),
+	// While Goroutine 1 is blocked in stage (holding per-trunk mutex and globalReloadMu),
 	// start Goroutine 2 for the SAME trunk (trunkV2)
 	go2Done := make(chan error, 1)
 	go func() {
@@ -854,7 +853,7 @@ func TestSameTrunkConcurrentSerialization(t *testing.T) {
 		go2Done <- applyErr
 	}()
 
-	// Also test an independent trunk to verify non-blocking behavior
+	// Also test an independent trunk
 	otherTrunkName := "trunkother"
 	cfgOther := sip.TrunkConfig{
 		Name:     otherTrunkName,
@@ -868,37 +867,23 @@ func TestSameTrunkConcurrentSerialization(t *testing.T) {
 		goOtherDone <- applyErr
 	}()
 
-	// Independent trunk should enter StagePJSIPConfig without blocking on trunksame
-	otherStaged := <-testReloader.enteredStage
-	if otherStaged != otherTrunkName {
-		t.Fatalf("expected independent staged trunk to be %s, got %s", otherTrunkName, otherStaged)
-	}
-	// Allow independent trunk to complete
-	testReloader.allowStage(otherTrunkName)
-	if err := <-goOtherDone; err != nil {
-		t.Fatalf("independent trunk apply failed: %v", err)
-	}
-
-	// At this point, Goroutine 2 for trunksame is STILL blocked on the per-trunk mutex
-	// Now release Goroutine 1
-	testReloader.allowStage(trunkName)
+	// Release Goroutine 1 so it can complete commit and release locks
+	testReloader.allowStage()
 	if err := <-go1Done; err != nil {
 		t.Fatalf("goroutine 1 apply failed: %v", err)
 	}
 
-	// Now Goroutine 2 can acquire per-trunk mutex and enter stage
-	secondStaged := <-testReloader.enteredStage
-	if secondStaged != trunkName {
-		t.Fatalf("expected second staged trunk to be %s, got %s", trunkName, secondStaged)
+	// After Goroutine 1 finishes, remaining queued operations (go2 and goOther) proceed in order
+	for i := 0; i < 2; i++ {
+		<-testReloader.enteredStage
+		testReloader.allowStage()
 	}
-	// Create new channel for second stage pass of trunksame
-	testReloader.mu.Lock()
-	testReloader.stageChannels[trunkName] = make(chan struct{})
-	testReloader.mu.Unlock()
-	testReloader.allowStage(trunkName)
 
 	if err := <-go2Done; err != nil {
 		t.Fatalf("goroutine 2 apply failed: %v", err)
+	}
+	if err := <-goOtherDone; err != nil {
+		t.Fatalf("goroutine other apply failed: %v", err)
 	}
 
 	// Verify final disk state consistency
@@ -925,5 +910,188 @@ func TestSameTrunkConcurrentSerialization(t *testing.T) {
 	storedCfg, ok := mgr.GetTrunk(trunkName)
 	if !ok || storedCfg.Host != "10.0.0.2" {
 		t.Errorf("expected manager stored config to be V2 (10.0.0.2), got: %+v", storedCfg)
+	}
+}
+
+func TestPJSIPSharedTransportConfigGeneration(t *testing.T) {
+	cfgUDP1 := sip.TrunkConfig{Name: "udp1", Host: "10.0.0.1", Transport: sip.TransportUDP, AuthType: sip.AuthIP, Enabled: true}
+	cfgUDP2 := sip.TrunkConfig{Name: "udp2", Host: "10.0.0.2", Transport: sip.TransportUDP, AuthType: sip.AuthIP, Enabled: true}
+	cfgTCP1 := sip.TrunkConfig{Name: "tcp1", Host: "10.0.0.3", Transport: sip.TransportTCP, AuthType: sip.AuthIP, Enabled: true}
+
+	outUDP1, err := sip.GeneratePJSIPConfig(cfgUDP1)
+	if err != nil {
+		t.Fatalf("failed to generate UDP1 config: %v", err)
+	}
+	outUDP2, err := sip.GeneratePJSIPConfig(cfgUDP2)
+	if err != nil {
+		t.Fatalf("failed to generate UDP2 config: %v", err)
+	}
+	outTCP1, err := sip.GeneratePJSIPConfig(cfgTCP1)
+	if err != nil {
+		t.Fatalf("failed to generate TCP1 config: %v", err)
+	}
+
+	// Verify no type=transport section is defined inside per-trunk snippets
+	for _, out := range []string{outUDP1, outUDP2, outTCP1} {
+		if strings.Contains(out, "type=transport") {
+			t.Errorf("PJSIP trunk snippet MUST NOT contain type=transport section: %s", out)
+		}
+		if strings.Contains(out, "[transport-udp]") || strings.Contains(out, "[transport-tcp]") || strings.Contains(out, "[transport-tls]") {
+			t.Errorf("PJSIP trunk snippet MUST NOT define transport headers: %s", out)
+		}
+	}
+
+	// Verify endpoints reference shared transport
+	if !strings.Contains(outUDP1, "transport=transport-udp") {
+		t.Errorf("UDP1 endpoint must reference transport=transport-udp, got: %s", outUDP1)
+	}
+	if !strings.Contains(outUDP2, "transport=transport-udp") {
+		t.Errorf("UDP2 endpoint must reference transport=transport-udp, got: %s", outUDP2)
+	}
+	if !strings.Contains(outTCP1, "transport=transport-tcp") {
+		t.Errorf("TCP1 endpoint must reference transport=transport-tcp, got: %s", outTCP1)
+	}
+}
+
+func TestCheckTransportFailClosed(t *testing.T) {
+	dialer := &mockDialer{}
+	reloader := &MockAsteriskReloader{Healthy: true, TransportInactive: true, EndpointActive: true}
+	mgr, _ := sip.NewManager(dialer, reloader)
+
+	cfg := sip.TrunkConfig{Name: "notransport", Host: "sip.example.invalid", AuthType: sip.AuthIP, Transport: sip.TransportUDP, Enabled: true}
+	report, err := mgr.ApplyTrunk(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error when shared transport is missing from Asterisk, got nil")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Errorf("expected transport check error, got: %v", err)
+	}
+	if report.Status == sip.StatusReady {
+		t.Errorf("trunk status MUST NOT reach READY when shared transport is missing, got: %s", report.Status)
+	}
+}
+
+func TestGlobalAsteriskTransactionLock(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "pjsip-global-lock-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dialer := &mockDialer{}
+	runner := &mockRunner{}
+	realReloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+	testReloader := newConcurrentTestReloader(realReloader)
+
+	mgr, err := sip.NewManager(dialer, testReloader)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	cfgA := sip.TrunkConfig{Name: "trunka", Host: "10.0.0.1", AuthType: sip.AuthIP, Enabled: true}
+	cfgB := sip.TrunkConfig{Name: "trunkb", Host: "10.0.0.2", AuthType: sip.AuthIP, Enabled: true}
+
+	goADone := make(chan error, 1)
+	go func() {
+		_, applyErr := mgr.ApplyTrunk(context.Background(), cfgA)
+		goADone <- applyErr
+	}()
+
+	// Wait for Trunk A to enter stage
+	stagedA := <-testReloader.enteredStage
+	if stagedA != "trunka" {
+		t.Fatalf("expected trunka to enter stage first, got %s", stagedA)
+	}
+
+	// While Trunk A holds globalReloadMu, start Trunk B (a DIFFERENT trunk)
+	goBDone := make(chan error, 1)
+	go func() {
+		_, applyErr := mgr.ApplyTrunk(context.Background(), cfgB)
+		goBDone <- applyErr
+	}()
+
+	// Verify Trunk B cannot enter stage because globalReloadMu is held by Trunk A
+	select {
+	case stagedB := <-testReloader.enteredStage:
+		t.Fatalf("CRITICAL SECURITY VIOLATION: Trunk B entered stage (%s) while Trunk A held globalReloadMu!", stagedB)
+	default:
+		// Trunk B is properly waiting on globalReloadMu
+	}
+
+	// Release Trunk A
+	testReloader.allowStage()
+	if err := <-goADone; err != nil {
+		t.Fatalf("trunk A apply failed: %v", err)
+	}
+
+	// Now Trunk B can acquire globalReloadMu and enter stage
+	stagedB := <-testReloader.enteredStage
+	if stagedB != "trunkb" {
+		t.Fatalf("expected trunkb to enter stage second, got %s", stagedB)
+	}
+	testReloader.allowStage()
+	if err := <-goBDone; err != nil {
+		t.Fatalf("trunk B apply failed: %v", err)
+	}
+}
+
+func TestRealAsteriskIntegrationSmoke(t *testing.T) {
+	if _, err := exec.LookPath("asterisk"); err != nil {
+		t.Skip("skipping real Asterisk smoke test: asterisk binary not in PATH")
+	}
+
+	configDir := "/etc/asterisk/pjsip.d"
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Skipf("skipping real Asterisk smoke test: unable to create %s: %v", configDir, err)
+	}
+
+	dialer := &mockDialer{}
+	reloader := sip.NewRealAsteriskReloader(configDir, nil)
+	mgr, err := sip.NewManager(dialer, reloader)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	trunkName := "smoketestreal"
+	cfg := sip.TrunkConfig{
+		Name:                 trunkName,
+		Host:                 "127.0.0.1",
+		Port:                 5060,
+		Transport:            sip.TransportUDP,
+		AuthType:             sip.AuthIP,
+		RegistrationRequired: false,
+		Enabled:              true,
+	}
+
+	// 1. Apply trunk
+	status, err := mgr.ApplyTrunk(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("failed to apply real trunk in Asterisk: %v", err)
+	}
+	if status.Status != sip.StatusReady {
+		t.Fatalf("expected status READY for real trunk, got: %s (error: %s)", status.Status, status.LastError)
+	}
+
+	// 2. Query real Asterisk CLI to verify endpoint exists
+	active, epErr := reloader.CheckEndpoint(context.Background(), trunkName)
+	if epErr != nil || !active {
+		t.Fatalf("expected endpoint trunk-%s to be active in real Asterisk CLI, got active=%t, err=%v", trunkName, active, epErr)
+	}
+
+	// 3. Disable trunk
+	cfgDisable := cfg
+	cfgDisable.Enabled = false
+	statusDisable, err := mgr.ApplyTrunk(context.Background(), cfgDisable)
+	if err != nil {
+		t.Fatalf("failed to disable real trunk in Asterisk: %v", err)
+	}
+	if statusDisable.Status != sip.StatusDisabled {
+		t.Fatalf("expected status DISABLED, got: %s", statusDisable.Status)
+	}
+
+	// 4. Query real Asterisk CLI to verify endpoint is gone
+	activeAfterDisable, _ := reloader.CheckEndpoint(context.Background(), trunkName)
+	if activeAfterDisable {
+		t.Fatalf("expected endpoint trunk-%s to be removed from real Asterisk after disable", trunkName)
 	}
 }

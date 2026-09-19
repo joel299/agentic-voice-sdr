@@ -34,8 +34,10 @@ jobs:
           git fetch origin "${{ github.base_ref }}" --depth=1
 
           mapfile -t FILES < <(git diff --name-only "${BASE}...HEAD")
-          printf 'Changed files:\n'
-          printf ' - %s\n' "${FILES[@]}"
+          printf 'Changed files:
+'
+          printf ' - %s
+' "${FILES[@]}"
 
           allowed() {
             local file="$1"
@@ -48,6 +50,9 @@ jobs:
                 ;;
               agent/antigravity/redis-rabbitmq-dev-infra)
                 [[ "$file" == ".env.example" || "$file" == deploy/dev/* || "$file" == scripts/infra/* || "$file" == docs/infra/* ]]
+                ;;
+              agent/antigravity/postgres-outbox-dev-foundation)
+                [[ "$file" == ".env.example" || "$file" == deploy/dev/* || "$file" == scripts/db/* || "$file" == docs/infra/* || "$file" == .github/workflows/* ]]
                 ;;
               agent/cursor/audiosocket-frame-codec)
                 [[ "$file" == internal/telephony/audiosocket/* ]]
@@ -153,7 +158,7 @@ jobs:
         run: go build ./...
 
   infra-quality:
-    name: Redis RabbitMQ Infra
+    name: Infrastructure Foundation Quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -161,6 +166,9 @@ jobs:
       RABBITMQ_DEFAULT_USER: ci-agentic
       RABBITMQ_DEFAULT_PASS: ci-rabbitmq-password
       RABBITMQ_DEFAULT_VHOST: /
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ci-postgres-password
+      POSTGRES_DB: agentic_voice_sdr_dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,7 +188,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in scripts/infra/*.sh; do
+          for script in scripts/infra/*.sh scripts/db/*.sh; do
             [[ -e "$script" ]] || continue
             bash -n "$script"
           done
@@ -194,5 +202,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x scripts/infra/smoke-test.sh
-          ./scripts/infra/smoke-test.sh --down
+          if [[ -f scripts/infra/smoke-test.sh ]]; then
+            chmod +x scripts/infra/smoke-test.sh
+            ./scripts/infra/smoke-test.sh --down
+          fi
+
+      - name: PostgreSQL + Outbox foundation smoke test
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/db/smoke-test.sh ]]; then
+            chmod +x scripts/db/smoke-test.sh
+            ./scripts/db/smoke-test.sh --down
+          fi

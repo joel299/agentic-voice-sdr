@@ -19,7 +19,7 @@ State Machine Update <- Persistence <- Tool Execution / WhatsApp Fallback
 ## Functional Scope (MVP)
 
 - **Direction**: outbound only.
-- **Concurrency**: one concurrent active call per channel instance.
+- **Concurrency**: one concurrent active call globally in the MVP (`MAX_CONCURRENT_CALLS=1`).
 - **Target call duration**: 2–3 minutes per interaction.
 - **Attempt budget**: up to three dial attempts per lead.
 - **Retry window**: retry after one hour, only inside configurable business hours, using `America/Sao_Paulo` as the timezone.
@@ -30,7 +30,7 @@ State Machine Update <- Persistence <- Tool Execution / WhatsApp Fallback
 
 ## Realtime Architecture Constraint
 
-> **Strict audio isolation rule:** Redis, RabbitMQ, PostgreSQL, n8n, and external integrations must never process or carry raw PCM/audio frames. Audio stays on the realtime path between the telephony boundary, the Go voice engine, and the approved voice provider connection.
+> **Strict audio isolation rule:** Redis, RabbitMQ, PostgreSQL, n8n, and unrelated external integrations must never process or carry raw PCM/audio frames. Audio remains exclusively on the approved realtime path between the telephony boundary, the Go voice engine, and Gemini Live / the approved voice provider connection.
 
 ## Roadmap and Waves
 

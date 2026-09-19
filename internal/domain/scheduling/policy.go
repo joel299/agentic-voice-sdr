@@ -75,6 +75,12 @@ func NewRetryPolicy(config RetryPolicyConfig) (*RetryPolicy, error) {
 	if config.RetryAfter <= 0 {
 		return nil, &InvalidBusinessWindowError{Reason: "retry interval must be positive"}
 	}
+	if config.MaxAttempts > 3 {
+		return nil, &InvalidBusinessWindowError{Reason: "max attempts cannot exceed 3"}
+	}
+	if config.RetryAfter != time.Hour {
+		return nil, &InvalidBusinessWindowError{Reason: "retry interval must be exactly one hour"}
+	}
 	location, err := time.LoadLocation(config.TimeZone)
 	if err != nil {
 		return nil, &InvalidTimezoneError{Timezone: config.TimeZone, Err: err}

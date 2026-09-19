@@ -175,3 +175,71 @@ func TestNewRetryPolicyRejectsInvalidConfigurationTable(t *testing.T) {
 		})
 	}
 }
+
+func TestNewRetryPolicyRejectsAttemptsAboveProductMaximum(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxAttempts int
+		wantErr     bool
+	}{
+		{name: "one attempt", maxAttempts: 1},
+		{name: "two attempts", maxAttempts: 2},
+		{name: "three attempts", maxAttempts: 3},
+		{name: "four attempts", maxAttempts: 4, wantErr: true},
+		{name: "ten attempts", maxAttempts: 10, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewRetryPolicy(RetryPolicyConfig{
+				MaxAttempts: tt.maxAttempts,
+				RetryAfter:  time.Hour,
+				TimeZone:    "America/Sao_Paulo",
+				Windows:     testWindows(),
+			})
+			var configErr *InvalidBusinessWindowError
+			if tt.wantErr {
+				if !errors.As(err, &configErr) {
+					t.Fatalf("NewRetryPolicy() error = %v, want *InvalidBusinessWindowError", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewRetryPolicy() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestNewRetryPolicyRejectsRetryIntervalsOtherThanOneHour(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryAfter time.Duration
+		wantErr    bool
+	}{
+		{name: "one hour", retryAfter: time.Hour},
+		{name: "thirty minutes", retryAfter: 30 * time.Minute, wantErr: true},
+		{name: "two hours", retryAfter: 2 * time.Hour, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewRetryPolicy(RetryPolicyConfig{
+				MaxAttempts: 3,
+				RetryAfter:  tt.retryAfter,
+				TimeZone:    "America/Sao_Paulo",
+				Windows:     testWindows(),
+			})
+			var configErr *InvalidBusinessWindowError
+			if tt.wantErr {
+				if !errors.As(err, &configErr) {
+					t.Fatalf("NewRetryPolicy() error = %v, want *InvalidBusinessWindowError", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewRetryPolicy() error = %v", err)
+			}
+		})
+	}
+}

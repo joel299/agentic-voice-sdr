@@ -72,11 +72,15 @@ type AsteriskReloader interface {
 // ChownFunc abstracts file ownership setting for testability.
 type ChownFunc func(name string, uid, gid int) error
 
+// GroupLookupFunc abstracts system group lookup for testability.
+type GroupLookupFunc func(name string) (*user.Group, error)
+
 // RealAsteriskReloader is the operational concrete implementation for Asterisk PJSIP integration.
 type RealAsteriskReloader struct {
-	configDir string
-	runner    CommandRunner
-	chownFn   ChownFunc
+	configDir     string
+	runner        CommandRunner
+	chownFn       ChownFunc
+	groupLookupFn GroupLookupFunc
 }
 
 // NewRealAsteriskReloader creates an operational RealAsteriskReloader instance.
@@ -88,10 +92,19 @@ func NewRealAsteriskReloader(configDir string, runner CommandRunner) *RealAsteri
 		runner = OSCommandRunner{}
 	}
 	return &RealAsteriskReloader{
-		configDir: configDir,
-		runner:    runner,
-		chownFn:   os.Chown,
+		configDir:     configDir,
+		runner:        runner,
+		chownFn:       os.Chown,
+		groupLookupFn: user.LookupGroup,
 	}
+}
+
+// SetGroupLookupFunc overrides the default user.LookupGroup function for testing group availability.
+func (r *RealAsteriskReloader) SetGroupLookupFunc(fn GroupLookupFunc) {
+	if fn == nil {
+		fn = user.LookupGroup
+	}
+	r.groupLookupFn = fn
 }
 
 // SetChownFunc overrides the default os.Chown function for testing or custom security policy verification.
@@ -154,22 +167,29 @@ func (r *RealAsteriskReloader) applySecureFilePermissions(filePath string) error
 
 	// 3. If GID is still root or unassigned, lookup "asterisk" group explicitly
 	if targetGid <= 0 {
-		if g, err := user.LookupGroup("asterisk"); err == nil {
+		groupLookup := r.groupLookupFn
+		if groupLookup == nil {
+			groupLookup = user.LookupGroup
+		}
+		if g, err := groupLookup("asterisk"); err == nil {
 			if gid, err := strconv.Atoi(g.Gid); err == nil {
 				targetGid = gid
 			}
 		}
 	}
 
-	// 4. Apply chown if target UID or GID was resolved. Fail closed on any error (no silent EPERM bypass)
-	if targetUid > 0 || targetGid > 0 {
-		chownFunc := r.chownFn
-		if chownFunc == nil {
-			chownFunc = os.Chown
-		}
-		if err := chownFunc(filePath, targetUid, targetGid); err != nil {
-			return fmt.Errorf("failed to apply chown (%d:%d) on %s: %w", targetUid, targetGid, filePath, err)
-		}
+	// 4. Fail closed if no valid target GID ownership policy could be determined (targetGid == -1 forbidden)
+	if targetGid <= 0 {
+		return fmt.Errorf("security policy failure: unable to resolve valid Asterisk GID ownership policy for %s (no non-root directory group ownership and 'asterisk' group unavailable)", filePath)
+	}
+
+	// 5. Apply chown with resolved policy. Fail closed on any error (no silent EPERM bypass)
+	chownFunc := r.chownFn
+	if chownFunc == nil {
+		chownFunc = os.Chown
+	}
+	if err := chownFunc(filePath, targetUid, targetGid); err != nil {
+		return fmt.Errorf("failed to apply chown (%d:%d) on %s: %w", targetUid, targetGid, filePath, err)
 	}
 
 	// 5. Stat verification: confirm file permissions and target ownership strictly match policy

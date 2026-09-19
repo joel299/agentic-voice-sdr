@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1217,5 +1218,50 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 
 	if _, err := os.Stat(targetConfFile); err == nil {
 		t.Fatalf("PJSIP config file %s still exists after disabling trunk", targetConfFile)
+	}
+}
+
+func TestUnresolvedOwnershipFailClosed(t *testing.T) {
+	configDir := filepath.Join("/etc/asterisk/pjsip.d", fmt.Sprintf("unresolved_test_dir_%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		configDir = filepath.Join(os.TempDir(), fmt.Sprintf("unresolved_test_dir_%d", time.Now().UnixNano()))
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatalf("failed to create config directory: %v", err)
+		}
+	}
+	defer os.RemoveAll(configDir)
+
+	reloadExecuted := false
+	runner := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			reloadExecuted = true
+			return "success", nil
+		},
+	}
+
+	reloader := sip.NewRealAsteriskReloader(configDir, runner)
+
+	reloader.SetGroupLookupFunc(func(name string) (*user.Group, error) {
+		return nil, fmt.Errorf("group %s unavailable", name)
+	})
+
+	trunkName := "unresolvedownership"
+	pjsipConf := "[trunk-unresolvedownership]\ntype=endpoint\n"
+
+	err := reloader.StagePJSIPConfig(context.Background(), trunkName, pjsipConf)
+	if err == nil {
+		t.Fatalf("expected StagePJSIPConfig to fail closed when ownership policy cannot be resolved, got nil error")
+	}
+	if !strings.Contains(err.Error(), "unable to resolve valid Asterisk GID ownership policy") && !strings.Contains(err.Error(), "security policy failure") {
+		t.Fatalf("expected error message to mention security policy failure / unable to resolve policy, got: %v", err)
+	}
+
+	if reloadExecuted {
+		t.Fatalf("security violation: Asterisk reload was executed when ownership policy could not be resolved")
+	}
+
+	targetPath := filepath.Join(configDir, trunkName+".conf")
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		t.Fatalf("security violation: target config file %s exists on disk after unresolved ownership policy failure", targetPath)
 	}
 }

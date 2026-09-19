@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -36,6 +37,18 @@ func (p *apiProvider) SendMessage(context.Context, string, string, string, strin
 type apiSIP struct{ configured bool }
 
 func (s *apiSIP) Configure(context.Context, SIPConfigRequest) error { s.configured = true; return nil }
+
+type canonicalManager struct {
+	got   sip.TrunkConfig
+	err   error
+	calls int
+}
+
+func (m *canonicalManager) ApplyTrunk(_ context.Context, cfg sip.TrunkConfig) (sip.StatusReport, error) {
+	m.got = cfg.Clone()
+	m.calls++
+	return sip.StatusReport{TrunkName: cfg.Name, Status: sip.StatusReady}, m.err
+}
 
 func testAPI() (http.Handler, *apiSIP) {
 	provider := &apiProvider{instances: []whatsapp.Instance{{ID: "wa-1", Phone: "+5511", Status: whatsapp.StatusConnected}}}
@@ -125,4 +138,60 @@ func TestWhatsAppRouterCompositionWithFileConfigStore(t *testing.T) {
 	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
 		t.Fatalf("expected store path not to exist before config, got err: %v", err)
 	}
+}
+
+func TestSIPHTTPReachesCanonicalManagerWithExplicitMapping(t *testing.T) {
+	manager := &canonicalManager{}
+	configurator, err := NewCanonicalSIPConfigurator(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewRouterWithServices(testAPIService(), configurator)
+	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"provider-a","name":"main_trunk","host":"sip.example.test","port":5061,"transport":"tls","registrar":"sip.example.test","outbound_proxy":"proxy.example.test:5061","auth":{"type":"userpass","username":"alice","secret":"do-not-leak","realm":"example"},"from_user":"alice","from_domain":"example.test","caller_id":"Alice <sip:alice@example.test>","codecs":["opus","ulaw"],"registration_required":true,"enabled":true}`)
+	if res.Code != http.StatusOK || manager.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	}
+	if manager.got.Provider != "provider-a" || manager.got.Name != "main_trunk" || manager.got.Transport != sip.TransportTLS || manager.got.AuthType != sip.AuthUserPass || manager.got.AuthUsername != "alice" || manager.got.Secret != "do-not-leak" || manager.got.Registrar == "" || manager.got.OutboundProxy == "" || !manager.got.RegistrationRequired || !manager.got.Enabled || len(manager.got.Codecs) != 2 {
+		t.Fatalf("canonical mapping incorrect: %#v", manager.got)
+	}
+	if strings.Contains(res.Body.String(), "do-not-leak") {
+		t.Fatalf("secret leaked in response: %s", res.Body)
+	}
+}
+
+func TestSIPAuthMappingAndManagerFailure(t *testing.T) {
+	for _, authType := range []string{"ip", "none"} {
+		request := SIPConfigRequest{Provider: "p", Name: "n", Host: "sip.example.test", Port: 5060, Transport: "udp", Auth: SIPAuthRequest{Type: authType}, Enabled: false}
+		canonical, err := request.ToCanonical()
+		if err != nil || string(canonical.AuthType) != authType || canonical.Enabled {
+			t.Fatalf("auth mapping %q failed: cfg=%#v err=%v", authType, canonical, err)
+		}
+	}
+	manager := &canonicalManager{err: errors.New("asterisk unavailable")}
+	configurator, err := NewCanonicalSIPConfigurator(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewRouterWithServices(testAPIService(), configurator)
+	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"n","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"none"},"enabled":false}`)
+	if res.Code != http.StatusBadGateway || manager.calls != 1 || strings.Contains(res.Body.String(), "asterisk unavailable") {
+		t.Fatalf("manager failure handling incorrect: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	}
+}
+
+func TestSIPCompositionIsFailClosedOrCanonical(t *testing.T) {
+	if _, ok := configuredSIPConfigurator(config.Config{}).(unavailableSIPConfigurator); !ok {
+		t.Fatal("empty SIP runtime configuration must fail closed")
+	}
+	configDir := t.TempDir()
+	if _, ok := configuredSIPConfigurator(config.Config{SIPConfigDir: configDir}).(*CanonicalSIPConfigurator); !ok {
+		t.Fatal("configured SIP directory must construct canonical configurator")
+	}
+	if _, ok := configuredSIPConfigurator(config.Config{SIPConfigDir: filepath.Join(t.TempDir(), "missing")}).(unavailableSIPConfigurator); !ok {
+		t.Fatal("missing SIP directory must fail closed")
+	}
+}
+
+func testAPIService() *whatsapp.Service {
+	return whatsapp.NewService(whatsapp.NewRegistry(map[string]whatsapp.WhatsAppProvider{"test": &apiProvider{}}), nil)
 }

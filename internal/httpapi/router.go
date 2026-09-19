@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -32,7 +34,27 @@ func NewRouterWithConfig(cfg config.Config) http.Handler {
 	if cfg.WhatsAppConfigPath != "" {
 		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
 	}
-	return NewRouterWithWhatsAppStore(store)
+	return NewRouterWithServices(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg))
+}
+
+func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
+	if cfg.SIPConfigDir == "" {
+		return unavailableSIPConfigurator{}
+	}
+	info, err := os.Stat(cfg.SIPConfigDir)
+	if err != nil || !info.IsDir() {
+		return unavailableSIPConfigurator{}
+	}
+	reloader := sip.NewRealAsteriskReloader(cfg.SIPConfigDir, nil)
+	manager, err := sip.NewManager(sip.DefaultNetworkDialer{}, reloader)
+	if err != nil {
+		return unavailableSIPConfigurator{}
+	}
+	configurator, err := NewCanonicalSIPConfigurator(manager)
+	if err != nil {
+		return unavailableSIPConfigurator{}
+	}
+	return configurator
 }
 
 func NewRouterWithWhatsAppStore(store whatsapp.ConfigStore) http.Handler {

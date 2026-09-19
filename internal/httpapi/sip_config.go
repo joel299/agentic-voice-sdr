@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
 
 var errSIPBoundaryUnavailable = errors.New("sip configuration boundary unavailable")
@@ -60,6 +62,32 @@ type SIPSafeAuth struct {
 type SIPConfigurator interface {
 	Configure(context.Context, SIPConfigRequest) error
 }
+
+// CanonicalSIPConfigurator maps HTTP DTOs into the canonical SIP manager.
+type CanonicalSIPConfigurator struct {
+	manager interface {
+		ApplyTrunk(context.Context, sip.TrunkConfig) (sip.StatusReport, error)
+	}
+}
+
+func NewCanonicalSIPConfigurator(manager interface {
+	ApplyTrunk(context.Context, sip.TrunkConfig) (sip.StatusReport, error)
+}) (*CanonicalSIPConfigurator, error) {
+	if manager == nil {
+		return nil, errSIPBoundaryUnavailable
+	}
+	return &CanonicalSIPConfigurator{manager: manager}, nil
+}
+
+func (c *CanonicalSIPConfigurator) Configure(ctx context.Context, request SIPConfigRequest) error {
+	canonical, err := request.ToCanonical()
+	if err != nil {
+		return err
+	}
+	_, err = c.manager.ApplyTrunk(ctx, canonical)
+	return err
+}
+
 type unavailableSIPConfigurator struct{}
 
 func (unavailableSIPConfigurator) Configure(context.Context, SIPConfigRequest) error {
@@ -100,4 +128,21 @@ func (c SIPConfigRequest) Validate() error {
 }
 func (c SIPConfigRequest) SafeView() SIPSafeResponse {
 	return SIPSafeResponse{Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port, Transport: c.Transport, Registrar: c.Registrar, OutboundProxy: c.OutboundProxy, Auth: SIPSafeAuth{Type: c.Auth.Type, Username: c.Auth.Username, Realm: c.Auth.Realm}, FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired, Enabled: c.Enabled}
+}
+
+// ToCanonical performs the explicit HTTP DTO to canonical sip.TrunkConfig mapping.
+func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
+	if err := c.Validate(); err != nil {
+		return sip.TrunkConfig{}, err
+	}
+	return sip.TrunkConfig{
+		Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port,
+		Transport: sip.TransportType(strings.ToLower(strings.TrimSpace(c.Transport))),
+		Registrar: c.Registrar, OutboundProxy: c.OutboundProxy,
+		AuthType:     sip.AuthType(strings.ToLower(strings.TrimSpace(c.Auth.Type))),
+		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: c.Auth.Realm,
+		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID,
+		Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired,
+		Enabled: c.Enabled,
+	}, nil
 }

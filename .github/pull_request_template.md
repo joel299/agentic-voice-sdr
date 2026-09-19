@@ -24,6 +24,17 @@ Provide a concise summary of the changes introduced in this PR:
 - [ ] Zero fallback or hardcoded credentials added.
 - [ ] Repository governance and conventions respected.
 
+## Dual Tracking & Mirroring Checklist
+
+- **Linear GRU**: [link/id]
+- **GitHub Issue mirror**: [link/#]
+- [ ] Bidirectional cross-link established (Linear <-> GitHub Issue).
+- [ ] PR linked from Linear GRU.
+- [ ] PR linked from GitHub Issue mirror.
+- [ ] Shared Memory ID registered: [id]
+- [ ] Review and correction outcomes synchronized across Linear, GitHub Issue, and PR.
+- [ ] GitHub Issue mirror confirmed OPEN (remains OPEN until Linear GRU is moved to `Done` by Anorak).
+
 ## Verification & CI Evidence
 
 - **Test Results**:

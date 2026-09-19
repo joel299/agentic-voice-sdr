@@ -36,6 +36,21 @@ Required for product/architecture changes, destructive migrations, security/auth
 PASS -> Done -> unblock dependents.
 FAIL -> In Progress -> same owner -> targeted fix -> Review.
 
+## Dual tracking
+
+Every GRU must be tracked in both Linear and GitHub.
+
+Mandatory:
+- create the Linear GRU;
+- create a GitHub Issue mirror for the same GRU;
+- link Linear -> GitHub Issue and GitHub Issue -> Linear;
+- when implementation changes repository files, link the PR from both task records;
+- record review outcomes and correction requests in Linear, the GitHub Issue, and the PR;
+- keep GitHub Issue open while Linear is Backlog, Todo, In Progress, or In Review;
+- close the GitHub Issue only after Anorak moves Linear to Done.
+
+Linear is the control plane for state/dependencies. GitHub is the repository-side durable task/evidence mirror.
+
 ## CI gate
 
 Every implementation PR must pass the repository GitHub Actions workflow before returning to Review.

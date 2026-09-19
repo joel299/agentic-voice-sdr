@@ -7,12 +7,8 @@
 ## Core Flow
 
 ```text
-Lead Ingestion -> Campaign Dispatcher -> Command Queue -> Voice Engine
-                                                            |
-                                             AudioSocket / Asterisk / SIP
-                                                            |
-                                                   Gemini Live
-                                                            |
+Fale Paco SIP -> Asterisk -> AudioSocket -> Go Voice Engine -> Gemini Live WSS
+
 State Machine Update <- Persistence <- Tool Execution / WhatsApp Fallback
 ```
 
@@ -25,8 +21,8 @@ State Machine Update <- Persistence <- Tool Execution / WhatsApp Fallback
 - **Retry window**: retry after one hour, only inside configurable business hours, using `America/Sao_Paulo` as the timezone.
 - **Business hours**: configurable by policy or campaign; this document does not impose a fixed clock window or weekday schedule.
 - **Voicemail**: detect, end the call, and trigger the approved WhatsApp fallback.
-- **Pricing**: no price negotiation or custom quote disclosure.
-- **Recording and privacy**: no raw audio recording storage in the MVP; transcripts and metadata are persisted according to the approved contracts.
+- **Pricing**: no price negotiation or pricing disclosure in the MVP.
+- **Recording and privacy**: no audio recording in the MVP; transcripts and metadata are persisted according to the approved contracts.
 
 ## Realtime Architecture Constraint
 

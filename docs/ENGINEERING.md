@@ -49,7 +49,7 @@ Other approved technologies are referenced without an inferred version: REST/Ope
 
 Every pull request must pass the repository GitHub Actions workflow before review:
 
-- **Scope Policy**: changes match the assigned Linear issue scope.
+- **Scope Policy**: the workflow applies explicit path enforcement only to branches currently mapped in `.github/workflows/ci.yml`; unmapped branches do not receive path-specific validation, so reviewers remain responsible for validating the assigned Linear issue scope.
 - **Diff Quality**: formatting and diff hygiene are clean.
 - **Go Quality**: compilation, tests, and static checks pass when Go sources are present.
 - **Infrastructure validation**: applicable development infrastructure checks pass when infrastructure files are present.

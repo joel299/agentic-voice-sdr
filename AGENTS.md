@@ -21,12 +21,13 @@ SPEC -> TEST -> RED -> IMPLEMENT -> GREEN -> REFACTOR -> REGRESSION -> EVIDENCE 
 - Do not change architecture for convenience.
 - Do not silently add structural dependencies.
 
-## Agents
-- Hermes: scoped API/runtime implementation.
-- OpenClaw: isolated domain implementation.
-- Antigravity: infrastructure/integration implementation.
-- Cursor: precise repository edits, minimal diffs, local refactors and fast test feedback.
-- Anorak/Reviewer: validates specs, actual diff, tests, regression and evidence.
+## Official execution roster
+- Stark / Hermes: backend/core implementation — Go runtime, API, HTTP/WebSocket, telephony/AudioSocket boundaries and internal services.
+- Neriel / OpenClaw: domain/business logic — state machines, domain rules, agent behavior and tool orchestration.
+- Arquimedes / Antigravity: infrastructure/integrations — Redis, RabbitMQ, Docker/deploy, operational contracts and external integrations.
+- Anorak / Reviewer: validates specs, actual diff, tests, regression, evidence and scope. Reviewer does not execute implementation microtasks.
+
+Cursor is retired from task execution and must not be assigned as owner of new microtasks.
 
 ## Human gate
 Required for product/architecture changes, destructive migrations, security/auth, secrets, production, material cost or unspecified decisions.
@@ -34,7 +35,6 @@ Required for product/architecture changes, destructive migrations, security/auth
 ## Review
 PASS -> Done -> unblock dependents.
 FAIL -> In Progress -> same owner -> targeted fix -> Review.
-
 
 ## CI gate
 

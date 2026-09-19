@@ -61,6 +61,16 @@ type TrunkConfig struct {
 	Enabled              bool          `json:"enabled"`
 }
 
+// Clone returns a deep copy of TrunkConfig with cloned Codecs slice.
+func (c TrunkConfig) Clone() TrunkConfig {
+	copyCfg := c
+	if c.Codecs != nil {
+		copyCfg.Codecs = make([]string, len(c.Codecs))
+		copy(copyCfg.Codecs, c.Codecs)
+	}
+	return copyCfg
+}
+
 // String implements fmt.Stringer ensuring Secret is strictly masked.
 func (c TrunkConfig) String() string {
 	maskedSecret := ""
@@ -76,16 +86,21 @@ func (c TrunkConfig) GoString() string {
 	return c.String()
 }
 
-// Redacted returns a shallow copy with Secret masked for logging/tracing.
+// Redacted returns a deep copy with Secret masked for logging/tracing.
 func (c TrunkConfig) Redacted() TrunkConfig {
-	copyCfg := c
+	copyCfg := c.Clone()
 	if copyCfg.Secret != "" {
 		copyCfg.Secret = "*****"
 	}
 	return copyCfg
 }
 
-// Validate checks the configuration for semantic correctness.
+// hasInjectionChars checks if string contains CR, LF, or section injection characters.
+func hasInjectionChars(s string) bool {
+	return strings.ContainsAny(s, "\r\n[]")
+}
+
+// Validate checks the configuration for semantic correctness and injection safety.
 func (c *TrunkConfig) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("trunk name is required")
@@ -95,7 +110,36 @@ func (c *TrunkConfig) Validate() error {
 		return fmt.Errorf("trunk host is required")
 	}
 
-	if c.Port <= 0 {
+	// Injection check for all user-supplied string fields
+	stringFields := map[string]string{
+		"name":           c.Name,
+		"provider":       c.Provider,
+		"host":           c.Host,
+		"registrar":      c.Registrar,
+		"outbound_proxy":  c.OutboundProxy,
+		"auth_username":  c.AuthUsername,
+		"secret":         c.Secret,
+		"realm":          c.Realm,
+		"from_user":      c.FromUser,
+		"from_domain":    c.FromDomain,
+		"caller_id":      c.CallerID,
+	}
+
+	for fieldName, val := range stringFields {
+		if hasInjectionChars(val) {
+			return fmt.Errorf("security violation: field %s contains invalid line break or injection characters", fieldName)
+		}
+	}
+
+	for _, codec := range c.Codecs {
+		if hasInjectionChars(codec) {
+			return fmt.Errorf("security violation: codec %q contains invalid injection characters", codec)
+		}
+	}
+
+	if c.Port < 0 {
+		return fmt.Errorf("invalid port %d: port cannot be negative", c.Port)
+	} else if c.Port == 0 {
 		c.Port = 5060
 	} else if c.Port > 65535 {
 		return fmt.Errorf("invalid port %d: must be between 1 and 65535", c.Port)
@@ -134,14 +178,23 @@ func (c *TrunkConfig) Validate() error {
 		return fmt.Errorf("unsupported auth_type %q: must be userpass, ip, or none", c.AuthType)
 	}
 
-	if c.RegistrationRequired && c.AuthType == AuthUserPass {
-		if strings.TrimSpace(c.AuthUsername) == "" || strings.TrimSpace(c.Secret) == "" {
-			return fmt.Errorf("username and secret are required when registration_required is true")
+	if c.RegistrationRequired {
+		regIdentity := strings.TrimSpace(c.AuthUsername)
+		if regIdentity == "" {
+			regIdentity = strings.TrimSpace(c.FromUser)
+		}
+		if regIdentity == "" {
+			return fmt.Errorf("registration identity required: auth_username or from_user must be specified when registration_required is true")
 		}
 	}
 
 	if len(c.Codecs) == 0 {
 		c.Codecs = []string{"ulaw", "alaw"}
+	} else {
+		// Clone codecs array to prevent caller mutation
+		cloned := make([]string, len(c.Codecs))
+		copy(cloned, c.Codecs)
+		c.Codecs = cloned
 	}
 
 	return nil

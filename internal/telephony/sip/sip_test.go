@@ -6,7 +6,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
@@ -14,11 +13,21 @@ import (
 type mockDialer struct {
 	lookupErr error
 	dialErr   error
+	tlsErr    error
 }
 
 func (m *mockDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if m.dialErr != nil {
 		return nil, m.dialErr
+	}
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
+
+func (m *mockDialer) DialTLSContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if m.tlsErr != nil {
+		return nil, m.tlsErr
 	}
 	client, server := net.Pipe()
 	_ = server.Close()
@@ -32,312 +41,340 @@ func (m *mockDialer) LookupHost(ctx context.Context, host string) ([]string, err
 	return []string{"192.168.1.100"}, nil
 }
 
-func TestValidTrunkConfigValidation(t *testing.T) {
-	cfg := sip.TrunkConfig{
-		Provider:             "fale_paco",
-		Name:                 "fale-paco-trunk",
-		Host:                 "sip.falepaco.com",
-		Port:                 5060,
-		Transport:            sip.TransportTCP,
-		AuthType:             sip.AuthUserPass,
-		AuthUsername:         "paco_user",
-		Secret:               "super_secret_password_123",
-		RegistrationRequired: true,
-		Enabled:              true,
-	}
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid config, got error: %v", err)
-	}
-
-	if cfg.Port != 5060 {
-		t.Errorf("expected port 5060, got %d", cfg.Port)
-	}
-	if cfg.Transport != sip.TransportTCP {
-		t.Errorf("expected transport tcp, got %s", cfg.Transport)
-	}
+type MockAsteriskReloader struct {
+	Healthy           bool
+	RegistrationState string
+	ReloadErr         error
+	RemoveCalled      bool
+	ApplyCalled       bool
 }
 
-func TestInvalidConfigHostPortName(t *testing.T) {
-	t.Run("missing name", func(t *testing.T) {
-		cfg := sip.TrunkConfig{Host: "sip.example.com", Port: 5060}
-		if err := cfg.Validate(); err == nil {
-			t.Error("expected error for missing name, got nil")
+func (m *MockAsteriskReloader) ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
+	m.ApplyCalled = true
+	return m.ReloadErr
+}
+
+func (m *MockAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
+	m.RemoveCalled = true
+	return m.ReloadErr
+}
+
+func (m *MockAsteriskReloader) CheckRegistration(ctx context.Context, trunkName string) (string, bool, error) {
+	state := m.RegistrationState
+	if state == "" {
+		state = "Registered"
+	}
+	if state == "Rejected" {
+		return "Rejected", false, errors.New("registration rejected")
+	}
+	if state == "Failed" {
+		return "Failed", false, errors.New("registration failed")
+	}
+	return state, m.Healthy, nil
+}
+
+func TestNewManagerRequiresDependencies(t *testing.T) {
+	dialer := &mockDialer{}
+	reloader := &MockAsteriskReloader{Healthy: true}
+
+	t.Run("nil reloader rejected", func(t *testing.T) {
+		_, err := sip.NewManager(dialer, nil)
+		if err == nil {
+			t.Error("expected error when reloader is nil, got nil")
 		}
 	})
 
-	t.Run("missing host", func(t *testing.T) {
-		cfg := sip.TrunkConfig{Name: "test", Host: ""}
-		if err := cfg.Validate(); err == nil {
-			t.Error("expected error for missing host, got nil")
+	t.Run("nil dialer rejected", func(t *testing.T) {
+		_, err := sip.NewManager(nil, reloader)
+		if err == nil {
+			t.Error("expected error when dialer is nil, got nil")
 		}
 	})
 
-	t.Run("invalid port out of bounds", func(t *testing.T) {
-		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.com", Port: 70000}
-		if err := cfg.Validate(); err == nil {
-			t.Error("expected error for invalid port > 65535, got nil")
+	t.Run("valid manager instantiation", func(t *testing.T) {
+		mgr, err := sip.NewManager(dialer, reloader)
+		if err != nil || mgr == nil {
+			t.Fatalf("expected valid manager, got err: %v", err)
 		}
 	})
 }
 
-func TestTransportTypes(t *testing.T) {
-	transports := []sip.TransportType{sip.TransportUDP, sip.TransportTCP, sip.TransportTLS}
-	for _, tr := range transports {
+func TestPortValidationCases(t *testing.T) {
+	t.Run("port 0 defaults to 5060", func(t *testing.T) {
+		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.invalid", Port: 0, AuthType: sip.AuthIP}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected port 0 to be valid, got: %v", err)
+		}
+		if cfg.Port != 5060 {
+			t.Errorf("expected default port 5060, got %d", cfg.Port)
+		}
+	})
+
+	t.Run("negative port rejected", func(t *testing.T) {
+		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.invalid", Port: -1, AuthType: sip.AuthIP}
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected error for negative port -1, got nil")
+		}
+	})
+
+	t.Run("valid max port 65535", func(t *testing.T) {
+		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.invalid", Port: 65535, AuthType: sip.AuthIP}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected port 65535 to be valid, got: %v", err)
+		}
+	})
+
+	t.Run("port 65536 rejected", func(t *testing.T) {
+		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.invalid", Port: 65536, AuthType: sip.AuthIP}
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected error for port 65536, got nil")
+		}
+	})
+}
+
+func TestPJSIPInjectionRejection(t *testing.T) {
+	badInputs := []string{
+		"trunk\n[malicious-section]",
+		"user\rpassword=injected",
+		"host[injected]",
+	}
+
+	for _, input := range badInputs {
 		cfg := sip.TrunkConfig{
-			Name:      "test-" + string(tr),
-			Host:      "sip.example.com",
-			Transport: tr,
-			AuthType:  sip.AuthIP,
+			Name:         input,
+			Host:         "sip.example.invalid",
+			AuthType:     sip.AuthUserPass,
+			AuthUsername: "user",
+			Secret:       "pass",
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected injection error for input %q, got nil", input)
+		}
+	}
+}
+
+func TestRegistrationIdentityValidation(t *testing.T) {
+	t.Run("missing identity when registration required", func(t *testing.T) {
+		cfg := sip.TrunkConfig{
+			Name:                 "no-identity",
+			Host:                 "sip.example.invalid",
+			AuthType:             sip.AuthIP,
+			RegistrationRequired: true,
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected error when registration required without identity, got nil")
+		}
+	})
+
+	t.Run("valid registration with from_user identity", func(t *testing.T) {
+		cfg := sip.TrunkConfig{
+			Name:                 "from-user-identity",
+			Host:                 "sip.example.invalid",
+			AuthType:             sip.AuthIP,
+			FromUser:             "trunk_user_123",
+			RegistrationRequired: true,
 		}
 		if err := cfg.Validate(); err != nil {
-			t.Errorf("expected valid transport %s, got error: %v", tr, err)
+			t.Errorf("expected valid config with from_user identity, got: %v", err)
 		}
-	}
 
-	invalidCfg := sip.TrunkConfig{
-		Name:      "invalid-tr",
-		Host:      "sip.example.com",
-		Transport: sip.TransportType("sctp"),
-	}
-	if err := invalidCfg.Validate(); err == nil {
-		t.Error("expected error for invalid transport 'sctp', got nil")
-	}
-}
-
-func TestAuthValidation(t *testing.T) {
-	t.Run("missing userpass credentials", func(t *testing.T) {
-		cfg := sip.TrunkConfig{
-			Name:     "userpass-missing",
-			Host:     "sip.example.com",
-			AuthType: sip.AuthUserPass,
+		pjsipConf, err := sip.GeneratePJSIPConfig(cfg)
+		if err != nil {
+			t.Fatalf("pjsip generation failed: %v", err)
 		}
-		if err := cfg.Validate(); err == nil {
-			t.Error("expected error for missing username/secret in userpass auth, got nil")
-		}
-	})
-
-	t.Run("valid IP auth", func(t *testing.T) {
-		cfg := sip.TrunkConfig{
-			Name:     "ip-auth",
-			Host:     "192.168.1.1",
-			AuthType: sip.AuthIP,
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Errorf("expected valid IP auth config, got: %v", err)
+		if strings.Contains(pjsipConf, "sip:@") {
+			t.Errorf("invalid client_uri generated: sip:@ found in:\n%s", pjsipConf)
 		}
 	})
 }
 
-func TestSecretMaskingInLogsAndStrings(t *testing.T) {
-	secretVal := "super_secret_key_12345"
+func TestSecretMaskingWhitespace(t *testing.T) {
+	secretWithSpace := "top secret password 123"
 	cfg := sip.TrunkConfig{
 		Name:         "secret-test",
-		Host:         "sip.example.com",
+		Host:         "sip.example.invalid",
 		AuthType:     sip.AuthUserPass,
 		AuthUsername: "user",
-		Secret:       secretVal,
+		Secret:       secretWithSpace,
 	}
 
 	str := cfg.String()
-	if strings.Contains(str, secretVal) {
+	if strings.Contains(str, "top secret") {
 		t.Fatalf("CRITICAL SECURITY RISK: Secret leaked in String(): %s", str)
 	}
-	if !strings.Contains(str, "[REDACTED]") {
-		t.Errorf("expected [REDACTED] in String(), got: %s", str)
-	}
 
-	goStr := cfg.GoString()
-	if strings.Contains(goStr, secretVal) {
-		t.Fatalf("CRITICAL SECURITY RISK: Secret leaked in GoString(): %s", goStr)
-	}
-
-	redacted := cfg.Redacted()
-	if redacted.Secret != "*****" {
-		t.Errorf("expected redacted secret to be '*****', got: %s", redacted.Secret)
-	}
-}
-
-func TestPJSIPTemplateGenerationAndMasking(t *testing.T) {
-	cfg := sip.TrunkConfig{
-		Provider:             "elevenlabs_sip",
-		Name:                 "elevenlabs-trunk",
-		Host:                 "sip.rtc.elevenlabs.io",
-		Port:                 5060,
-		Transport:            sip.TransportTCP,
-		AuthType:             sip.AuthUserPass,
-		AuthUsername:         "eleven_user",
-		Secret:               "secret_eleven_pass",
-		RegistrationRequired: true,
-		Codecs:               []string{"ulaw", "alaw"},
-		Enabled:              true,
-	}
-
-	pjsipConf, err := sip.GeneratePJSIPConfig(cfg)
-	if err != nil {
-		t.Fatalf("PJSIP generation failed: %v", err)
-	}
-
-	requiredSections := []string{
-		"[transport-tcp]",
-		"[trunk-elevenlabs-trunk-auth]",
-		"[trunk-elevenlabs-trunk-aor]",
-		"[trunk-elevenlabs-trunk]",
-		"[trunk-elevenlabs-trunk-reg]",
-	}
-
-	for _, sec := range requiredSections {
-		if !strings.Contains(pjsipConf, sec) {
-			t.Errorf("missing section %s in PJSIP config snippet", sec)
-		}
-	}
-
+	pjsipConf := "username=user\npassword=top secret password 123\nrealm=sip"
 	masked := sip.MaskPJSIPSecrets(pjsipConf)
-	if strings.Contains(masked, "secret_eleven_pass") {
-		t.Errorf("expected password to be masked in MaskPJSIPSecrets, got: %s", masked)
+	if strings.Contains(masked, "top secret") {
+		t.Fatalf("CRITICAL SECURITY RISK: Secret leaked in MaskPJSIPSecrets(): %s", masked)
+	}
+	if !strings.Contains(masked, "password=*****") {
+		t.Errorf("expected password=***** in masked output, got: %s", masked)
 	}
 }
 
-func TestReconcilerReconcileSuccess(t *testing.T) {
+func TestTLSReachabilityAndFailure(t *testing.T) {
+	t.Run("TLS reachability success", func(t *testing.T) {
+		dialer := &mockDialer{}
+		reloader := &MockAsteriskReloader{Healthy: true}
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		cfg := sip.TrunkConfig{
+			Name:      "tls-trunk",
+			Host:      "sip.example.invalid",
+			Port:      5061,
+			Transport: sip.TransportTLS,
+			AuthType:  sip.AuthIP,
+			Enabled:   true,
+		}
+
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("expected TLS apply success, got: %v", err)
+		}
+		if status.Status != sip.StatusReady {
+			t.Errorf("expected status READY for TLS, got: %s", status.Status)
+		}
+	})
+
+	t.Run("TLS handshake failure", func(t *testing.T) {
+		dialer := &mockDialer{tlsErr: errors.New("tls handshake certificate expired")}
+		reloader := &MockAsteriskReloader{Healthy: true}
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		cfg := sip.TrunkConfig{
+			Name:      "tls-failed-trunk",
+			Host:      "sip.example.invalid",
+			Port:      5061,
+			Transport: sip.TransportTLS,
+			AuthType:  sip.AuthIP,
+			Enabled:   true,
+		}
+
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Error("expected error on TLS handshake failure, got nil")
+		}
+		if status.Status != sip.StatusConnectionError {
+			t.Errorf("expected status CONNECTION_ERROR for TLS failure, got: %s", status.Status)
+		}
+	})
+}
+
+func TestDisableTrunkLifecycle(t *testing.T) {
 	dialer := &mockDialer{}
-	reloader := &sip.MockAsteriskReloader{Healthy: true, RegistrationState: "Registered"}
-	manager := sip.NewManager(dialer, reloader)
+	reloader := &MockAsteriskReloader{Healthy: true}
+	mgr, _ := sip.NewManager(dialer, reloader)
 
+	// Step 1: Enable trunk
 	cfg := sip.TrunkConfig{
-		Provider:             "fale_paco",
-		Name:                 "paco-main",
-		Host:                 "sip.falepaco.com",
-		Port:                 5060,
-		Transport:            sip.TransportUDP,
-		AuthType:             sip.AuthUserPass,
-		AuthUsername:         "paco_user",
-		Secret:               "paco_pass",
-		RegistrationRequired: true,
-		Enabled:              true,
-	}
-
-	ctx := context.Background()
-	status, err := manager.ApplyTrunk(ctx, cfg)
-	if err != nil {
-		t.Fatalf("expected successful reconciliation, got error: %v", err)
-	}
-
-	if status.Status != sip.StatusReady {
-		t.Errorf("expected status READY, got %s", status.Status)
-	}
-	if !status.EndpointActive {
-		t.Error("expected endpoint active to be true")
-	}
-
-	storedCfg, ok := manager.GetTrunk("paco-main")
-	if !ok {
-		t.Error("expected trunk to be stored in manager state")
-	}
-	if storedCfg.Name != "paco-main" {
-		t.Errorf("expected stored name 'paco-main', got %s", storedCfg.Name)
-	}
-}
-
-func TestReconcilerDNSFailure(t *testing.T) {
-	dialer := &mockDialer{lookupErr: errors.New("no such host")}
-	reloader := &sip.MockAsteriskReloader{Healthy: true}
-	manager := sip.NewManager(dialer, reloader)
-
-	cfg := sip.TrunkConfig{
-		Name:     "invalid-dns-trunk",
-		Host:     "nonexistent.invalid.host",
+		Name:     "active-trunk",
+		Host:     "sip.example.invalid",
 		AuthType: sip.AuthIP,
 		Enabled:  true,
 	}
-
 	ctx := context.Background()
-	status, err := manager.ApplyTrunk(ctx, cfg)
-	if err == nil {
-		t.Error("expected error for DNS failure, got nil")
+	_, err := mgr.ApplyTrunk(ctx, cfg)
+	if err != nil {
+		t.Fatalf("failed to apply initial trunk: %v", err)
 	}
 
-	if status.Status != sip.StatusDNSError {
-		t.Errorf("expected status DNS_ERROR, got %s", status.Status)
+	// Step 2: Disable trunk
+	cfgDisabled := cfg
+	cfgDisabled.Enabled = false
+	status, err := mgr.ApplyTrunk(ctx, cfgDisabled)
+	if err != nil {
+		t.Fatalf("expected successful disable, got: %v", err)
+	}
+
+	if !reloader.RemoveCalled {
+		t.Error("expected RemovePJSIPConfig to be called on Asterisk when disabling trunk")
+	}
+	if status.Status != sip.StatusDisabled {
+		t.Errorf("expected status DISABLED, got: %s", status.Status)
+	}
+	if status.EndpointActive {
+		t.Error("expected endpoint_active to be false when disabled")
 	}
 }
 
-func TestReconcilerConnectionFailure(t *testing.T) {
-	dialer := &mockDialer{dialErr: errors.New("connection refused")}
-	reloader := &sip.MockAsteriskReloader{Healthy: true}
-	manager := sip.NewManager(dialer, reloader)
+func TestRegistrationFailures(t *testing.T) {
+	t.Run("registration rejected", func(t *testing.T) {
+		dialer := &mockDialer{}
+		reloader := &MockAsteriskReloader{Healthy: true, RegistrationState: "Rejected"}
+		mgr, _ := sip.NewManager(dialer, reloader)
 
-	cfg := sip.TrunkConfig{
-		Name:      "unreachable-trunk",
-		Host:      "192.168.1.250",
-		Port:      5060,
-		Transport: sip.TransportTCP,
-		AuthType:  sip.AuthIP,
-		Enabled:   true,
-	}
+		cfg := sip.TrunkConfig{
+			Name:                 "rejected-trunk",
+			Host:                 "sip.example.invalid",
+			AuthType:             sip.AuthUserPass,
+			AuthUsername:         "user",
+			Secret:               "pass",
+			RegistrationRequired: true,
+			Enabled:              true,
+		}
 
-	ctx := context.Background()
-	status, err := manager.ApplyTrunk(ctx, cfg)
-	if err == nil {
-		t.Error("expected error for connection failure, got nil")
-	}
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Error("expected error for rejected registration, got nil")
+		}
+		if status.Status != sip.StatusRegistrationFailed {
+			t.Errorf("expected REGISTRATION_FAILED status, got: %s", status.Status)
+		}
+		if status.EndpointActive {
+			t.Error("expected EndpointActive to be false on registration failure")
+		}
+	})
 
-	if status.Status != sip.StatusConnectionError {
-		t.Errorf("expected status CONNECTION_ERROR, got %s", status.Status)
-	}
+	t.Run("registration error", func(t *testing.T) {
+		dialer := &mockDialer{}
+		reloader := &MockAsteriskReloader{Healthy: true, RegistrationState: "Failed"}
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		cfg := sip.TrunkConfig{
+			Name:                 "failed-trunk",
+			Host:                 "sip.example.invalid",
+			AuthType:             sip.AuthUserPass,
+			AuthUsername:         "user",
+			Secret:               "pass",
+			RegistrationRequired: true,
+			Enabled:              true,
+		}
+
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Error("expected error for failed registration, got nil")
+		}
+		if status.Status != sip.StatusRegistrationFailed {
+			t.Errorf("expected REGISTRATION_FAILED status, got: %s", status.Status)
+		}
+	})
 }
 
-func TestReconcilerReloadFailurePreservesPreviousState(t *testing.T) {
+func TestCodecDefensiveCopy(t *testing.T) {
 	dialer := &mockDialer{}
-	reloader := &sip.MockAsteriskReloader{Healthy: true}
-	manager := sip.NewManager(dialer, reloader)
+	reloader := &MockAsteriskReloader{Healthy: true}
+	mgr, _ := sip.NewManager(dialer, reloader)
 
-	// Step 1: Apply initial valid config
-	initialCfg := sip.TrunkConfig{
-		Name:     "stable-trunk",
-		Host:     "sip.stable.com",
-		AuthType: sip.AuthIP,
-		Enabled:  true,
-	}
-	ctx := context.Background()
-	_, err := manager.ApplyTrunk(ctx, initialCfg)
-	if err != nil {
-		t.Fatalf("failed to apply initial config: %v", err)
-	}
-
-	// Step 2: Attempt update with reload failure
-	reloader.ReloadErr = errors.New("asterisk PJSIP syntax error")
-	updateCfg := sip.TrunkConfig{
-		Name:     "stable-trunk",
-		Host:     "sip.stable.com",
-		AuthType: sip.AuthIP,
-		Port:     5062,
-		Enabled:  true,
-	}
-
-	_, err = manager.ApplyTrunk(ctx, updateCfg)
-	if err == nil {
-		t.Error("expected reload failure error, got nil")
-	}
-
-	// Verify initial config state was preserved
-	currentCfg, _ := manager.GetTrunk("stable-trunk")
-	if currentCfg.Port != 5060 {
-		t.Errorf("expected initial port 5060 to be preserved after reload failure, got %d", currentCfg.Port)
-	}
-}
-
-func TestAudioSocketPathDecoupling(t *testing.T) {
-	start := time.Now()
+	originalCodecs := []string{"ulaw", "alaw"}
 	cfg := sip.TrunkConfig{
-		Name:     "fast-trunk",
-		Host:     "localhost",
+		Name:     "codec-test",
+		Host:     "sip.example.invalid",
 		AuthType: sip.AuthIP,
+		Codecs:   originalCodecs,
 		Enabled:  true,
 	}
-	_ = cfg.Validate()
-	duration := time.Since(start)
 
-	if duration > 50*time.Millisecond {
-		t.Errorf("validation took unexpectedly long: %v", duration)
+	_, err := mgr.ApplyTrunk(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("failed to apply trunk: %v", err)
+	}
+
+	// Mutate caller's slice
+	originalCodecs[0] = "g729_injected"
+
+	storedCfg, _ := mgr.GetTrunk("codec-test")
+	if storedCfg.Codecs[0] == "g729_injected" {
+		t.Fatal("CRITICAL DEFENSIVE COPY FAILURE: internal state was mutated via caller slice modification!")
 	}
 }

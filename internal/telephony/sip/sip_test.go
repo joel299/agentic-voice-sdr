@@ -539,12 +539,12 @@ func TestCodecDefensiveCopy(t *testing.T) {
 }
 
 type mockRunner struct {
-	failReload      bool
-	failRollback    bool
-	reloadCalls     int
-	statusOutput    string
-	endpointOutput  string
-	regOutput       string
+	failReload     bool
+	failRollback   bool
+	reloadCalls    int
+	statusOutput   string
+	endpointOutput string
+	regOutput      string
 }
 
 func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string) (string, error) {

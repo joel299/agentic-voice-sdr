@@ -39,6 +39,19 @@ INSERT INTO outbox_events (
 );
 
 DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM outbox_events
+        WHERE idempotency_key = 'gru65-test-duplicate'
+          AND status = 'PENDING'
+          AND headers = '{}'::jsonb
+          AND created_at IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'default headers, status, or created_at contract failed';
+    END IF;
+END $$;
+
+DO $$
 DECLARE
     rejected BOOLEAN := FALSE;
 BEGIN

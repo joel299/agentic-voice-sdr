@@ -14,4 +14,7 @@ var (
 
 	// ErrPayloadTooLarge indicates payload length exceeds MaxPayloadSize.
 	ErrPayloadTooLarge = errors.New("audiosocket: payload too large")
+
+	// ErrInvalidPayloadLength indicates a control frame has a protocol-invalid payload size.
+	ErrInvalidPayloadLength = errors.New("audiosocket: invalid payload length")
 )

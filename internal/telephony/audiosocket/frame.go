@@ -17,6 +17,9 @@ func Encode(f Frame) ([]byte, error) {
 	if n > 0xffff {
 		return nil, ErrPayloadTooLarge
 	}
+	if err := validatePayloadLength(f.Type, n); err != nil {
+		return nil, err
+	}
 	out := make([]byte, HeaderSize+n)
 	out[0] = byte(f.Type)
 	binary.BigEndian.PutUint16(out[1:3], uint16(n))
@@ -40,6 +43,9 @@ func Decode(b []byte) (Frame, int, error) {
 	payloadLen := int(binary.BigEndian.Uint16(b[1:3]))
 	if payloadLen > MaxPayloadSize {
 		return Frame{}, 0, ErrPayloadTooLarge
+	}
+	if err := validatePayloadLength(ft, payloadLen); err != nil {
+		return Frame{}, 0, err
 	}
 	total := HeaderSize + payloadLen
 	if len(b) < total {
@@ -70,6 +76,9 @@ func DecodeReader(r io.Reader) (Frame, error) {
 	if payloadLen > MaxPayloadSize {
 		return Frame{}, ErrPayloadTooLarge
 	}
+	if err := validatePayloadLength(ft, payloadLen); err != nil {
+		return Frame{}, err
+	}
 	var payload []byte
 	if payloadLen > 0 {
 		payload = make([]byte, payloadLen)
@@ -81,4 +90,22 @@ func DecodeReader(r io.Reader) (Frame, error) {
 		}
 	}
 	return Frame{Type: ft, Payload: payload}, nil
+}
+
+func validatePayloadLength(ft FrameType, n int) error {
+	switch ft {
+	case TypeHangup:
+		if n != 0 {
+			return ErrInvalidPayloadLength
+		}
+	case TypeID:
+		if n != 16 {
+			return ErrInvalidPayloadLength
+		}
+	case TypeDTMF:
+		if n != 1 {
+			return ErrInvalidPayloadLength
+		}
+	}
+	return nil
 }

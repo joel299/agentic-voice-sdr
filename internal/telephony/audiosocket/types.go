@@ -16,7 +16,6 @@ type FrameType byte
 const (
 	TypeHangup  FrameType = 0x00
 	TypeID      FrameType = 0x01
-	TypeSilence FrameType = 0x02
 	TypeDTMF    FrameType = 0x03
 	TypeSlin    FrameType = 0x10 // 8 kHz signed-linear PCM
 	TypeSlin12  FrameType = 0x11
@@ -36,8 +35,6 @@ func (t FrameType) String() string {
 		return "hangup"
 	case TypeID:
 		return "id"
-	case TypeSilence:
-		return "silence"
 	case TypeDTMF:
 		return "dtmf"
 	case TypeSlin:
@@ -68,7 +65,7 @@ func (t FrameType) String() string {
 // Known reports whether t is a recognized AudioSocket frame type.
 func (t FrameType) Known() bool {
 	switch t {
-	case TypeHangup, TypeID, TypeSilence, TypeDTMF,
+	case TypeHangup, TypeID, TypeDTMF,
 		TypeSlin, TypeSlin12, TypeSlin16, TypeSlin24, TypeSlin32,
 		TypeSlin44, TypeSlin48, TypeSlin96, TypeSlin192,
 		TypeError:

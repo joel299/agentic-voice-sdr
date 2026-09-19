@@ -14,7 +14,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	cases := []Frame{
 		{Type: TypeHangup, Payload: nil},
 		{Type: TypeID, Payload: bytes.Repeat([]byte{0xab}, 16)},
-		{Type: TypeSilence, Payload: nil},
 		{Type: TypeDTMF, Payload: []byte{'1'}},
 		{Type: TypeSlin, Payload: bytes.Repeat([]byte{0x01, 0x02}, 160)},
 		{Type: TypeSlin16, Payload: bytes.Repeat([]byte{0x03, 0x04}, 320)},
@@ -137,6 +136,55 @@ func TestDecodeUnknownTypeRejected(t *testing.T) {
 	_, _, err := Decode(buf)
 	if !errors.Is(err, ErrUnknownType) {
 		t.Fatalf("err=%v want ErrUnknownType", err)
+	}
+}
+
+func TestSilenceTypeIsUnknown(t *testing.T) {
+	t.Parallel()
+	_, _, err := Decode([]byte{0x02, 0x00, 0x00})
+	if !errors.Is(err, ErrUnknownType) {
+		t.Fatalf("Decode err=%v want ErrUnknownType", err)
+	}
+	_, err = Encode(Frame{Type: FrameType(0x02)})
+	if !errors.Is(err, ErrUnknownType) {
+		t.Fatalf("Encode err=%v want ErrUnknownType", err)
+	}
+}
+
+func TestControlFramePayloadLengths(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		typ     FrameType
+		valid   int
+		invalid []int
+	}{
+		{name: "hangup", typ: TypeHangup, valid: 0, invalid: []int{1}},
+		{name: "uuid", typ: TypeID, valid: 16, invalid: []int{15, 17}},
+		{name: "dtmf", typ: TypeDTMF, valid: 1, invalid: []int{0, 2}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			valid := bytes.Repeat([]byte{0x01}, tc.valid)
+			if _, err := Encode(Frame{Type: tc.typ, Payload: valid}); err != nil {
+				t.Fatalf("valid Encode err=%v", err)
+			}
+			for _, n := range tc.invalid {
+				payload := bytes.Repeat([]byte{0x01}, n)
+				if _, err := Encode(Frame{Type: tc.typ, Payload: payload}); !errors.Is(err, ErrInvalidPayloadLength) {
+					t.Errorf("Encode len=%d err=%v want ErrInvalidPayloadLength", n, err)
+				}
+				encoded := append([]byte{byte(tc.typ), byte(n >> 8), byte(n)}, payload...)
+				if _, _, err := Decode(encoded); !errors.Is(err, ErrInvalidPayloadLength) {
+					t.Errorf("Decode len=%d err=%v want ErrInvalidPayloadLength", n, err)
+				}
+				if _, err := DecodeReader(bytes.NewReader(encoded)); !errors.Is(err, ErrInvalidPayloadLength) {
+					t.Errorf("DecodeReader len=%d err=%v want ErrInvalidPayloadLength", n, err)
+				}
+			}
+		})
 	}
 }
 

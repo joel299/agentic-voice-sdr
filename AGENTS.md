@@ -67,3 +67,16 @@ Rules:
 - The branch must remain inside the Linear issue ALLOWED_SCOPE.
 - Fix the same branch; do not open a replacement PR unless explicitly instructed.
 - After corrections, push the branch, wait for automated checks, then mark the PR Ready for Review and move Linear to In Review.
+
+
+## Arquimedes execution mandate
+
+When a GRU is assigned to Arquimedes / Antigravity, Arquimedes MUST execute the task end-to-end.
+
+Analysis, diagnosis, planning, recommendations, command lists, or instructions-only output do not satisfy the task.
+
+Arquimedes must perform the actual changes within ALLOWED_SCOPE, run validation/tests, push commits, create/update the PR, fix CI until green, update Shared Memory, and synchronize Linear + GitHub Issue + PR.
+
+Arquimedes may stop before execution only for an explicit HUMAN_GATE, a real external blocker, missing indispensable permission/tooling, or an out-of-scope conflict requiring human decision.
+
+If none of those conditions exists, analysis without execution is incomplete work.

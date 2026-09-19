@@ -5,12 +5,16 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
 func TestServerConfiguresExplicitTimeouts(t *testing.T) {
@@ -108,5 +112,20 @@ func TestRunReturnsConfigurationError(t *testing.T) {
 	}
 	if serveCalled {
 		t.Fatal("server runner called after configuration failure")
+	}
+}
+
+func TestRuntimeCompositionUsesPersistentWhatsAppStore(t *testing.T) {
+	path := t.TempDir() + "/whatsapp.json"
+	store := &whatsapp.FileConfigStore{Path: path}
+	if err := store.Save(context.Background(), whatsapp.ConfigMetadata{Provider: "test", BaseURL: "https://provider.example", ActiveInstanceID: "wa-1", ProviderStatus: whatsapp.StatusReady}); err != nil {
+		t.Fatal(err)
+	}
+	handler := httpapi.NewRouterWithConfig(config.Config{WhatsAppConfigPath: path})
+	request := httptest.NewRequest(http.MethodGet, "/v1/config/whatsapp", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"active_instance_id":"wa-1"`) || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("persistent runtime store not wired: status=%d body=%s", response.Code, response.Body)
 	}
 }

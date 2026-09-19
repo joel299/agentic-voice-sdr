@@ -2,7 +2,6 @@ package sip_test
 
 import (
 	"context"
-	"time"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
@@ -1033,7 +1033,6 @@ func TestGlobalAsteriskTransactionLock(t *testing.T) {
 		t.Fatalf("trunk B apply failed: %v", err)
 	}
 }
-
 
 type mockRunnerFunc struct {
 	runFunc func(ctx context.Context, name string, args ...string) (string, error)

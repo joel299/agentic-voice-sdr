@@ -1,0 +1,80 @@
+name: agentic-voice-sdr-dev
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: agentic-redis-dev
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    environment:
+      - REDIS_PASSWORD
+      - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-256mb}
+      - REDIS_MAXMEMORY_POLICY=${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$REDIS_PASSWORD" ]; then
+          echo "[-] ERROR: REDIS_PASSWORD is required in environment" >&2
+          exit 1
+        fi
+        exec redis-server --requirepass "$$REDIS_PASSWORD" --maxmemory "$${REDIS_MAXMEMORY:-256mb}" --maxmemory-policy "$${REDIS_MAXMEMORY_POLICY:-allkeys-lru}" --save "" --appendonly no
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks:
+      - voice-dev-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: agentic-rabbitmq-dev
+    restart: unless-stopped
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER
+      - RABBITMQ_DEFAULT_PASS
+      - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_DEFAULT_VHOST:-/}
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$RABBITMQ_DEFAULT_USER" ] || [ -z "$$RABBITMQ_DEFAULT_PASS" ]; then
+          echo "[-] ERROR: RABBITMQ_DEFAULT_USER and RABBITMQ_DEFAULT_PASS are required in environment" >&2
+          exit 1
+        fi
+        (
+          while ! su-exec rabbitmq rabbitmqctl status >/dev/null 2>&1; do
+            sleep 1
+          done
+          su-exec rabbitmq rabbitmqctl add_user "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS" || su-exec rabbitmq rabbitmqctl change_password "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS"
+          su-exec rabbitmq rabbitmqctl set_user_tags "$$RABBITMQ_DEFAULT_USER" administrator
+          su-exec rabbitmq rabbitmqctl set_permissions -p "$${RABBITMQ_DEFAULT_VHOST:-/}" "$$RABBITMQ_DEFAULT_USER" ".*" ".*" ".*"
+          touch /tmp/rabbitmq_ready
+        ) &
+        exec docker-entrypoint.sh rabbitmq-server
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -f /tmp/rabbitmq_ready && rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - voice-dev-net
+
+networks:
+  voice-dev-net:
+    name: voice-dev-net
+    driver: bridge

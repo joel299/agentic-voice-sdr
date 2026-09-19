@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Declarative RabbitMQ Topology Setup & Verification
+# Task: GRU-61 / ADR-002 / GRU-57
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Source local .env if present
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env"
+  set +a
+elif [ -f "${REPO_ROOT}/deploy/dev/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/deploy/dev/.env"
+  set +a
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_USER:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_USER" >&2
+  echo "    Please export RABBITMQ_DEFAULT_USER or configure .env" >&2
+  exit 1
+fi
+
+if [ -z "${RABBITMQ_DEFAULT_PASS:-}" ]; then
+  echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_PASS" >&2
+  echo "    Please export RABBITMQ_DEFAULT_PASS or configure .env" >&2
+  exit 1
+fi
+
+RABBITMQ_HOST="${RABBITMQ_HOST:-127.0.0.1}"
+RABBITMQ_MANAGEMENT_PORT="${RABBITMQ_MANAGEMENT_PORT:-15672}"
+RABBITMQ_USER="${RABBITMQ_DEFAULT_USER}"
+RABBITMQ_PASS="${RABBITMQ_DEFAULT_PASS}"
+RABBITMQ_VHOST="${RABBITMQ_DEFAULT_VHOST:-/}"
+
+# URL-encoded vhost for HTTP API (/ -> %2F)
+if [ "$RABBITMQ_VHOST" = "/" ]; then
+  ENCODED_VHOST="%2F"
+else
+  ENCODED_VHOST="$RABBITMQ_VHOST"
+fi
+
+API_BASE="http://${RABBITMQ_HOST}:${RABBITMQ_MANAGEMENT_PORT}/api"
+
+echo "=== Declarative RabbitMQ Topology Setup ==="
+echo "Target: ${API_BASE} (VHost: ${RABBITMQ_VHOST})"
+
+api_req() {
+  local method="$1"
+  local endpoint="$2"
+  local data="${3:-}"
+
+  if [ -n "$data" ]; then
+    curl -s -S -f -X "$method" \
+      -u "${RABBITMQ_USER}:${RABBITMQ_PASS}" \
+      -H "Content-Type: application/json" \
+      -d "$data" \
+      "${API_BASE}${endpoint}"
+  else
+    curl -s -S -f -X "$method" \
+      -u "${RABBITMQ_USER}:${RABBITMQ_PASS}" \
+      "${API_BASE}${endpoint}"
+  fi
+}
+
+# 1. Declare Exchanges
+echo "Declaring Exchanges..."
+for exchange in voice.commands voice.events voice.dlx; do
+  echo "  - Exchange: ${exchange} (type: topic, durable: true)"
+  api_req PUT "/exchanges/${ENCODED_VHOST}/${exchange}" \
+    '{"type":"topic","durable":true,"auto_delete":false,"internal":false,"arguments":{}}' > /dev/null
+done
+
+# 2. Declare Work Queues with DLX to voice.dlx -> voice.dead
+echo "Declaring Work Queues..."
+for queue in call.dispatch tool.jobs transcript.persist; do
+  echo "  - Queue: ${queue} (durable: true, DLX: voice.dlx, DLQ key: voice.dead)"
+  api_req PUT "/queues/${ENCODED_VHOST}/${queue}" \
+    '{"durable":true,"auto_delete":false,"arguments":{"x-dead-letter-exchange":"voice.dlx","x-dead-letter-routing-key":"voice.dead"}}' > /dev/null
+done
+
+# 3. Declare Stage-Based Retry Delay Queues with DLX back to voice.commands -> call.dispatch
+echo "Declaring Stage-Based Retry Delay Queues..."
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.30s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":30000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.30s (durable, TTL: 30s, DLX: voice.commands -> call.dispatch)"
+
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.120s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":120000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.120s (durable, TTL: 120s, DLX: voice.commands -> call.dispatch)"
+
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.600s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":600000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.600s (durable, TTL: 600s, DLX: voice.commands -> call.dispatch)"
+
+# 4. Declare Dead Letter Queue (voice.dead)
+echo "Declaring Dead Letter Queue..."
+echo "  - Queue: voice.dead (DLQ, durable: true)"
+api_req PUT "/queues/${ENCODED_VHOST}/voice.dead" \
+  '{"durable":true,"auto_delete":false,"arguments":{}}' > /dev/null
+
+# 5. Declare Bindings
+echo "Declaring Bindings..."
+# voice.commands -> call.dispatch, tool.jobs
+echo "  - Binding: voice.commands -> call.dispatch (key: call.dispatch)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/call.dispatch" \
+  '{"routing_key":"call.dispatch","arguments":{}}' > /dev/null
+
+echo "  - Binding: voice.commands -> tool.jobs (key: tool.job.#)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/tool.jobs" \
+  '{"routing_key":"tool.job.#","arguments":{}}' > /dev/null
+
+# voice.commands -> retry delay queues
+for rk in call.retry.30s call.retry.120s call.retry.600s; do
+  echo "  - Binding: voice.commands -> ${rk} (key: ${rk})"
+  api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/${rk}" \
+    "{\"routing_key\":\"${rk}\",\"arguments\":{}}" > /dev/null
+done
+
+# voice.events -> transcript.persist
+echo "  - Binding: voice.events -> transcript.persist (key: call.transcript.#)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.events/q/transcript.persist" \
+  '{"routing_key":"call.transcript.#","arguments":{}}' > /dev/null
+
+# voice.dlx -> voice.dead
+echo "  - Binding: voice.dlx -> voice.dead (key: voice.dead)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.dlx/q/voice.dead" \
+  '{"routing_key":"voice.dead","arguments":{}}' > /dev/null
+echo "  - Binding: voice.dlx -> voice.dead (key: #)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.dlx/q/voice.dead" \
+  '{"routing_key":"#","arguments":{}}' > /dev/null
+
+echo "=== Topology successfully verified and applied ==="

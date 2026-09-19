@@ -1,0 +1,175 @@
+{
+  "rabbit_version": "3.13.7",
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "voice.commands",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "voice.events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "voice.dlx",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "call.dispatch",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "call.retry.30s",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
+      }
+    },
+    {
+      "name": "call.retry.120s",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 120000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
+      }
+    },
+    {
+      "name": "call.retry.600s",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 600000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
+      }
+    },
+    {
+      "name": "tool.jobs",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "transcript.persist",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "voice.dlx",
+        "x-dead-letter-routing-key": "voice.dead"
+      }
+    },
+    {
+      "name": "voice.dead",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.dispatch",
+      "destination_type": "queue",
+      "routing_key": "call.dispatch",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry.30s",
+      "destination_type": "queue",
+      "routing_key": "call.retry.30s",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry.120s",
+      "destination_type": "queue",
+      "routing_key": "call.retry.120s",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry.600s",
+      "destination_type": "queue",
+      "routing_key": "call.retry.600s",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "tool.jobs",
+      "destination_type": "queue",
+      "routing_key": "tool.job.#",
+      "arguments": {}
+    },
+    {
+      "source": "voice.events",
+      "vhost": "/",
+      "destination": "transcript.persist",
+      "destination_type": "queue",
+      "routing_key": "call.transcript.#",
+      "arguments": {}
+    },
+    {
+      "source": "voice.dlx",
+      "vhost": "/",
+      "destination": "voice.dead",
+      "destination_type": "queue",
+      "routing_key": "voice.dead",
+      "arguments": {}
+    },
+    {
+      "source": "voice.dlx",
+      "vhost": "/",
+      "destination": "voice.dead",
+      "destination_type": "queue",
+      "routing_key": "#",
+      "arguments": {}
+    }
+  ]
+}

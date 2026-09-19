@@ -171,9 +171,19 @@ docker exec agentic-rabbitmq-dev rabbitmq-diagnostics -q check_port_connectivity
 echo "    [✓] RabbitMQ node diagnostics passed."
 
 echo "[+] 5.2. Testing RabbitMQ Management HTTP API aliveness..."
-ALIVE_STATUS=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/aliveness-test/%2F" | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
+ALIVE_STATUS=""
+LAST_RESP=""
+for attempt in $(seq 1 20); do
+  LAST_RESP=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/aliveness-test/%2F" 2>/dev/null || true)
+  ALIVE_STATUS=$(echo "$LAST_RESP" | python3 -c "import sys, json; data=json.load(sys.stdin) if sys.stdin else {}; print(data.get('status', ''))" 2>/dev/null || true)
+  if [ "$ALIVE_STATUS" = "ok" ]; then
+    break
+  fi
+  sleep 1
+done
+
 if [ "$ALIVE_STATUS" != "ok" ]; then
-  echo "[-] ERROR: RabbitMQ aliveness test failed, status: '${ALIVE_STATUS}'"
+  echo "[-] ERROR: RabbitMQ aliveness test failed, status: '${ALIVE_STATUS}', last response: '${LAST_RESP}'"
   exit 1
 fi
 echo "    [✓] RabbitMQ aliveness check ok."

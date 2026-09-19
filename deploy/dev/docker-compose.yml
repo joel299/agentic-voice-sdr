@@ -60,16 +60,17 @@ services:
           su-exec rabbitmq rabbitmqctl add_user "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS" || su-exec rabbitmq rabbitmqctl change_password "$$RABBITMQ_DEFAULT_USER" "$$RABBITMQ_DEFAULT_PASS"
           su-exec rabbitmq rabbitmqctl set_user_tags "$$RABBITMQ_DEFAULT_USER" administrator
           su-exec rabbitmq rabbitmqctl set_permissions -p "$${RABBITMQ_DEFAULT_VHOST:-/}" "$$RABBITMQ_DEFAULT_USER" ".*" ".*" ".*"
+          touch /tmp/rabbitmq_ready
         ) &
         exec docker-entrypoint.sh rabbitmq-server
     healthcheck:
       test:
         - CMD-SHELL
-        - rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
+        - test -f /tmp/rabbitmq_ready && rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity
+      interval: 3s
+      timeout: 3s
+      retries: 25
+      start_period: 5s
     networks:
       - voice-dev-net
 

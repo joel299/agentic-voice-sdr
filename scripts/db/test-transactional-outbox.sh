@@ -7,15 +7,25 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
   PSQL_ARGS+=("$DATABASE_URL")
 fi
 
-psql_cmd() {
-  psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 "$@"
-}
-
 command -v psql >/dev/null || {
   printf '%s\n' 'psql is required' >&2
   exit 127
 }
 
+TEST_SCHEMA="outbox_test_${BASHPID}_$(date +%s%N)"
+psql_base() {
+  psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 "$@"
+}
+psql_cmd() {
+  psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 \
+    -c "SET search_path TO \"${TEST_SCHEMA}\", public;" "$@"
+}
+cleanup() {
+  psql_base -c "DROP SCHEMA IF EXISTS \"${TEST_SCHEMA}\" CASCADE;" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+psql_base -c "CREATE SCHEMA \"${TEST_SCHEMA}\";" >/dev/null
 for migration in "$ROOT_DIR"/db/migrations/*.sql; do
   printf 'Applying %s\n' "${migration#"$ROOT_DIR"/}"
   psql_cmd -f "$migration" >/dev/null
@@ -69,6 +79,90 @@ BEGIN
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'duplicate idempotency key was accepted';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    rejected BOOLEAN := FALSE;
+BEGIN
+    BEGIN
+        INSERT INTO outbox_events (
+            aggregate_type, aggregate_id, event_type, exchange, routing_key,
+            payload, correlation_id, idempotency_key
+        ) VALUES (
+            'CallSession', 'gru65-test-empty-idempotency', 'call.dispatch.requested',
+            'voice.commands', 'call.dispatch', '{}'::jsonb,
+            '00000000-0000-0000-0000-000000000008', ''
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'empty idempotency key was accepted';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    rejected BOOLEAN := FALSE;
+BEGIN
+    BEGIN
+        INSERT INTO outbox_events (
+            aggregate_type, aggregate_id, event_type, exchange, routing_key,
+            payload, correlation_id, idempotency_key
+        ) VALUES (
+            'CallSession', 'gru65-test-whitespace-idempotency', 'call.dispatch.requested',
+            'voice.commands', 'call.dispatch', '{}'::jsonb,
+            '00000000-0000-0000-0000-000000000009', '   '
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'whitespace-only idempotency key was accepted';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    rejected BOOLEAN := FALSE;
+BEGIN
+    BEGIN
+        INSERT INTO outbox_events (
+            aggregate_type, aggregate_id, event_type, exchange, routing_key,
+            payload, correlation_id, idempotency_key, status
+        ) VALUES (
+            'CallSession', 'gru65-test-unpublished', 'call.dispatch.requested',
+            'voice.commands', 'call.dispatch', '{}'::jsonb,
+            '00000000-0000-0000-0000-000000000010', 'gru65-test-unpublished', 'PUBLISHED'
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'PUBLISHED without published_at was accepted';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    rejected BOOLEAN := FALSE;
+BEGIN
+    BEGIN
+        INSERT INTO outbox_events (
+            aggregate_type, aggregate_id, event_type, exchange, routing_key,
+            payload, correlation_id, idempotency_key, published_at
+        ) VALUES (
+            'CallSession', 'gru65-test-pending-published-at', 'call.dispatch.requested',
+            'voice.commands', 'call.dispatch', '{}'::jsonb,
+            '00000000-0000-0000-0000-000000000011', 'gru65-test-pending-published-at', NOW()
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'non-PUBLISHED with published_at was accepted';
     END IF;
 END $$;
 

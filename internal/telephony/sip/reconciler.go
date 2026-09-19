@@ -180,8 +180,11 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 				return fmt.Errorf("asterisk reload failed during trunk stage (%w, output: %s); rollback failed (restoreErr: %v, reloadErr: %v)", err, out, rbErr, reloadErr)
 			}
 		} else {
-			_ = os.Remove(targetPath)
-			_, _ = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+			removeErr := os.Remove(targetPath)
+			_, rollbackReloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+			if removeErr != nil || rollbackReloadErr != nil {
+				return fmt.Errorf("asterisk reload failed during trunk stage (%w, output: %s); rollback failed (removeErr: %v, reloadErr: %v)", err, out, removeErr, rollbackReloadErr)
+			}
 		}
 		return fmt.Errorf("asterisk reload failed during trunk stage: %w, output: %s", err, out)
 	}
@@ -346,6 +349,7 @@ func (r *RealAsteriskReloader) CheckRegistration(ctx context.Context, trunkName 
 // Manager coordinates SIP trunk configuration, validation, reconciliation, and status tracking.
 type Manager struct {
 	mu           sync.RWMutex
+	trunkLocks   map[string]*sync.Mutex
 	trunks       map[string]TrunkConfig
 	statuses     map[string]StatusReport
 	pjsipConfigs map[string]string
@@ -362,6 +366,7 @@ func NewManager(dialer NetworkDialer, reloader AsteriskReloader) (*Manager, erro
 		return nil, fmt.Errorf("reloader is required and cannot be nil; mock reloader is for test use only")
 	}
 	return &Manager{
+		trunkLocks:   make(map[string]*sync.Mutex),
 		trunks:       make(map[string]TrunkConfig),
 		statuses:     make(map[string]StatusReport),
 		pjsipConfigs: make(map[string]string),
@@ -370,10 +375,27 @@ func NewManager(dialer NetworkDialer, reloader AsteriskReloader) (*Manager, erro
 	}, nil
 }
 
+// getTrunkLock returns a dedicated mutex for the specified trunk name, allocating one if needed.
+func (m *Manager) getTrunkLock(trunkName string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock, ok := m.trunkLocks[trunkName]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.trunkLocks[trunkName] = lock
+	}
+	return lock
+}
+
 // ApplyTrunk validates, reconciles, and applies a SIP trunk configuration safely inside an atomic transaction.
 func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport, error) {
 	// Deep clone input config to prevent caller slice mutation
 	cfg = cfg.Clone()
+
+	// Acquire per-trunk mutex to serialize all transactional operations for this trunk name
+	trunkLock := m.getTrunkLock(cfg.Name)
+	trunkLock.Lock()
+	defer trunkLock.Unlock()
 
 	if err := cfg.Validate(); err != nil {
 		report := StatusReport{

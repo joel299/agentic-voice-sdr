@@ -1,13 +1,45 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Reproducible Smoke Test for Redis + RabbitMQ Dev Infrastructure
-# Task: GRU-61 / ADR-002
+# Redis + RabbitMQ Local Dev Infrastructure Smoke Test
+# Task: GRU-61 / ADR-002 / GRU-57
 # ==============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_DIR="${REPO_ROOT}/deploy/dev"
+
+# Parse CLI flags
+TEARDOWN_DOWN=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --down)
+      TEARDOWN_DOWN=true
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+cleanup() {
+  local exit_code=$?
+  if [ "$TEARDOWN_DOWN" = true ]; then
+    echo "[+] Running cleanup: docker compose down -v..."
+    docker compose -f "${DEPLOY_DIR}/docker-compose.yml" down -v || true
+  fi
+  exit "$exit_code"
+}
+trap cleanup EXIT
+
+echo "=== GRU-61 Redis + RabbitMQ Infrastructure Smoke Test ==="
+echo "Repo root: ${REPO_ROOT}"
+echo "Deploy dir: ${DEPLOY_DIR}"
+
+# 1. Environment and Prerequisites Check
+echo "[+] 1. Checking environment variables and credentials..."
 
 # Source local .env if present
 if [ -f "${REPO_ROOT}/.env" ]; then
@@ -22,47 +54,26 @@ elif [ -f "${DEPLOY_DIR}/.env" ]; then
   set +a
 fi
 
-# Strict check: fail clearly if required credentials are not in environment
 if [ -z "${REDIS_PASSWORD:-}" ]; then
   echo "[-] ERROR: Missing required environment variable: REDIS_PASSWORD" >&2
-  echo "    Redis requires a password via environment/secret. Please export REDIS_PASSWORD or configure .env." >&2
+  echo "    Please export REDIS_PASSWORD or define it in .env" >&2
   exit 1
 fi
 
 if [ -z "${RABBITMQ_DEFAULT_USER:-}" ]; then
   echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_USER" >&2
-  echo "    RabbitMQ requires an admin user via environment/secret. Please export RABBITMQ_DEFAULT_USER or configure .env." >&2
+  echo "    Please export RABBITMQ_DEFAULT_USER or define it in .env" >&2
   exit 1
 fi
 
 if [ -z "${RABBITMQ_DEFAULT_PASS:-}" ]; then
   echo "[-] ERROR: Missing required environment variable: RABBITMQ_DEFAULT_PASS" >&2
-  echo "    RabbitMQ requires a password via environment/secret. Please export RABBITMQ_DEFAULT_PASS or configure .env." >&2
+  echo "    Please export RABBITMQ_DEFAULT_PASS or define it in .env" >&2
   exit 1
 fi
 
-TEARDOWN=0
-for arg in "$@"; do
-  if [ "$arg" = "--down" ]; then
-    TEARDOWN=1
-  fi
-done
+echo "    [✓] Required environment credentials provided without fallbacks."
 
-cleanup() {
-  if [ "$TEARDOWN" -eq 1 ]; then
-    echo "[SMOKE] Tearing down dev stack (--down requested)..."
-    docker compose -f "${DEPLOY_DIR}/docker-compose.yml" down -v
-  fi
-}
-trap cleanup EXIT
-
-echo "======================================================================"
-echo " Starting GRU-61 Redis + RabbitMQ Dev Infrastructure Smoke Test"
-echo "======================================================================"
-echo "Repo Root: ${REPO_ROOT}"
-echo "Deploy Dir: ${DEPLOY_DIR}"
-
-# 1. Check prerequisites
 if ! command -v docker &> /dev/null; then
   echo "[-] ERROR: docker is not installed or not in PATH."
   exit 1
@@ -74,11 +85,11 @@ if ! docker compose version &> /dev/null; then
 fi
 
 # 2. Start stack
-echo "[+] Starting Docker Compose dev stack..."
+echo "[+] 2. Starting Docker Compose dev stack..."
 docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d
 
 # 3. Wait for services to become healthy
-echo "[+] Waiting for containers to become healthy (timeout: 90s)..."
+echo "[+] 3. Waiting for containers to become healthy (timeout: 90s)..."
 wait_healthy() {
   local container="$1"
   local max_attempts=45
@@ -110,7 +121,7 @@ wait_healthy "agentic-rabbitmq-dev"
 # 4. Redis Verification
 echo ""
 echo "======================================================================"
-echo " Verifying Redis"
+echo " 4. Verifying Redis"
 echo "======================================================================"
 
 echo "[+] 4.1. Testing Redis PING with environment password..."
@@ -146,7 +157,7 @@ echo "    [✓] Redis SET/GET/DEL operations verified."
 # 5. RabbitMQ Verification
 echo ""
 echo "======================================================================"
-echo " Verifying RabbitMQ"
+echo " 5. Verifying RabbitMQ"
 echo "======================================================================"
 
 RABBIT_USER="${RABBITMQ_DEFAULT_USER}"
@@ -178,9 +189,9 @@ for ex in "voice.commands" "voice.events" "voice.dlx"; do
   echo "    [✓] Exchange '${ex}' confirmed."
 done
 
-echo "[+] 5.4. Validating required Queues and DLX configuration (loaded automatically on startup)..."
+echo "[+] 5.4. Validating Work Queues and DLX configuration..."
 QUEUES_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/queues/%2F")
-for q in "call.dispatch" "call.retry" "tool.jobs" "transcript.persist" "voice.dead"; do
+for q in "call.dispatch" "tool.jobs" "transcript.persist" "voice.dead"; do
   EXISTS=$(echo "$QUEUES_JSON" | python3 -c "import sys, json; qs = [x['name'] for x in json.load(sys.stdin)]; print('${q}' in qs)")
   if [ "$EXISTS" != "True" ]; then
     echo "[-] ERROR: Missing queue '${q}'"
@@ -196,16 +207,74 @@ args = target.get('arguments', {}) if target else {}
 print(args.get('x-dead-letter-exchange') == 'voice.dlx' and args.get('x-dead-letter-routing-key') == 'voice.dead')
 ")
     if [ "$DLX_CHECK" != "True" ]; then
-      echo "[-] ERROR: Queue '${q}' does not have expected DLX arguments configured."
+      echo "[-] ERROR: Work Queue '${q}' does not have expected DLX arguments configured (voice.dlx -> voice.dead)."
       exit 1
     fi
-    echo "    [✓] Queue '${q}' confirmed (durable, DLX: voice.dlx -> voice.dead)."
+    echo "    [✓] Work Queue '${q}' confirmed (durable, DLX: voice.dlx -> voice.dead)."
   else
     echo "    [✓] Dead Letter Queue '${q}' confirmed (durable)."
   fi
 done
 
-echo "[+] 5.5. Testing end-to-end messaging pipeline..."
+echo "[+] 5.5. Validating Stage-Based Retry Delay Queues and fixed TTLs..."
+# Expected stage queues with respective TTLs
+declare -A RETRY_TTLS=( ["call.retry.30s"]=30000 ["call.retry.120s"]=120000 ["call.retry.600s"]=600000 )
+
+for rq in "${!RETRY_TTLS[@]}"; do
+  EXPECTED_TTL="${RETRY_TTLS[$rq]}"
+  RQ_CHECK=$(echo "$QUEUES_JSON" | python3 -c "
+import sys, json
+queues = json.load(sys.stdin)
+target = next((x for x in queues if x['name'] == '${rq}'), None)
+if not target:
+    print('NOT_FOUND')
+else:
+    args = target.get('arguments', {})
+    ttl = args.get('x-message-ttl')
+    dlx = args.get('x-dead-letter-exchange')
+    dlk = args.get('x-dead-letter-routing-key')
+    if ttl == ${EXPECTED_TTL} and dlx == 'voice.commands' and dlk == 'call.dispatch':
+        print('VALID')
+    else:
+        print(f'INVALID: ttl={ttl}, dlx={dlx}, dlk={dlk}')
+")
+  if [ "$RQ_CHECK" != "VALID" ]; then
+    echo "[-] ERROR: Retry Queue '${rq}' verification failed: ${RQ_CHECK}"
+    exit 1
+  fi
+  echo "    [✓] Retry Delay Queue '${rq}' confirmed (durable, x-message-ttl: ${EXPECTED_TTL}ms, DLX: voice.commands -> call.dispatch)."
+done
+
+echo "[+] 5.6. Validating Bindings for all Queues..."
+BINDINGS_JSON=$(curl -s -u "${RABBIT_USER}:${RABBIT_PASS}" "${API_BASE}/bindings/%2F")
+check_binding() {
+  local src="$1"
+  local dst="$2"
+  local key="$3"
+  local found
+  found=$(echo "$BINDINGS_JSON" | python3 -c "
+import sys, json
+bindings = json.load(sys.stdin)
+match = any(b.get('source') == '${src}' and b.get('destination') == '${dst}' and b.get('routing_key') == '${key}' for b in bindings)
+print('TRUE' if match else 'FALSE')
+")
+  if [ "$found" != "TRUE" ]; then
+    echo "[-] ERROR: Missing binding: ${src} -> ${dst} (key: ${key})"
+    exit 1
+  fi
+  echo "    [✓] Binding confirmed: ${src} -> ${dst} (key: ${key})"
+}
+
+check_binding "voice.commands" "call.dispatch" "call.dispatch"
+check_binding "voice.commands" "call.retry.30s" "call.retry.30s"
+check_binding "voice.commands" "call.retry.120s" "call.retry.120s"
+check_binding "voice.commands" "call.retry.600s" "call.retry.600s"
+check_binding "voice.commands" "tool.jobs" "tool.jobs"
+check_binding "voice.events" "transcript.persist" "transcript.persist"
+check_binding "voice.dlx" "voice.dead" "voice.dead"
+check_binding "voice.dlx" "voice.dead" "#"
+
+echo "[+] 5.7. Testing end-to-end messaging pipeline on call.dispatch..."
 # Publish message to voice.commands -> call.dispatch
 PAYLOAD='{"properties":{},"routing_key":"call.dispatch","payload":"{\"test\":\"smoke_call_dispatch\"}","payload_encoding":"string"}'
 curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
@@ -226,7 +295,7 @@ if [ "$MSG_FOUND" != "True" ]; then
 fi
 echo "    [✓] Publishing to voice.commands and consuming from call.dispatch verified."
 
-echo "[+] 5.6. Testing dead letter queue (voice.dlx -> voice.dead)..."
+echo "[+] 5.8. Testing Dead Letter Queue routing (voice.dlx -> voice.dead)..."
 # Publish directly to voice.dlx -> voice.dead
 DLX_PAYLOAD='{"properties":{},"routing_key":"voice.dead","payload":"{\"test\":\"smoke_voice_dead\"}","payload_encoding":"string"}'
 curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
@@ -244,6 +313,49 @@ if [ "$DLQ_FOUND" != "True" ]; then
   exit 1
 fi
 echo "    [✓] Dead Letter Queue routing (voice.dlx -> voice.dead) verified."
+
+echo "[+] 5.9. Testing Stage-Based Retry Delay Return (call.retry.30s -> TTL -> call.dispatch)..."
+# Publish test message to voice.commands with routing key call.retry.30s
+RETRY_TOKEN="smoke_retry_return_$(date +%s)"
+RETRY_PAYLOAD="{\"properties\":{},\"routing_key\":\"call.retry.30s\",\"payload\":\"{\\\"token\\\":\\\"${RETRY_TOKEN}\\\"}\",\"payload_encoding\":\"string\"}"
+
+curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+  -d "$RETRY_PAYLOAD" \
+  "${API_BASE}/exchanges/%2F/voice.commands/publish" > /dev/null
+
+echo "    [i] Published message with token '${RETRY_TOKEN}' to call.retry.30s."
+echo "    [i] Waiting for 30s queue TTL expiration and dead-letter return to call.dispatch..."
+
+RETURNED=false
+for i in $(seq 1 18); do
+  sleep 2
+  POLL_RESP=$(curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+    -d '{"count":5,"ackmode":"ack_requeue_false","encoding":"auto","truncate":50000}' \
+    "${API_BASE}/queues/%2F/call.dispatch/get" || true)
+
+  HAS_MSG=$(echo "$POLL_RESP" | python3 -c "
+import sys, json
+try:
+    msgs = json.load(sys.stdin)
+    found = any('${RETRY_TOKEN}' in m.get('payload', '') for m in msgs)
+    print('FOUND' if found else 'NOT_YET')
+except Exception:
+    print('ERROR')
+")
+
+  if [ "$HAS_MSG" = "FOUND" ]; then
+    echo "    [✓] Message arrived back in 'call.dispatch' after TTL dead-lettering (at ~${i}x2s)."
+    RETURNED=true
+    break
+  fi
+  echo "    [i] Polling call.dispatch ($((i*2))s elapsed)..."
+done
+
+if [ "$RETURNED" != "true" ]; then
+  echo "[-] ERROR: Message did not return to call.dispatch within timeout."
+  exit 1
+fi
+echo "    [✓] Stage-based retry dead-lettering verified end-to-end."
 
 echo ""
 echo "======================================================================"

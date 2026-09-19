@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Declarative RabbitMQ Topology Setup & Verification
-# Task: GRU-61 / ADR-002
+# Task: GRU-61 / ADR-002 / GRU-57
 # ==============================================================================
 set -euo pipefail
 
@@ -77,26 +77,50 @@ for exchange in voice.commands voice.events voice.dlx; do
     '{"type":"topic","durable":true,"auto_delete":false,"internal":false,"arguments":{}}' > /dev/null
 done
 
-# 2. Declare Queues with DLX (except DLQ itself)
-echo "Declaring Queues..."
-for queue in call.dispatch call.retry tool.jobs transcript.persist; do
+# 2. Declare Work Queues with DLX to voice.dlx -> voice.dead
+echo "Declaring Work Queues..."
+for queue in call.dispatch tool.jobs transcript.persist; do
   echo "  - Queue: ${queue} (durable: true, DLX: voice.dlx, DLQ key: voice.dead)"
   api_req PUT "/queues/${ENCODED_VHOST}/${queue}" \
     '{"durable":true,"auto_delete":false,"arguments":{"x-dead-letter-exchange":"voice.dlx","x-dead-letter-routing-key":"voice.dead"}}' > /dev/null
 done
 
-# 3. Declare Dead Letter Queue (voice.dead)
+# 3. Declare Stage-Based Retry Delay Queues with DLX back to voice.commands -> call.dispatch
+echo "Declaring Stage-Based Retry Delay Queues..."
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.30s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":30000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.30s (durable, TTL: 30s, DLX: voice.commands -> call.dispatch)"
+
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.120s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":120000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.120s (durable, TTL: 120s, DLX: voice.commands -> call.dispatch)"
+
+api_req PUT "/queues/${ENCODED_VHOST}/call.retry.600s" \
+  '{"durable":true,"auto_delete":false,"arguments":{"x-message-ttl":600000,"x-dead-letter-exchange":"voice.commands","x-dead-letter-routing-key":"call.dispatch"}}' > /dev/null
+echo "  - Queue: call.retry.600s (durable, TTL: 600s, DLX: voice.commands -> call.dispatch)"
+
+# 4. Declare Dead Letter Queue (voice.dead)
+echo "Declaring Dead Letter Queue..."
 echo "  - Queue: voice.dead (DLQ, durable: true)"
 api_req PUT "/queues/${ENCODED_VHOST}/voice.dead" \
   '{"durable":true,"auto_delete":false,"arguments":{}}' > /dev/null
 
-# 4. Declare Bindings
+# 5. Declare Bindings
 echo "Declaring Bindings..."
-# voice.commands -> call.dispatch, call.retry, tool.jobs
-for queue in call.dispatch call.retry tool.jobs; do
-  echo "  - Binding: voice.commands -> ${queue} (key: ${queue})"
-  api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/${queue}" \
-    "{\"routing_key\":\"${queue}\",\"arguments\":{}}" > /dev/null
+# voice.commands -> call.dispatch, tool.jobs
+echo "  - Binding: voice.commands -> call.dispatch (key: call.dispatch)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/call.dispatch" \
+  '{"routing_key":"call.dispatch","arguments":{}}' > /dev/null
+
+echo "  - Binding: voice.commands -> tool.jobs (key: tool.jobs)"
+api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/tool.jobs" \
+  '{"routing_key":"tool.jobs","arguments":{}}' > /dev/null
+
+# voice.commands -> retry delay queues
+for rk in call.retry.30s call.retry.120s call.retry.600s; do
+  echo "  - Binding: voice.commands -> ${rk} (key: ${rk})"
+  api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/${rk}" \
+    "{\"routing_key\":\"${rk}\",\"arguments\":{}}" > /dev/null
 done
 
 # voice.events -> transcript.persist

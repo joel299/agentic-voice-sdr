@@ -46,13 +46,36 @@
       }
     },
     {
-      "name": "call.retry",
+      "name": "call.retry.30s",
       "vhost": "/",
       "durable": true,
       "auto_delete": false,
       "arguments": {
-        "x-dead-letter-exchange": "voice.dlx",
-        "x-dead-letter-routing-key": "voice.dead"
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
+      }
+    },
+    {
+      "name": "call.retry.120s",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 120000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
+      }
+    },
+    {
+      "name": "call.retry.600s",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 600000,
+        "x-dead-letter-exchange": "voice.commands",
+        "x-dead-letter-routing-key": "call.dispatch"
       }
     },
     {
@@ -95,9 +118,25 @@
     {
       "source": "voice.commands",
       "vhost": "/",
-      "destination": "call.retry",
+      "destination": "call.retry.30s",
       "destination_type": "queue",
-      "routing_key": "call.retry",
+      "routing_key": "call.retry.30s",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry.120s",
+      "destination_type": "queue",
+      "routing_key": "call.retry.120s",
+      "arguments": {}
+    },
+    {
+      "source": "voice.commands",
+      "vhost": "/",
+      "destination": "call.retry.600s",
+      "destination_type": "queue",
+      "routing_key": "call.retry.600s",
       "arguments": {}
     },
     {

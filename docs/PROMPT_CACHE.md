@@ -35,6 +35,15 @@ CURRENT_CONTEXT={{shared_memory_context}}
 
 Execute the smallest safe implementation. Stop only if HUMAN_GATE applies.
 
+DUAL_TRACKING:
+Every GRU MUST exist in both Linear and GitHub.
+- Linear GRU = control-plane state/dependencies.
+- GitHub Issue mirror = repository-side durable task record.
+- Link both directions.
+- Code/doc changes must also link the PR.
+- Review/corrections are recorded in Linear + GitHub Issue + PR.
+- GitHub Issue closes only after Linear is Done.
+
 CI_GATE:
 Before returning a microtask to Review:
 1. push corrections to the existing task branch;

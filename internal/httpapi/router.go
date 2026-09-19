@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -19,7 +20,23 @@ type configAPI struct {
 }
 
 func NewRouter() http.Handler {
-	return NewRouterWithServices(whatsapp.NewService(whatsapp.NewRegistry(nil), nil), unavailableSIPConfigurator{})
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = config.Config{}
+	}
+	return NewRouterWithConfig(cfg)
+}
+
+func NewRouterWithConfig(cfg config.Config) http.Handler {
+	var store whatsapp.ConfigStore = whatsapp.NewMemoryConfigStore()
+	if cfg.WhatsAppConfigPath != "" {
+		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
+	}
+	return NewRouterWithWhatsAppStore(store)
+}
+
+func NewRouterWithWhatsAppStore(store whatsapp.ConfigStore) http.Handler {
+	return NewRouterWithServices(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), unavailableSIPConfigurator{})
 }
 
 func NewRouterWithServices(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator) http.Handler {

@@ -150,10 +150,21 @@ func (p *HTTPProvider) safeClient() *http.Client {
 		}
 		return nil
 	}
-	if transport, ok := base.Transport.(*http.Transport); ok {
-		clone := transport.Clone()
+
+	var baseTransport *http.Transport
+	if base.Transport == nil {
+		if defTransport, ok := http.DefaultTransport.(*http.Transport); ok && defTransport != nil {
+			baseTransport = defTransport.Clone()
+		} else {
+			baseTransport = &http.Transport{}
+		}
+	} else if t, ok := base.Transport.(*http.Transport); ok && t != nil {
+		baseTransport = t.Clone()
+	}
+
+	if baseTransport != nil {
 		dialer := &net.Dialer{Timeout: 5 * time.Second}
-		clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		baseTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
 				return nil, err
@@ -172,7 +183,7 @@ func (p *HTTPProvider) safeClient() *http.Client {
 			}
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
 		}
-		client.Transport = clone
+		client.Transport = baseTransport
 	}
 	return &client
 }

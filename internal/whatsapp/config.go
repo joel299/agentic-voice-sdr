@@ -133,14 +133,33 @@ func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig,
 	if err := provider.ValidateConnection(ctx, input.BaseURL, input.Credential); err != nil {
 		return SafeConfig{}, fmt.Errorf("%w: validate provider connection: %v", ErrProviderOperation, err)
 	}
+	configuredBaseURL := strings.TrimSpace(input.BaseURL)
+	s.mu.RLock()
+	previousProvider, previousBaseURL, previousActive := s.provider, s.baseURL, s.active
+	s.mu.RUnlock()
+	preserved := Instance{}
+	if previousProvider == providerName && previousBaseURL == configuredBaseURL && previousActive.ID != "" {
+		if refreshed, refreshErr := provider.GetInstanceStatus(ctx, configuredBaseURL, input.Credential, previousActive.ID); refreshErr == nil && ready(refreshed.Status) {
+			preserved = previousActive
+			preserved.ID = firstNonEmpty(refreshed.ID, preserved.ID)
+			preserved.Name = firstNonEmpty(refreshed.Name, preserved.Name)
+			preserved.Phone = firstNonEmpty(refreshed.Phone, preserved.Phone)
+			preserved.Status = refreshed.Status
+		}
+	}
 	if s.binding != nil {
 		if err := s.binding.ClearActiveWhatsAppInstance(ctx); err != nil {
 			return SafeConfig{}, fmt.Errorf("%w: clear runtime binding: %v", ErrProviderOperation, err)
 		}
 	}
 	s.mu.Lock()
-	s.provider, s.baseURL, s.secret, s.active, s.verified = providerName, strings.TrimSpace(input.BaseURL), input.Credential, Instance{}, time.Now().UTC()
+	s.provider, s.baseURL, s.secret, s.active, s.verified = providerName, configuredBaseURL, input.Credential, preserved, time.Now().UTC()
 	s.mu.Unlock()
+	if preserved.ID != "" && s.binding != nil {
+		if err := s.binding.SetActiveWhatsAppInstance(ctx, preserved); err != nil {
+			return SafeConfig{}, fmt.Errorf("%w: restore runtime binding: %v", ErrProviderOperation, err)
+		}
+	}
 	if err := s.saveMetadata(ctx); err != nil {
 		return SafeConfig{}, fmt.Errorf("%w: persist metadata: %v", ErrProviderOperation, err)
 	}
@@ -218,6 +237,18 @@ func (s *Service) SelectInstance(ctx context.Context, instanceID string) (SafeCo
 func (s *Service) Get(ctx context.Context) (SafeConfig, error) {
 	provider, baseURL, credential, err := s.providerAndCredential()
 	if err != nil {
+		if errors.Is(err, ErrNotConfigured) {
+			s.mu.RLock()
+			persisted := s.provider != "" && s.baseURL != ""
+			status := s.active.Status
+			s.mu.RUnlock()
+			if persisted {
+				result := s.safeConfig(status)
+				result.CredentialConfigured = false
+				result.SDRStatus = "PERSISTED"
+				return result, nil
+			}
+		}
 		return SafeConfig{}, err
 	}
 	s.mu.RLock()

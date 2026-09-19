@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -104,4 +107,22 @@ func TestConfigurationValidationAndProviderErrors(t *testing.T) {
 	}
 	_ = json.Valid
 	_ = errors.Is
+}
+
+func TestWhatsAppRouterCompositionWithFileConfigStore(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "whatsapp-config.json")
+	cfg := config.Config{
+		HTTPAddr:           ":8080",
+		WhatsAppConfigPath: storePath,
+	}
+
+	handler := NewRouterWithConfig(cfg)
+	if handler == nil {
+		t.Fatal("expected non-nil router")
+	}
+
+	// Verify store file does not exist initially
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("expected store path not to exist before config, got err: %v", err)
+	}
 }

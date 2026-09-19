@@ -57,3 +57,27 @@ func TestHTTPProviderRejectsPrivateRedirectAndDialResolution(t *testing.T) {
 		t.Fatal("redirect to private address accepted")
 	}
 }
+
+func TestServiceRestartRecoversMetadataWithoutCredential(t *testing.T) {
+	store := &FileConfigStore{Path: t.TempDir() + "/whatsapp.json"}
+	provider := &fakeProvider{instances: []Instance{{ID: "wa-1", Phone: "+5511", Status: StatusReady}}, statusByID: map[string]Instance{"wa-1": {ID: "wa-1", Phone: "+5511", Status: StatusReady}}}
+	registry := NewRegistry(map[string]WhatsAppProvider{"test": provider})
+	first := NewServiceWithStore(registry, nil, store)
+	if _, err := first.Configure(context.Background(), ConfigInput{Provider: "test", BaseURL: "https://provider.example", Credential: "transient-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.SelectInstance(context.Background(), "wa-1"); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewServiceWithStore(registry, nil, store)
+	got, err := restarted.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "test" || got.BaseURL != "https://provider.example" || got.ActiveInstanceID != "wa-1" || got.CredentialConfigured {
+		t.Fatalf("restart metadata not recovered safely: %+v", got)
+	}
+	if got.SDRStatus != "PERSISTED" {
+		t.Fatalf("unexpected restart status: %q", got.SDRStatus)
+	}
+}

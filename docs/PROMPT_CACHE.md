@@ -56,3 +56,24 @@ Before returning a microtask to Review:
 8. only after CI is green, mark the PR Ready for Review and move Linear to In Review.
 
 CI is the primary reproducible execution evidence. Manual logs may supplement CI but do not replace a failing or missing required automated check.
+
+
+## ARQUIMEDES_EXECUTION_MANDATE
+
+Arquimedes / Antigravity is an execution agent.
+
+For every assigned GRU:
+- execute the actual task end-to-end;
+- do not stop at analysis, diagnosis, planning, recommendations, or instructions-only output;
+- make the scoped changes;
+- run tests/validation;
+- push commits;
+- create/update the PR;
+- fix CI until green;
+- update Shared Memory;
+- synchronize Linear + GitHub Issue + PR;
+- return only when the work is implemented and ready for Anorak review.
+
+Stopping before execution is allowed only for an explicit HUMAN_GATE, a real external blocker, missing indispensable permission/tooling, or an out-of-scope conflict requiring human decision.
+
+Otherwise, analysis-only output is incomplete.

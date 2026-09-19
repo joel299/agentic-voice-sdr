@@ -3,6 +3,25 @@
 - **Linear Issue**: [e.g. GRU-56]
 - **Assigned Agent**: [e.g. Arquimedes / Antigravity]
 
+## Human Authorization Gate
+
+- [ ] Initial inspection performed in READ-ONLY mode.
+- [ ] Exact intended changes presented to human.
+- [ ] Existing content to be preserved identified.
+- [ ] Any removal/replacement/rename explicitly disclosed.
+- [ ] Explicit human authorization received before first write.
+- **Authorization evidence**: [reference / user authorization]
+
+## Preservation Check
+
+- [ ] No existing project functionality/content was removed.
+- [ ] No existing flow/stage/integration/documentation was silently omitted.
+- [ ] Before/After comparison completed.
+- [ ] Any authorized removal is explicitly documented below.
+
+**Authorized removals**:
+None / [explicit authorization]
+
 ## Scope & Changes
 
 Provide a concise summary of the changes introduced in this PR:

@@ -14,6 +14,48 @@ This protocol governs all autonomous AI agent interactions, development workflow
 > [!CAUTION]
 > **Retired Agents**: Cursor is retired from task execution and MUST NOT be assigned as owner of new microtasks or PRs.
 
+## Mandatory Human Authorization Before Writes
+
+Every executor must begin in **READ-ONLY** mode.
+
+Before any write action, the executor must:
+- inspect current state in READ-ONLY mode;
+- describe the exact intended changes;
+- identify affected files/resources;
+- identify what existing content will be preserved;
+- explicitly disclose any removal, replacement, or rename;
+- request explicit human authorization;
+- wait for explicit approval before proceeding.
+
+Without explicit human authorization, no write action is permitted.
+
+Write actions include:
+- file modification;
+- branch creation or modification;
+- commit;
+- push;
+- PR creation or update;
+- GitHub Issue mutation or comment;
+- Linear issue state mutation;
+- Shared Memory mutation;
+- review-thread resolution;
+- releases or pre-releases;
+- repository settings;
+- destructive actions.
+
+## Preservation by Default Rules
+
+Existing project content must be preserved by default.
+
+Agents must not delete, remove, replace, rename, deprecate, or silently omit existing project content unless the human explicitly authorizes that specific action.
+
+If a requested change appears to require removal of existing content or features:
+1. **STOP** immediately.
+2. **EXPLAIN** exactly what would be affected.
+3. **REQUEST** explicit human authorization for that specific removal.
+
+Do not remove one valid part of the project while correcting another.
+
 ## Mandatory Context Loading Order
 
 Every engineering agent must load, in order:
@@ -37,43 +79,55 @@ Every agent must follow this execution loop for every microtask:
  1. Load Context in Mandatory Order (Linear issue -> Prompt Cache -> PRD -> SDD -> ADRs -> TDD -> Loop Engineering -> Shared Memory)
       │
       ▼
- 2. Write Failing Test (RED) -> Run `go test -race ./...`
+ 2. Human Authorization Gate (Inspect in READ-ONLY mode -> Request & wait for explicit human approval before writes)
       │
       ▼
- 3. Implement Minimum Code (GREEN) -> Verify test passes
+ 3. Create or Confirm GitHub Issue Mirror & Establish Bidirectional Cross-Links (Linear <-> GitHub Issue)
       │
       ▼
- 4. Refactor & Clean -> Verify zero regression
+ 4. Confirm Task Execution State & Create Dedicated Branch
       │
       ▼
- 5. Run Local Verification & Health Checks
+ 5. Write Failing Test (RED) -> Run `go test -race ./...`
       │
       ▼
- 6. Push to Dedicated Branch -> Wait for GitHub Actions CI (100% Green)
+ 6. Implement Minimum Code (GREEN) -> Verify test passes
       │
       ▼
- 7. Perform Mandatory Dual Tracking & Synchronization:
-    a. Create or confirm GitHub Issue mirror for assigned Linear GRU
-    b. Establish bidirectional cross-links: Linear -> GitHub Issue and GitHub Issue -> Linear
-    c. Link PR in both Linear issue and GitHub Issue
-    d. Register Shared Memory handoff entry via MCP
-    e. Register review/correction outcomes in Linear + GitHub Issue + PR
-    f. Confirm GitHub Issue remains OPEN (closed ONLY after Anorak moves Linear to Done)
+ 7. Refactor & Clean -> Verify zero regression
       │
       ▼
- 8. Move Linear Issue to `In Review`
+ 8. Push Dedicated Branch to Remote Repository
       │
       ▼
- 9. Handoff to Anorak (Reviewer) for Final Review
+ 9. Open or Update PR Targeting `main` & Link PR in Linear Issue + GitHub Issue Mirror
+      │
+      ▼
+10. Wait for GitHub Actions CI (100% Green) & Fix Failures if Any
+      │
+      ▼
+11. Register Shared Memory Handoff Entry via MCP
+      │
+      ▼
+12. Synchronize Review and Correction Outcomes in Linear + GitHub Issue + PR
+      │
+      ▼
+13. Confirm GitHub Issue Mirror Remains OPEN
+      │
+      ▼
+14. Move Linear Issue to `In Review`
+      │
+      ▼
+15. Handoff to Anorak (Reviewer) for Final Review
 ```
 
 ## Dual Tracking & Issue Mirroring Rules
 
 Every microtask (GRU) requires complete dual tracking between Linear and GitHub Issues:
 - **Canonical Reference**: `AGENTS.md` is the canonical reference for repository governance and dual tracking rules.
-- **Issue Mirroring**: Every Linear GRU must have a corresponding GitHub Issue mirror.
+- **Issue Mirroring**: Every Linear GRU must have a corresponding GitHub Issue mirror created before implementation begins.
 - **Bidirectional Cross-Linking**: The Linear GRU must link to the GitHub Issue URL, and the GitHub Issue description/comment must link back to the Linear GRU.
-- **PR Association**: Any pull request containing repository changes must be linked in both the Linear GRU and the GitHub Issue mirror.
+- **PR Association**: Any pull request containing repository changes must be linked in both the Linear GRU and the GitHub Issue mirror before waiting for CI.
 - **Review & Correction Outcomes**: All review outcomes, feedback, and correction requests must be logged across Linear, the GitHub Issue mirror, and the PR.
 - **Issue Lifecycle**: The GitHub Issue mirror **MUST REMAIN OPEN** while the Linear GRU is in `Backlog`, `Todo`, `In Progress`, or `In Review`. The GitHub Issue is closed **ONLY AFTER** Anorak completes final verification and transitions the Linear GRU to `Done`.
 

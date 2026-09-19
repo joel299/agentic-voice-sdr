@@ -270,3 +270,99 @@ func TestServerInvalidInputDoesNotPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServerCloseBeforeServeIsTerminal(t *testing.T) {
+	server := NewServer("127.0.0.1:0", func(_ context.Context, _ *Stream) error { return nil })
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Listen(); !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("expected ErrServerClosed from Listen, got %v", err)
+	}
+	if err := server.Serve(context.Background()); !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("expected ErrServerClosed from Serve, got %v", err)
+	}
+	if server.Addr() != nil {
+		t.Fatal("closed server retained a listener")
+	}
+}
+
+func TestServerShutdownBeforeServeIsTerminal(t *testing.T) {
+	server := NewServer("127.0.0.1:0", func(_ context.Context, _ *Stream) error { return nil })
+	if err := server.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Listen(); !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("expected ErrServerClosed from Listen, got %v", err)
+	}
+	if err := server.Serve(context.Background()); !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("expected ErrServerClosed from Serve, got %v", err)
+	}
+	if server.Addr() != nil {
+		t.Fatal("closed server retained a listener")
+	}
+}
+
+type controlledListener struct {
+	accepted      net.Conn
+	addr          net.Addr
+	acceptStarted chan struct{}
+	closeStarted  chan struct{}
+	releaseAccept chan struct{}
+	closeOnce     sync.Once
+}
+
+func (l *controlledListener) Accept() (net.Conn, error) {
+	close(l.acceptStarted)
+	<-l.releaseAccept
+	return l.accepted, nil
+}
+
+func (l *controlledListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closeStarted) })
+	return nil
+}
+
+func (l *controlledListener) Addr() net.Addr { return l.addr }
+
+func TestServerDoesNotInvokeHandlerForConnectionAcceptedAfterShutdown(t *testing.T) {
+	serverSide, clientSide := net.Pipe()
+	listener := &controlledListener{
+		accepted:      serverSide,
+		addr:          fakeAddr("controlled"),
+		acceptStarted: make(chan struct{}),
+		closeStarted:  make(chan struct{}),
+		releaseAccept: make(chan struct{}),
+	}
+	server := NewServer("unused", func(_ context.Context, _ *Stream) error {
+		t.Fatal("handler invoked after shutdown started")
+		return nil
+	})
+	server.listener = listener
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- server.Serve(context.Background()) }()
+	<-listener.acceptStarted
+
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- server.Shutdown(context.Background()) }()
+	<-listener.closeStarted
+	close(listener.releaseAccept)
+
+	if err := <-shutdownResult; err != nil {
+		t.Fatalf("shutdown returned %v", err)
+	}
+	if err := <-serveErrors; err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+	_ = clientSide.SetReadDeadline(time.Now().Add(time.Second))
+	var one [1]byte
+	if _, err := clientSide.Read(one[:]); !errors.Is(err, io.EOF) {
+		t.Fatalf("accepted connection was not closed: %v", err)
+	}
+	_ = clientSide.Close()
+}
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "tcp" }
+func (a fakeAddr) String() string  { return string(a) }

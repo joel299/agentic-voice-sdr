@@ -12,6 +12,8 @@ var (
 	ErrNilHandler = errors.New("audiosocket: nil connection handler")
 	// ErrServerRunning indicates that Serve was called more than once concurrently.
 	ErrServerRunning = errors.New("audiosocket: server already running")
+	// ErrServerClosed indicates that the server lifecycle has been terminated.
+	ErrServerClosed = errors.New("audiosocket: server closed")
 )
 
 // ConnectionHandler handles one accepted AudioSocket connection.
@@ -29,6 +31,7 @@ type Server struct {
 	serveDone chan struct{}
 	serving   bool
 	shutdown  bool
+	closed    bool
 }
 
 // NewServer creates a TCP server using the caller-provided address.
@@ -43,6 +46,9 @@ func (s *Server) Listen() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return ErrServerClosed
+	}
 	if s.listener != nil {
 		return nil
 	}
@@ -85,12 +91,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrServerClosed
+	}
 	if s.serving {
 		s.mu.Unlock()
 		return ErrServerRunning
 	}
 	s.serving = true
-	s.shutdown = false
 	s.serveDone = make(chan struct{})
 	listener := s.listener
 	done := s.serveDone
@@ -122,6 +131,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
+		if s.shutdown || s.closed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return nil
+		}
 		s.active = conn
 		s.mu.Unlock()
 		err = s.handler(ctx, NewStream(conn, conn))
@@ -183,6 +197,7 @@ func (s *Server) requestShutdown() {
 		return
 	}
 	s.shutdown = true
+	s.closed = true
 	listener := s.listener
 	active := s.active
 	s.mu.Unlock()

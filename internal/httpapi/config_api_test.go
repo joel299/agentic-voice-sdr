@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -33,7 +32,7 @@ func (p *apiProvider) SendMessage(context.Context, string, string, string, strin
 
 type apiSIP struct{ configured bool }
 
-func (s *apiSIP) Configure(context.Context, sip.Config) error { s.configured = true; return nil }
+func (s *apiSIP) Configure(context.Context, SIPConfigRequest) error { s.configured = true; return nil }
 
 func testAPI() (http.Handler, *apiSIP) {
 	provider := &apiProvider{instances: []whatsapp.Instance{{ID: "wa-1", Phone: "+5511", Status: whatsapp.StatusConnected}}}
@@ -72,7 +71,7 @@ func TestWhatsAppConfigurationAPIAndSecretMasking(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("select status=%d body=%s", res.Code, res.Body)
 	}
-	res = requestJSON(t, handler, http.MethodPost, "/v1/config/whatsapp/test", `{}`)
+	res = requestJSON(t, handler, http.MethodPost, "/v1/config/whatsapp/test", "")
 	if res.Code != http.StatusOK {
 		t.Fatalf("test status=%d body=%s", res.Code, res.Body)
 	}
@@ -80,7 +79,7 @@ func TestWhatsAppConfigurationAPIAndSecretMasking(t *testing.T) {
 
 func TestSIPConfigurationBoundaryMasksSecret(t *testing.T) {
 	handler, boundary := testAPI()
-	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"generic","name":"main","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"password","username":"alice","secret":"secret"},"enabled":true}`)
+	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"generic","name":"main","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"userpass","username":"alice","secret":"secret"},"enabled":true}`)
 	if res.Code != http.StatusOK || !boundary.configured {
 		t.Fatalf("sip status=%d body=%s configured=%v", res.Code, res.Body, boundary.configured)
 	}

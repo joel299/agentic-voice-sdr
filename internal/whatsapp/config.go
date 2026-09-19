@@ -85,6 +85,7 @@ type Service struct {
 	transitionMu sync.Mutex
 	registry     *ProviderRegistry
 	binding      RuntimeBinding
+	store        ConfigStore
 	provider     string
 	baseURL      string
 	secret       string
@@ -93,10 +94,23 @@ type Service struct {
 }
 
 func NewService(registry *ProviderRegistry, binding RuntimeBinding) *Service {
+	return NewServiceWithStore(registry, binding, NewMemoryConfigStore())
+}
+
+func NewServiceWithStore(registry *ProviderRegistry, binding RuntimeBinding, store ConfigStore) *Service {
 	if registry == nil {
 		registry = NewRegistry(nil)
 	}
-	return &Service{registry: registry, binding: binding}
+	service := &Service{registry: registry, binding: binding, store: store}
+	if store != nil {
+		if metadata, err := store.Load(context.Background()); err == nil {
+			service.provider = metadata.Provider
+			service.baseURL = metadata.BaseURL
+			service.active = Instance{ID: metadata.ActiveInstanceID, Phone: metadata.ActiveInstancePhone, Status: metadata.ProviderStatus}
+			service.verified = metadata.LastVerifiedAt
+		}
+	}
+	return service
 }
 
 func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig, error) {
@@ -127,6 +141,9 @@ func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig,
 	s.mu.Lock()
 	s.provider, s.baseURL, s.secret, s.active, s.verified = providerName, strings.TrimSpace(input.BaseURL), input.Credential, Instance{}, time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.saveMetadata(ctx); err != nil {
+		return SafeConfig{}, fmt.Errorf("%w: persist metadata: %v", ErrProviderOperation, err)
+	}
 	return s.safeConfig(StatusConnected), nil
 }
 
@@ -192,6 +209,9 @@ func (s *Service) SelectInstance(ctx context.Context, instanceID string) (SafeCo
 	s.mu.Lock()
 	s.active, s.verified = selected, time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.saveMetadata(ctx); err != nil {
+		return SafeConfig{}, fmt.Errorf("%w: persist metadata: %v", ErrProviderOperation, err)
+	}
 	return s.safeConfig(selected.Status), nil
 }
 
@@ -275,6 +295,16 @@ func (s *Service) safeConfig(status string) SafeConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return SafeConfig{Provider: s.provider, BaseURL: s.baseURL, CredentialConfigured: s.secret != "", ActiveInstanceID: s.active.ID, ActiveInstancePhone: s.active.Phone, ProviderStatus: status, SDRStatus: "CONFIGURED", LastVerifiedAt: s.verified}
+}
+
+func (s *Service) saveMetadata(ctx context.Context) error {
+	if s.store == nil {
+		return nil
+	}
+	s.mu.RLock()
+	metadata := ConfigMetadata{Provider: s.provider, BaseURL: s.baseURL, ActiveInstanceID: s.active.ID, ActiveInstancePhone: s.active.Phone, ProviderStatus: s.active.Status, LastVerifiedAt: s.verified}
+	s.mu.RUnlock()
+	return s.store.Save(ctx, metadata)
 }
 
 func ValidateBaseURL(raw string) error {

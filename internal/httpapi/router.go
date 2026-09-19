@@ -8,22 +8,21 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
 type configAPI struct {
 	whatsapp  *whatsapp.Service
-	sip       sip.Configurator
+	sip       SIPConfigurator
 	mu        sync.RWMutex
-	sipConfig *sip.SafeConfig
+	sipConfig *SIPSafeResponse
 }
 
 func NewRouter() http.Handler {
-	return NewRouterWithServices(whatsapp.NewService(whatsapp.NewRegistry(nil), nil), sip.UnavailableConfigurator{})
+	return NewRouterWithServices(whatsapp.NewService(whatsapp.NewRegistry(nil), nil), unavailableSIPConfigurator{})
 }
 
-func NewRouterWithServices(whatsappService *whatsapp.Service, sipConfigurator sip.Configurator) http.Handler {
+func NewRouterWithServices(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator) http.Handler {
 	a := &configAPI{whatsapp: whatsappService, sip: sipConfigurator}
 	router := chi.NewRouter()
 	router.Get("/healthz", health)
@@ -83,10 +82,6 @@ func (a *configAPI) putWhatsAppInstance(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 func (a *configAPI) testWhatsApp(w http.ResponseWriter, r *http.Request) {
-	var input map[string]any
-	if decodeJSON(w, r, &input) != nil {
-		return
-	}
 	result, err := a.whatsapp.Test(r.Context())
 	if err != nil {
 		writeConfigError(w, err)
@@ -96,7 +91,7 @@ func (a *configAPI) testWhatsApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
-	var input sip.Config
+	var input SIPConfigRequest
 	if decodeJSON(w, r, &input) != nil {
 		return
 	}
@@ -105,7 +100,7 @@ func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.sip.Configure(r.Context(), input); err != nil {
-		if errors.Is(err, sip.ErrBoundaryUnavailable) {
+		if errors.Is(err, errSIPBoundaryUnavailable) {
 			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "SIP operational boundary unavailable"})
 			return
 		}

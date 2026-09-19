@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -17,17 +19,15 @@ type HTTPProvider struct {
 	Client            *http.Client
 	ListInstancesPath string
 	StatusPath        func(baseURL, instanceID string) string
+	Resolver          func(context.Context, string) ([]net.IP, error)
 }
 
 func NewHTTPProvider(listPath string, statusPath func(string, string) string) *HTTPProvider {
 	return &HTTPProvider{Client: &http.Client{Timeout: 5 * time.Second}, ListInstancesPath: listPath, StatusPath: statusPath}
 }
-
 func (p *HTTPProvider) ValidateConnection(ctx context.Context, baseURL, credential string) error {
-	if _, err := p.request(ctx, joinEndpoint(baseURL, p.ListInstancesPath), credential); err != nil {
-		return err
-	}
-	return nil
+	_, err := p.request(ctx, joinEndpoint(baseURL, p.ListInstancesPath), credential)
+	return err
 }
 func (p *HTTPProvider) ListInstances(ctx context.Context, baseURL, credential string) ([]Instance, error) {
 	body, err := p.request(ctx, joinEndpoint(baseURL, p.ListInstancesPath), credential)
@@ -60,7 +60,6 @@ func (p *HTTPProvider) GetInstanceStatus(ctx context.Context, baseURL, credentia
 func (p *HTTPProvider) SendMessage(context.Context, string, string, string, string, string) error {
 	return errors.New("provider send-message contract is not configured")
 }
-
 func joinEndpoint(baseURL, path string) string {
 	return strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(path, "/")
 }
@@ -69,16 +68,16 @@ func (p *HTTPProvider) request(ctx context.Context, endpoint, credential string)
 	if strings.TrimSpace(endpoint) == "" {
 		return nil, errors.New("provider endpoint is not configured")
 	}
+	if err := p.validateEndpoint(ctx, endpoint); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, errors.New("invalid provider endpoint")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+credential)
-	client := p.Client
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
-	}
+	client := p.safeClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("provider unreachable")
@@ -100,6 +99,83 @@ func (p *HTTPProvider) request(ctx context.Context, endpoint, credential string)
 	return body, nil
 }
 
+func (p *HTTPProvider) resolver() func(context.Context, string) ([]net.IP, error) {
+	if p.Resolver != nil {
+		return p.Resolver
+	}
+	return func(_ context.Context, host string) ([]net.IP, error) { return net.LookupIP(host) }
+}
+func (p *HTTPProvider) validateEndpoint(ctx context.Context, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
+		return errors.New("invalid provider endpoint")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return errors.New("provider endpoint host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if forbiddenIP(ip) {
+			return errors.New("provider endpoint host is not allowed")
+		}
+		return nil
+	}
+	ips, err := p.resolver()(ctx, host)
+	if err != nil {
+		return errors.New("provider host resolution failed")
+	}
+	if len(ips) == 0 {
+		return errors.New("provider host resolution failed")
+	}
+	for _, ip := range ips {
+		if forbiddenIP(ip) {
+			return errors.New("provider endpoint resolves to a private host")
+		}
+	}
+	return nil
+}
+func (p *HTTPProvider) safeClient() *http.Client {
+	base := p.Client
+	if base == nil {
+		base = &http.Client{Timeout: 5 * time.Second}
+	}
+	client := *base
+	previous := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := p.validateEndpoint(req.Context(), req.URL.String()); err != nil {
+			return err
+		}
+		if previous != nil {
+			return previous(req, via)
+		}
+		return nil
+	}
+	if transport, ok := base.Transport.(*http.Transport); ok {
+		clone := transport.Clone()
+		dialer := &net.Dialer{Timeout: 5 * time.Second}
+		clone.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := p.resolver()(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			for _, ip := range ips {
+				if forbiddenIP(ip) {
+					return nil, errors.New("provider dial target is not allowed")
+				}
+			}
+			if len(ips) == 0 {
+				return nil, errors.New("provider dial target unavailable")
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		}
+		client.Transport = clone
+	}
+	return &client
+}
 func normalizeInstances(body []byte) ([]Instance, error) {
 	var raw any
 	if err := json.Unmarshal(body, &raw); err != nil {

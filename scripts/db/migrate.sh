@@ -22,7 +22,13 @@ POSTGRES_DB="${POSTGRES_DB:-agentic_voice_sdr_dev}"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-agentic-postgres-dev}"
-MIGRATIONS_DIR="${ROOT_DIR}/migrations"
+
+# Prefer db/migrations if present, fallback to migrations
+if [[ -d "${ROOT_DIR}/db/migrations" ]]; then
+  MIGRATIONS_DIR="${ROOT_DIR}/db/migrations"
+else
+  MIGRATIONS_DIR="${ROOT_DIR}/migrations"
+fi
 
 echo "[+] Starting PostgreSQL Dev Migration Process..."
 echo "    Host: ${POSTGRES_HOST}:${POSTGRES_PORT}"
@@ -37,7 +43,7 @@ fi
 # Function to execute psql query
 run_psql() {
   local query="$1"
-  if docker ps --format {{.Names}} | grep -q "^${CONTAINER_NAME}$"; then
+  if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "${query}"
   else
     PGPASSWORD="${POSTGRES_PASSWORD}" psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "${query}"
@@ -48,7 +54,7 @@ run_psql() {
 run_sql_file() {
   local file="$1"
   echo "    Applying migration file: $(basename "${file}")"
-  if docker ps --format {{.Names}} | grep -q "^${CONTAINER_NAME}$"; then
+  if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     docker exec -i -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" < "${file}"
   else
     PGPASSWORD="${POSTGRES_PASSWORD}" psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -f "${file}"
@@ -71,8 +77,7 @@ if [[ -d "${MIGRATIONS_DIR}" ]]; then
 
   if [[ ${#sql_files[@]} -gt 0 ]]; then
     echo "[+] Found ${#sql_files[@]} migration file(s) in ${MIGRATIONS_DIR}:"
-    for sql_file in $(printf "%s
-" "${sql_files[@]}" | sort); do
+    for sql_file in $(printf "%s\n" "${sql_files[@]}" | sort); do
       run_sql_file "${sql_file}"
     done
     echo "[+] All migration files applied successfully."

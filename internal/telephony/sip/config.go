@@ -3,6 +3,7 @@ package sip
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -39,6 +40,9 @@ const (
 	StatusRegistrationFailed LifecycleStatus = "REGISTRATION_FAILED"
 	StatusDisabled           LifecycleStatus = "DISABLED"
 )
+
+// Allowlist regex for trunk names to strictly prevent path traversal and injection.
+var trunkNameRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 // TrunkConfig defines the provider-agnostic SIP trunk configuration.
 type TrunkConfig struct {
@@ -100,10 +104,15 @@ func hasInjectionChars(s string) bool {
 	return strings.ContainsAny(s, "\r\n[]")
 }
 
-// Validate checks the configuration for semantic correctness and injection safety.
+// Validate checks the configuration for semantic correctness and injection/traversal safety.
 func (c *TrunkConfig) Validate() error {
-	if strings.TrimSpace(c.Name) == "" {
+	trimmedName := strings.TrimSpace(c.Name)
+	if trimmedName == "" {
 		return fmt.Errorf("trunk name is required")
+	}
+
+	if !trunkNameRegex.MatchString(c.Name) {
+		return fmt.Errorf("invalid trunk name %q: violates allowlist format (must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ and contain no path traversal)", c.Name)
 	}
 
 	if strings.TrimSpace(c.Host) == "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -29,8 +30,15 @@ func (d DefaultNetworkDialer) DialContext(ctx context.Context, network, address 
 }
 
 func (d DefaultNetworkDialer) DialTLSContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	// Strict TLS: InsecureSkipVerify is false by default. ServerName set to target hostname.
+	tlsConfig := &tls.Config{
+		ServerName: host,
+	}
 	conn, err := tls.DialWithDialer(dialer, network, address, tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("tls handshake failed for %s: %w", address, err)
@@ -61,6 +69,8 @@ func (r OSCommandRunner) RunCommand(ctx context.Context, name string, args ...st
 type AsteriskReloader interface {
 	ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error
 	RemovePJSIPConfig(ctx context.Context, trunkName string) error
+	CheckAsteriskHealth(ctx context.Context) (bool, error)
+	CheckEndpoint(ctx context.Context, trunkName string) (bool, error)
 	CheckRegistration(ctx context.Context, trunkName string) (string, bool, error)
 }
 
@@ -84,42 +94,168 @@ func NewRealAsteriskReloader(configDir string, runner CommandRunner) *RealAsteri
 	}
 }
 
+// getConfigPath validates trunkName against allowlist and ensures the final clean path stays inside configDir.
+func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
+	if !trunkNameRegex.MatchString(trunkName) {
+		return "", fmt.Errorf("invalid trunk name %q: violates security allowlist", trunkName)
+	}
+	cleanDir := filepath.Clean(r.configDir)
+	targetPath := filepath.Clean(filepath.Join(cleanDir, fmt.Sprintf("%s.conf", trunkName)))
+	rel, err := filepath.Rel(cleanDir, targetPath)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return "", fmt.Errorf("security violation: path traversal detected for trunk %q", trunkName)
+	}
+	return targetPath, nil
+}
+
+// copyFile performs a secure file copy with 0600 permissions.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+// ApplyPJSIPConfig executes an atomic PJSIP transaction (temp -> validate -> backup -> rename -> reload).
 func (r *RealAsteriskReloader) ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
 	if err := os.MkdirAll(r.configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create Asterisk config dir %s: %w", r.configDir, err)
 	}
 
-	filename := filepath.Join(r.configDir, fmt.Sprintf("%s.conf", trunkName))
-
-	// Write file securely with 0600 permissions to prevent secret leakage
-	if err := os.WriteFile(filename, []byte(pjsipConf), 0600); err != nil {
-		return fmt.Errorf("failed to write PJSIP config file %s: %w", filename, err)
+	targetPath, err := r.getConfigPath(trunkName)
+	if err != nil {
+		return err
 	}
 
-	// Execute Asterisk reload
+	tmpPath := targetPath + ".tmp"
+	bakPath := targetPath + ".bak"
+
+	// Step 1: Write temp file with 0600 permissions
+	if err := os.WriteFile(tmpPath, []byte(pjsipConf), 0600); err != nil {
+		return fmt.Errorf("failed to write temp PJSIP config file %s: %w", tmpPath, err)
+	}
+
+	// Step 2: Preserve existing config if present
+	hasPrev := false
+	if _, err := os.Stat(targetPath); err == nil {
+		if err := copyFile(targetPath, bakPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("failed to backup existing PJSIP config file: %w", err)
+		}
+		hasPrev = true
+	}
+
+	// Step 3: Atomic rename
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		_ = os.Remove(tmpPath)
+		if hasPrev {
+			_ = os.Remove(bakPath)
+		}
+		return fmt.Errorf("failed to atomically apply PJSIP config file: %w", err)
+	}
+
+	// Step 4: Reload Asterisk PJSIP module
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 	if err != nil {
-		return fmt.Errorf("asterisk reload failed: %w, output: %s", err, out)
+		// Rollback on reload failure
+		if hasPrev {
+			_ = os.Rename(bakPath, targetPath)
+			_, _ = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+		} else {
+			_ = os.Remove(targetPath)
+			_, _ = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+		}
+		return fmt.Errorf("asterisk reload failed during trunk apply: %w, output: %s", err, out)
+	}
+
+	if hasPrev {
+		_ = os.Remove(bakPath)
 	}
 	return nil
 }
 
+// RemovePJSIPConfig executes an atomic disable transaction with rollback on failure.
 func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
-	filename := filepath.Join(r.configDir, fmt.Sprintf("%s.conf", trunkName))
+	targetPath, err := r.getConfigPath(trunkName)
+	if err != nil {
+		return err
+	}
 
-	if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove PJSIP config file %s: %w", filename, err)
+	bakPath := targetPath + ".bak"
+	hasPrev := false
+
+	if _, err := os.Stat(targetPath); err == nil {
+		if err := copyFile(targetPath, bakPath); err != nil {
+			return fmt.Errorf("failed to backup config prior to removal: %w", err)
+		}
+		hasPrev = true
+		if err := os.Remove(targetPath); err != nil {
+			_ = os.Remove(bakPath)
+			return fmt.Errorf("failed to remove PJSIP config file %s: %w", targetPath, err)
+		}
 	}
 
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 	if err != nil {
+		// Rollback on reload failure
+		if hasPrev {
+			_ = os.Rename(bakPath, targetPath)
+			_, _ = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+		}
 		return fmt.Errorf("asterisk reload failed during trunk removal: %w, output: %s", err, out)
 	}
+
+	if hasPrev {
+		_ = os.Remove(bakPath)
+	}
 	return nil
 }
 
+// CheckAsteriskHealth checks if Asterisk service process is responsive.
+func (r *RealAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, error) {
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "core show status")
+	if err != nil {
+		return false, fmt.Errorf("asterisk health check failed: %w, output: %s", err, out)
+	}
+	if strings.Contains(strings.ToLower(out), "asterisk") {
+		return true, nil
+	}
+	return false, fmt.Errorf("asterisk status output invalid: %s", out)
+}
+
+// CheckEndpoint queries Asterisk CLI to confirm the endpoint was loaded into Asterisk runtime.
+func (r *RealAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show endpoint trunk-%s", trunkName))
+	if err != nil {
+		return false, fmt.Errorf("failed to query endpoint status: %w", err)
+	}
+
+	lowerOut := strings.ToLower(out)
+	if strings.Contains(lowerOut, "unable to find object") || strings.Contains(lowerOut, "no objects found") {
+		return false, fmt.Errorf("endpoint trunk-%s not found in Asterisk", trunkName)
+	}
+	if strings.Contains(lowerOut, "endpoint:") || strings.Contains(lowerOut, "objects found: 1") || strings.Contains(lowerOut, strings.ToLower(trunkName)) {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("endpoint trunk-%s not found in Asterisk output: %s", trunkName, out)
+}
+
+// CheckRegistration queries Asterisk CLI to verify outbound trunk registration status.
 func (r *RealAsteriskReloader) CheckRegistration(ctx context.Context, trunkName string) (string, bool, error) {
-	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show registration %s-reg", trunkName))
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show registration trunk-%s-reg", trunkName))
 	if err != nil {
 		return "Unregistered", false, fmt.Errorf("failed to query registration status: %w", err)
 	}
@@ -179,14 +315,14 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 		return report, fmt.Errorf("invalid trunk configuration: %w", err)
 	}
 
-	// Handling Enabled = false
+	// Handling Enabled = false (Disable transaction)
 	if !cfg.Enabled {
 		m.mu.Lock()
 		prevCfg, exists := m.trunks[cfg.Name]
 		m.mu.Unlock()
 
 		if exists && prevCfg.Enabled {
-			// Remove PJSIP config from Asterisk
+			// Remove PJSIP config from Asterisk with rollback on failure
 			if err := m.reloader.RemovePJSIPConfig(ctx, cfg.Name); err != nil {
 				return StatusReport{}, fmt.Errorf("failed to disable trunk in Asterisk: %w", err)
 			}
@@ -255,20 +391,41 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 		return report, fmt.Errorf("PJSIP generation failed: %w", err)
 	}
 
-	// Step 4: Reconcile with Asterisk
+	// Step 4: Reconcile / Apply PJSIP with Asterisk
 	if err := m.reloader.ApplyPJSIPConfig(ctx, cfg.Name, pjsipConf); err != nil {
 		report.Status = StatusConfigured
 		report.LastError = fmt.Sprintf("Asterisk reload error: %v", err)
 		return report, fmt.Errorf("asterisk reload failed: %w", err)
 	}
 
-	// Step 5: Verify Registration & Readiness
-	regState, healthy, regErr := m.reloader.CheckRegistration(ctx, cfg.Name)
+	// Step 5: Check Asterisk Health
+	healthy, healthErr := m.reloader.CheckAsteriskHealth(ctx)
 	report.AsteriskHealthy = healthy
-	report.RegistrationState = regState
+	if healthErr != nil || !healthy {
+		_ = m.reloader.RemovePJSIPConfig(ctx, cfg.Name) // Rollback applied config
+		report.Status = StatusConnectionError
+		report.EndpointActive = false
+		report.LastError = fmt.Sprintf("Asterisk health check failed: %v", healthErr)
+		return report, fmt.Errorf("asterisk health check failed: %w", healthErr)
+	}
 
+	// Step 6: Check Endpoint Existence in Asterisk
+	epActive, epErr := m.reloader.CheckEndpoint(ctx, cfg.Name)
+	report.EndpointActive = epActive
+	if epErr != nil || !epActive {
+		_ = m.reloader.RemovePJSIPConfig(ctx, cfg.Name) // Rollback applied config
+		report.Status = StatusConfigured
+		report.EndpointActive = false
+		report.LastError = fmt.Sprintf("Endpoint check failed: %v", epErr)
+		return report, fmt.Errorf("asterisk endpoint check failed: %w", epErr)
+	}
+
+	// Step 7: Verify Registration if required
 	if cfg.RegistrationRequired {
-		if regErr != nil || !healthy || (regState != "Registered" && regState != "REGISTERED") {
+		regState, regHealthy, regErr := m.reloader.CheckRegistration(ctx, cfg.Name)
+		report.RegistrationState = regState
+		if regErr != nil || !regHealthy || (regState != "Registered" && regState != "REGISTERED") {
+			_ = m.reloader.RemovePJSIPConfig(ctx, cfg.Name) // Rollback applied config
 			report.Status = StatusRegistrationFailed
 			report.EndpointActive = false
 			report.LastError = fmt.Sprintf("Registration failed: state=%s, err=%v", regState, regErr)
@@ -277,16 +434,12 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 		report.Status = StatusReady
 		report.EndpointActive = true
 	} else {
-		if healthy {
-			report.Status = StatusReady
-			report.EndpointActive = true
-		} else {
-			report.Status = StatusConfigured
-			report.EndpointActive = false
-		}
+		report.RegistrationState = "N/A"
+		report.Status = StatusReady
+		report.EndpointActive = true
 	}
 
-	// Commit state safely only after successful reconciliation
+	// Commit state safely only after full success
 	m.mu.Lock()
 	m.trunks[cfg.Name] = cfg
 	m.statuses[cfg.Name] = report

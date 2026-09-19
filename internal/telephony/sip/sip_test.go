@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,8 +45,11 @@ func (m *mockDialer) LookupHost(ctx context.Context, host string) ([]string, err
 
 type MockAsteriskReloader struct {
 	Healthy           bool
+	EndpointActive    bool
 	RegistrationState string
 	ReloadErr         error
+	HealthErr         error
+	EndpointErr       error
 	RemoveCalled      bool
 	ApplyCalled       bool
 }
@@ -57,6 +62,23 @@ func (m *MockAsteriskReloader) ApplyPJSIPConfig(ctx context.Context, trunkName s
 func (m *MockAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
 	m.RemoveCalled = true
 	return m.ReloadErr
+}
+
+func (m *MockAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, error) {
+	if m.HealthErr != nil {
+		return false, m.HealthErr
+	}
+	return m.Healthy, nil
+}
+
+func (m *MockAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
+	if m.EndpointErr != nil {
+		return false, m.EndpointErr
+	}
+	if !m.EndpointActive && m.EndpointErr == nil {
+		return false, errors.New("endpoint not found")
+	}
+	return true, nil
 }
 
 func (m *MockAsteriskReloader) CheckRegistration(ctx context.Context, trunkName string) (string, bool, error) {
@@ -75,26 +97,29 @@ func (m *MockAsteriskReloader) CheckRegistration(ctx context.Context, trunkName 
 
 func TestNewManagerRequiresDependencies(t *testing.T) {
 	dialer := &mockDialer{}
-	reloader := &MockAsteriskReloader{Healthy: true}
+	reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
 
 	t.Run("nil reloader rejected", func(t *testing.T) {
 		_, err := sip.NewManager(dialer, nil)
 		if err == nil {
-			t.Error("expected error when reloader is nil, got nil")
+			t.Error("expected error for nil reloader, got nil")
 		}
 	})
 
 	t.Run("nil dialer rejected", func(t *testing.T) {
 		_, err := sip.NewManager(nil, reloader)
 		if err == nil {
-			t.Error("expected error when dialer is nil, got nil")
+			t.Error("expected error for nil dialer, got nil")
 		}
 	})
 
 	t.Run("valid manager instantiation", func(t *testing.T) {
 		mgr, err := sip.NewManager(dialer, reloader)
-		if err != nil || mgr == nil {
-			t.Fatalf("expected valid manager, got err: %v", err)
+		if err != nil {
+			t.Fatalf("unexpected error during manager instantiation: %v", err)
+		}
+		if mgr == nil {
+			t.Fatal("expected non-nil manager")
 		}
 	})
 }
@@ -103,10 +128,10 @@ func TestPortValidationCases(t *testing.T) {
 	t.Run("port 0 defaults to 5060", func(t *testing.T) {
 		cfg := sip.TrunkConfig{Name: "test", Host: "sip.example.invalid", Port: 0, AuthType: sip.AuthIP}
 		if err := cfg.Validate(); err != nil {
-			t.Fatalf("expected port 0 to be valid, got: %v", err)
+			t.Fatalf("unexpected error on port 0: %v", err)
 		}
 		if cfg.Port != 5060 {
-			t.Errorf("expected default port 5060, got %d", cfg.Port)
+			t.Errorf("expected port to default to 5060, got: %d", cfg.Port)
 		}
 	})
 
@@ -141,10 +166,10 @@ func TestPJSIPInjectionRejection(t *testing.T) {
 
 	for _, input := range badInputs {
 		cfg := sip.TrunkConfig{
-			Name:         input,
+			Name:         "validname",
 			Host:         "sip.example.invalid",
 			AuthType:     sip.AuthUserPass,
-			AuthUsername: "user",
+			AuthUsername: input,
 			Secret:       "pass",
 		}
 		if err := cfg.Validate(); err == nil {
@@ -153,10 +178,35 @@ func TestPJSIPInjectionRejection(t *testing.T) {
 	}
 }
 
+func TestPathTraversalRejection(t *testing.T) {
+	badNames := []string{
+		"../trunk",
+		"../../etc/passwd",
+		"foo/bar",
+		"foo\\bar",
+		"spaces in name",
+		"cr\ninjection",
+		"[section]",
+		"-invalidstart",
+		".invalidstart",
+	}
+
+	for _, badName := range badNames {
+		cfg := sip.TrunkConfig{
+			Name:     badName,
+			Host:     "sip.example.invalid",
+			AuthType: sip.AuthIP,
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected path traversal/allowlist validation error for trunk name %q, got nil", badName)
+		}
+	}
+}
+
 func TestRegistrationIdentityValidation(t *testing.T) {
 	t.Run("missing identity when registration required", func(t *testing.T) {
 		cfg := sip.TrunkConfig{
-			Name:                 "no-identity",
+			Name:                 "noidentity",
 			Host:                 "sip.example.invalid",
 			AuthType:             sip.AuthIP,
 			RegistrationRequired: true,
@@ -168,7 +218,7 @@ func TestRegistrationIdentityValidation(t *testing.T) {
 
 	t.Run("valid registration with from_user identity", func(t *testing.T) {
 		cfg := sip.TrunkConfig{
-			Name:                 "from-user-identity",
+			Name:                 "fromuseridentity",
 			Host:                 "sip.example.invalid",
 			AuthType:             sip.AuthIP,
 			FromUser:             "trunk_user_123",
@@ -191,7 +241,7 @@ func TestRegistrationIdentityValidation(t *testing.T) {
 func TestSecretMaskingWhitespace(t *testing.T) {
 	secretWithSpace := "top secret password 123"
 	cfg := sip.TrunkConfig{
-		Name:         "secret-test",
+		Name:         "secrettest",
 		Host:         "sip.example.invalid",
 		AuthType:     sip.AuthUserPass,
 		AuthUsername: "user",
@@ -216,11 +266,11 @@ func TestSecretMaskingWhitespace(t *testing.T) {
 func TestTLSReachabilityAndFailure(t *testing.T) {
 	t.Run("TLS reachability success", func(t *testing.T) {
 		dialer := &mockDialer{}
-		reloader := &MockAsteriskReloader{Healthy: true}
+		reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		cfg := sip.TrunkConfig{
-			Name:      "tls-trunk",
+			Name:      "tlstrunk",
 			Host:      "sip.example.invalid",
 			Port:      5061,
 			Transport: sip.TransportTLS,
@@ -239,11 +289,11 @@ func TestTLSReachabilityAndFailure(t *testing.T) {
 
 	t.Run("TLS handshake failure", func(t *testing.T) {
 		dialer := &mockDialer{tlsErr: errors.New("tls handshake certificate expired")}
-		reloader := &MockAsteriskReloader{Healthy: true}
+		reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		cfg := sip.TrunkConfig{
-			Name:      "tls-failed-trunk",
+			Name:      "tlsfailedtrunk",
 			Host:      "sip.example.invalid",
 			Port:      5061,
 			Transport: sip.TransportTLS,
@@ -263,12 +313,12 @@ func TestTLSReachabilityAndFailure(t *testing.T) {
 
 func TestDisableTrunkLifecycle(t *testing.T) {
 	dialer := &mockDialer{}
-	reloader := &MockAsteriskReloader{Healthy: true}
+	reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
 	mgr, _ := sip.NewManager(dialer, reloader)
 
 	// Step 1: Enable trunk
 	cfg := sip.TrunkConfig{
-		Name:     "active-trunk",
+		Name:     "activetrunk",
 		Host:     "sip.example.invalid",
 		AuthType: sip.AuthIP,
 		Enabled:  true,
@@ -301,11 +351,11 @@ func TestDisableTrunkLifecycle(t *testing.T) {
 func TestRegistrationFailures(t *testing.T) {
 	t.Run("registration rejected", func(t *testing.T) {
 		dialer := &mockDialer{}
-		reloader := &MockAsteriskReloader{Healthy: true, RegistrationState: "Rejected"}
+		reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true, RegistrationState: "Rejected"}
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		cfg := sip.TrunkConfig{
-			Name:                 "rejected-trunk",
+			Name:                 "rejectedtrunk",
 			Host:                 "sip.example.invalid",
 			AuthType:             sip.AuthUserPass,
 			AuthUsername:         "user",
@@ -328,11 +378,11 @@ func TestRegistrationFailures(t *testing.T) {
 
 	t.Run("registration error", func(t *testing.T) {
 		dialer := &mockDialer{}
-		reloader := &MockAsteriskReloader{Healthy: true, RegistrationState: "Failed"}
+		reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true, RegistrationState: "Failed"}
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		cfg := sip.TrunkConfig{
-			Name:                 "failed-trunk",
+			Name:                 "failedtrunk",
 			Host:                 "sip.example.invalid",
 			AuthType:             sip.AuthUserPass,
 			AuthUsername:         "user",
@@ -351,14 +401,92 @@ func TestRegistrationFailures(t *testing.T) {
 	})
 }
 
+func TestAsteriskHealthAndEndpointChecks(t *testing.T) {
+	t.Run("unhealthy asterisk triggers rollback and error", func(t *testing.T) {
+		dialer := &mockDialer{}
+		reloader := &MockAsteriskReloader{Healthy: false, HealthErr: errors.New("asterisk service dead")}
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		cfg := sip.TrunkConfig{
+			Name:     "unhealthytrunk",
+			Host:     "sip.example.invalid",
+			AuthType: sip.AuthIP,
+			Enabled:  true,
+		}
+
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Error("expected error when Asterisk is unhealthy, got nil")
+		}
+		if !reloader.RemoveCalled {
+			t.Error("expected RemovePJSIPConfig to be called for rollback when Asterisk is unhealthy")
+		}
+		if status.Status != sip.StatusConnectionError {
+			t.Errorf("expected STATUS_CONNECTION_ERROR, got %s", status.Status)
+		}
+	})
+
+	t.Run("endpoint missing in Asterisk triggers rollback and error", func(t *testing.T) {
+		dialer := &mockDialer{}
+		reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: false, EndpointErr: errors.New("endpoint not found")}
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		cfg := sip.TrunkConfig{
+			Name:     "missingendpoint",
+			Host:     "sip.example.invalid",
+			AuthType: sip.AuthIP,
+			Enabled:  true,
+		}
+
+		status, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Error("expected error when endpoint is missing, got nil")
+		}
+		if !reloader.RemoveCalled {
+			t.Error("expected RemovePJSIPConfig to be called for rollback when endpoint is missing")
+		}
+		if status.Status != sip.StatusConfigured {
+			t.Errorf("expected STATUS_CONFIGURED, got %s", status.Status)
+		}
+	})
+}
+
+func TestNonRegistrationTrunk(t *testing.T) {
+	dialer := &mockDialer{}
+	reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
+	mgr, _ := sip.NewManager(dialer, reloader)
+
+	cfg := sip.TrunkConfig{
+		Name:                 "ipauthtrunk",
+		Host:                 "sip.example.invalid",
+		AuthType:             sip.AuthIP,
+		RegistrationRequired: false,
+		Enabled:              true,
+	}
+
+	status, err := mgr.ApplyTrunk(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("expected non-registration trunk to succeed, got: %v", err)
+	}
+	if status.Status != sip.StatusReady {
+		t.Errorf("expected status READY for non-registration trunk, got: %s", status.Status)
+	}
+	if !status.EndpointActive {
+		t.Error("expected EndpointActive to be true")
+	}
+	if status.RegistrationState != "N/A" {
+		t.Errorf("expected RegistrationState N/A, got: %s", status.RegistrationState)
+	}
+}
+
 func TestCodecDefensiveCopy(t *testing.T) {
 	dialer := &mockDialer{}
-	reloader := &MockAsteriskReloader{Healthy: true}
+	reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true}
 	mgr, _ := sip.NewManager(dialer, reloader)
 
 	originalCodecs := []string{"ulaw", "alaw"}
 	cfg := sip.TrunkConfig{
-		Name:     "codec-test",
+		Name:     "codectest",
 		Host:     "sip.example.invalid",
 		AuthType: sip.AuthIP,
 		Codecs:   originalCodecs,
@@ -373,8 +501,92 @@ func TestCodecDefensiveCopy(t *testing.T) {
 	// Mutate caller's slice
 	originalCodecs[0] = "g729_injected"
 
-	storedCfg, _ := mgr.GetTrunk("codec-test")
+	storedCfg, _ := mgr.GetTrunk("codectest")
 	if storedCfg.Codecs[0] == "g729_injected" {
 		t.Fatal("CRITICAL DEFENSIVE COPY FAILURE: internal state was mutated via caller slice modification!")
 	}
+}
+
+type mockRunner struct {
+	failReload bool
+}
+
+func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
+	cmdStr := strings.Join(args, " ")
+	if strings.Contains(cmdStr, "core show status") {
+		return "Asterisk 20.5.0", nil
+	}
+	if strings.Contains(cmdStr, "pjsip show endpoint") {
+		return "Endpoint: trunk-testtrunk/Unregistered", nil
+	}
+	if strings.Contains(cmdStr, "pjsip show registration") {
+		return "Objects found: 1 Registered", nil
+	}
+	if strings.Contains(cmdStr, "module reload res_pjsip.so") {
+		if r.failReload {
+			return "Module reload failed", errors.New("reload error")
+		}
+		return "Module reload succeeded", nil
+	}
+	return "", nil
+}
+
+func TestRealAsteriskReloaderAtomicTransactions(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "pjsip-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Run("atomic apply success", func(t *testing.T) {
+		runner := &mockRunner{}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+
+		err := reloader.ApplyPJSIPConfig(context.Background(), "testtrunk", "[trunk-testtrunk]\ntype=endpoint\n")
+		if err != nil {
+			t.Fatalf("expected atomic apply to succeed, got: %v", err)
+		}
+
+		targetFile := filepath.Join(tmpDir, "testtrunk.conf")
+		content, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("expected file %s to exist: %v", targetFile, err)
+		}
+		if !strings.Contains(string(content), "testtrunk") {
+			t.Errorf("unexpected file content: %s", string(content))
+		}
+	})
+
+	t.Run("atomic apply rollback on reload failure", func(t *testing.T) {
+		runner := &mockRunner{failReload: true}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+
+		err := reloader.ApplyPJSIPConfig(context.Background(), "failedtrunk", "[trunk-failedtrunk]\ntype=endpoint\n")
+		if err == nil {
+			t.Error("expected reload failure error, got nil")
+		}
+
+		targetFile := filepath.Join(tmpDir, "failedtrunk.conf")
+		if _, err := os.Stat(targetFile); err == nil {
+			t.Error("expected config file to be removed on reload failure rollback")
+		}
+	})
+
+	t.Run("atomic disable rollback on failure", func(t *testing.T) {
+		targetFile := filepath.Join(tmpDir, "disabletrunk.conf")
+		_ = os.WriteFile(targetFile, []byte("existing config"), 0600)
+
+		runner := &mockRunner{failReload: true}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+
+		err := reloader.RemovePJSIPConfig(context.Background(), "disabletrunk")
+		if err == nil {
+			t.Error("expected error on disable reload failure, got nil")
+		}
+
+		// Verify restored from backup
+		if _, err := os.Stat(targetFile); err != nil {
+			t.Error("expected config file to be restored after failed disable reload")
+		}
+	})
 }

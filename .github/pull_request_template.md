@@ -10,7 +10,15 @@ Provide a concise summary of the changes introduced in this PR:
 
 ## Microtask Checklist
 
-- [ ] Requirements and contract specs loaded and verified (`PRD`, `SDD`, `ADR`, `AGENTS.md`).
+- [ ] Context loaded in mandatory order:
+  1. assigned Linear issue
+  2. Prompt Cache
+  3. PRD
+  4. SDD
+  5. relevant ADRs
+  6. TDD
+  7. Loop Engineering
+  8. Shared Memory
 - [ ] TDD cycle followed (RED -> GREEN -> REFACTOR).
 - [ ] Unit / Integration test suite updated and passing (`go test -v -race ./...`).
 - [ ] Zero fallback or hardcoded credentials added.

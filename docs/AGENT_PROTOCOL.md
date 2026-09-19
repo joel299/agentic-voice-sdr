@@ -14,6 +14,18 @@ This protocol governs all autonomous AI agent interactions, development workflow
 > [!CAUTION]
 > **Retired Agents**: Cursor is retired from task execution and MUST NOT be assigned as owner of new microtasks or PRs.
 
+## Mandatory Context Loading Order
+
+Every engineering agent must load, in order:
+1. assigned Linear issue;
+2. Prompt Cache;
+3. PRD;
+4. SDD;
+5. relevant ADRs;
+6. TDD;
+7. Loop Engineering;
+8. Shared Memory context.
+
 ## Agent Operating Workflow
 
 Every agent must follow this execution loop for every microtask:
@@ -22,7 +34,7 @@ Every agent must follow this execution loop for every microtask:
 [Backlog Issue]
       │
       ▼
- 1. Load Specs (PRD, SDD, ADR, TDD, AGENTS.md, Shared Memory)
+ 1. Load Context in Mandatory Order (Linear issue -> Prompt Cache -> PRD -> SDD -> ADRs -> TDD -> Loop Engineering -> Shared Memory)
       │
       ▼
  2. Write Failing Test (RED) -> Run `go test -race ./...`

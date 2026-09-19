@@ -4,7 +4,7 @@
 **Architectural Baseline:** ADR-002, SDD v1.0, PRD v1.0
 **Owner:** Antigravity / Arquimedes
 **Reviewer:** Anorak
-**Status:** Approved Specification
+**Status:** In Review
 
 ---
 
@@ -22,11 +22,11 @@ It operationalizes **ADR-002** into immutable contracts, eliminating architectur
 - **PostgreSQL** is the sole authoritative system of record for all business entities, historical call records, lead qualification state, and audit logs.
 - **Redis is strictly non-authoritative**. All data stored in Redis must be disposable and reconstitutable from PostgreSQL or live external events. Under no circumstances may Redis be treated as persistent storage.
 
-### Rule 2.2 — Realtime Zero-PCM Path Invariant
+### Rule 2.2 — Realtime Zero-PCM Path Invariant & Latency Objective
 - **The realtime audio processing path is strictly:**
   $$\text{Fale Paco SIP} \longleftrightarrow \text{Asterisk} \longleftrightarrow \text{AudioSocket (TCP linear PCM)} \longleftrightarrow \text{Go Voice Engine} \longleftrightarrow \text{Gemini Live (BiDi WebSocket)}$$
-- **Absolute Prohibition:** **Redis, RabbitMQ, PostgreSQL, and n8n MUST NEVER enter the PCM/audio frame path.**
-- Audio frame processing operates in strict 20ms chunks (160 samples @ 8kHz or 320 samples @ 16kHz, 16-bit linear PCM mono) with a sub-800ms target round-trip latency. No synchronous database queries or message broker round-trips are permitted on the goroutine handling AudioSocket read/write loops.
+- **Absolute Architectural Invariant:** **Redis, RabbitMQ, PostgreSQL, and n8n MUST NEVER enter the PCM/audio frame path.**
+- **Latency Objective:** The system targets an end-to-end conversational round-trip latency objective under 800ms. The architecture explicitly acknowledges that external SIP trunk transit, carrier routing, Asterisk jitter buffers, public network variance, and Gemini Live inference contribute to the total end-to-end latency. The Go Voice Engine minimizes internal processing overhead by processing raw 20ms linear PCM chunks (160 samples @ 8kHz or 320 samples @ 16kHz, 16-bit mono) in lock-free memory loops without synchronous database, broker, or disk I/O.
 
 ### Rule 2.3 — Zero Dual-Write Invariant
 - Direct dual-writing from application code to both PostgreSQL and RabbitMQ within the same business transaction is strictly forbidden.
@@ -70,7 +70,7 @@ Every key written to Redis **MUST have an explicit TTL** assigned at creation ti
 | `agentic:lease:{resource}` | String (NodeID) | **60 seconds** | Lease | Worker lease. Heartbeat renews TTL every 15 seconds (`TTL / 4`). |
 | `agentic:dedup:{event_id}` | String ("1") | **24 hours** | Deduplication | Guarantees at-least-once consumers drop duplicate deliveries within the replay window. |
 | `agentic:idempotency:{key}` | String (JSON) | **24 hours** | Idempotency | Ensures duplicate external API invocations receive identical responses within standard idempotency window. |
-| `agentic:ratelimit:phone:{e164}` | Sorted Set | **24 hours** | Regulatory limit | Enforces Brazilian regulatory / carrier limits (e.g. max 3 attempts per 24h). |
+| `agentic:ratelimit:phone:{e164}` | Sorted Set | **24 hours** (or configured window) | Policy limit | Configurable dialing rate limit window per telephone number. |
 | `agentic:ratelimit:campaign:{id}`| String | **1 second / 1 minute** | Throttle | Enforces maximum concurrency and Calls Per Second (CPS) per campaign. |
 | `agentic:tool:{id}:result` | String (JSON) | **30 minutes** | Tool Cache | Retains function execution results during conversation turn. |
 
@@ -91,7 +91,7 @@ Every key written to Redis **MUST have an explicit TTL** assigned at creation ti
 1. Business mutation executes in PostgreSQL:
    ```sql
    BEGIN;
-   UPDATE leads SET status = QUALIFIED, updated_at = NOW() WHERE id = ld-7890;
+   UPDATE leads SET status = 'QUALIFIED', updated_at = NOW() WHERE id = 'ld-7890';
    INSERT INTO outbox_events (...) VALUES (...);
    COMMIT;
    ```
@@ -139,12 +139,14 @@ For writes to shared external state, locks must return a monotonically increasin
 
 ### 3.6 Rate Limiting Contract
 
-Rate limiting uses the **Sliding Window Log** algorithm via Redis Sorted Sets (`ZSET`):
+Rate limiting uses the **Sliding Window Log** algorithm via Redis Sorted Sets (`ZSET`).
+*Note on Compliance & Policy:* Maximum dial attempt limits per destination phone number and campaign windows are configurable application parameters. The platform enforces flexible sliding-window rate limits, with specific compliance rules and regulatory policy definitions evaluated and approved at the pre-production compliance review gate.
+
 ```lua
 -- KEYS[1]: agentic:ratelimit:phone:+5511999998888
 -- ARGV[1]: current_timestamp_ms
 -- ARGV[2]: window_size_ms (e.g. 86400000 for 24 hours)
--- ARGV[3]: max_allowed_limit (e.g. 3)
+-- ARGV[3]: max_allowed_limit (e.g. configurable limit per campaign/policy)
 -- ARGV[4]: unique_entry_id (UUID)
 
 local window_start = ARGV[1] - ARGV[2]
@@ -171,13 +173,13 @@ API endpoints accepting an `Idempotency-Key` header follow this deterministic st
    GET agentic:idempotency:K
    ├── Found (status: "COMPLETED") ──► Return cached status code & body immediately (Fast Path)
    ├── Found (status: "IN_PROGRESS") ─► Return 409 Conflict / 425 Too Early (Request concurrently running)
-   └── Not Found ─────────────────────► SET agentic:idempotency:K {status:IN_PROGRESS} NX EX 300
+   └── Not Found ─────────────────────► SET agentic:idempotency:K '{"status":"IN_PROGRESS"}' NX EX 300
                                                │
                                                ▼
                                       Execute Domain Transaction (PostgreSQL)
                                                │
                                                ▼
-                                      SET agentic:idempotency:K status:COMPLETED XX EX 86400
+                                      SET agentic:idempotency:K '{"status":"COMPLETED","body":...}' XX EX 86400
 ```
 
 ### 3.8 Health & Readiness Probes
@@ -192,24 +194,32 @@ API endpoints accepting an `Idempotency-Key` header follow this deterministic st
 
 ## 4. RabbitMQ Topology & Messaging Contract
 
-### 4.1 Topology Overview
+### 4.1 Topology Overview & Retry Architecture
 
-RabbitMQ operates as a reliable, asynchronous message broker for operational commands, lifecycle domain events, external tool execution, and transcript persistence.
+RabbitMQ operates as a reliable, asynchronous message broker for operational commands, lifecycle domain events, external tool execution, transcript persistence, and stage-based delay retries.
 
 ```
                          ┌──────────────────────────────────────────────────────────┐
                          │                     RabbitMQ Broker                      │
                          │                                                          │
                          │   [voice.commands] Exchange (topic, durable)             │
-                         │      ├── call.dispatch.# ──────► (call.dispatch) Queue   │
-                         │      ├── call.retry.# ─────────► (call.retry) Queue      │
+                         │      ├── call.dispatch ────────► (call.dispatch) Queue   │
+                         │      │                                                   │
+                         │      │  [Stage-Based Delay Queues (No active consumers)] │
+                         │      ├── call.retry.30s ───────► (call.retry.30s) Queue  │
+                         │      │                             TTL 30s ──► DLX: voice.commands (call.dispatch)
+                         │      ├── call.retry.120s ──────► (call.retry.120s) Queue │
+                         │      │                             TTL 120s ─► DLX: voice.commands (call.dispatch)
+                         │      ├── call.retry.600s ──────► (call.retry.600s) Queue │
+                         │      │                             TTL 600s ─► DLX: voice.commands (call.dispatch)
+                         │      │                                                   │
                          │      └── tool.job.# ───────────► (tool.jobs) Queue       │
                          │                                                          │
                          │   [voice.events] Exchange (topic, durable)               │
                          │      └── call.transcript.# ────► (transcript.persist)    │
                          │                                                          │
                          │   [voice.dlx] Exchange (topic, durable)                 │
-                         │      └── # ────────────────────► (voice.dead) Queue [DLQ]│
+                         │      └── voice.dead / # ───────► (voice.dead) Queue [DLQ]│
                          └──────────────────────────────────────────────────────────┘
 ```
 
@@ -217,32 +227,44 @@ RabbitMQ operates as a reliable, asynchronous message broker for operational com
 
 | Exchange Name | Type | Durability | Auto-Delete | Routing Key Convention | Purpose |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `voice.commands` | `topic` | **Durable** | `false` | `call.dispatch.*`, `call.retry.*`, `tool.job.*` | Imperative commands dispatched to voice engines, telephony workers, and integration agents. |
+| `voice.commands` | `topic` | **Durable** | `false` | `call.dispatch`, `call.retry.*`, `tool.job.*` | Imperative commands dispatched to voice nodes, retry delay queues, and tool workers. |
 | `voice.events` | `topic` | **Durable** | `false` | `call.event.*`, `call.transcript.*` | Domain lifecycle events published by call session state machines. |
 | `voice.dlx` | `topic` | **Durable** | `false` | `#`, `voice.dead` | Dead Letter Exchange receiving poison messages and exhausted retries. |
 
 ### 4.3 Queues Specification
 
-All queues are **Durable Classic Queues** configured with standard Dead Lettering to `voice.dlx`.
+#### Category A: Active Work Queues
+Configured with Dead Lettering to `voice.dlx` (`voice.dead`) for unhandled failures, exhausted retries, or poison pills.
 
 | Queue Name | Durable | DLX | DLQ Routing Key | Target Consumer | Prefetch (QoS) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `call.dispatch` | `true` | `voice.dlx` | `voice.dead` | Outbound Dialer / Telephony Originator | **10** |
-| `call.retry` | `true` | `voice.dlx` | `voice.dead` | Retry Scheduler / Delay Queue | **20** |
 | `tool.jobs` | `true` | `voice.dlx` | `voice.dead` | Tool Execution Worker (Composio, CRM, WhatsApp) | **20** |
 | `transcript.persist`| `true` | `voice.dlx` | `voice.dead` | Transcript & Summary Storage Worker | **50** |
-| `voice.dead` | `true` | *None* | *None* | Poison / Failure Inspection & Alerting | **1** |
+| `voice.dead` | `true` | *None* | *None* | Poison / Failure Inspection & Operational Alerting | **1** |
 
-#### Mandatory Queue Arguments
-Work queues (`call.dispatch`, `tool.jobs`, `transcript.persist`, `call.retry`) MUST be declared with:
-```json
-{
-  "x-dead-letter-exchange": "voice.dlx",
-  "x-dead-letter-routing-key": "voice.dead"
-}
-```
+#### Category B: Stage-Based Delay Queues (Deterministic Retries)
+These queues **do not have active consumers**. They hold messages for a fixed TTL duration, after which RabbitMQ dead-letters them back to `voice.commands` with routing key `call.dispatch`.
 
-### 4.4 Standard AMQP Message Envelope & Headers
+| Queue Name | Durable | Fixed Queue TTL (`x-message-ttl`) | Dead Letter Exchange (`x-dead-letter-exchange`) | Dead Letter Routing Key (`x-dead-letter-routing-key`) |
+| :--- | :--- | :--- | :--- | :--- |
+| `call.retry.30s` | `true` | **30,000 ms (30s)** | `voice.commands` | `call.dispatch` |
+| `call.retry.120s` | `true` | **120,000 ms (120s)** | `voice.commands` | `call.dispatch` |
+| `call.retry.600s` | `true` | **600,000 ms (600s)** | `voice.commands` | `call.dispatch` |
+
+### 4.4 Bindings & Routing Matrix
+
+| Exchange | Routing Key | Destination Queue | Queue Behavior |
+| :--- | :--- | :--- | :--- |
+| `voice.commands` | `call.dispatch` | `call.dispatch` | Immediate processing by dialer workers. |
+| `voice.commands` | `call.retry.30s` | `call.retry.30s` | Holds message for 30s -> auto-dead-letters to `call.dispatch`. |
+| `voice.commands` | `call.retry.120s`| `call.retry.120s`| Holds message for 120s -> auto-dead-letters to `call.dispatch`. |
+| `voice.commands` | `call.retry.600s`| `call.retry.600s`| Holds message for 600s -> auto-dead-letters to `call.dispatch`. |
+| `voice.commands` | `tool.job.#` | `tool.jobs` | Consumed by tool execution workers. |
+| `voice.events` | `call.transcript.#` | `transcript.persist` | Consumed by transcript persistence workers. |
+| `voice.dlx` | `#` (or `voice.dead`) | `voice.dead` | Dead Letter Queue for poison / exhausted messages. |
+
+### 4.5 Standard AMQP Message Envelope & Headers
 
 All messages published to RabbitMQ MUST use the following envelope structure:
 
@@ -280,7 +302,7 @@ All messages published to RabbitMQ MUST use the following envelope structure:
   "campaign_id": "cmp-q3-cold-saas",
   "phone_e164": "+5511999998888",
   "prompt_version": "v1.4",
-  "voice_model": "gemini-2.0-flash-exp",
+  "voice_model": "<configured Gemini Live model>",
   "metadata": {
     "lead_name": "Dr. Carlos Silva",
     "clinic_name": "Odonto Excellence",
@@ -289,83 +311,87 @@ All messages published to RabbitMQ MUST use the following envelope structure:
 }
 ```
 
-### 4.5 Publisher Confirms & Reliability Guarantees
+### 4.6 Publisher Confirms & Reliability Guarantees
 
 1. **Publisher Confirms Required:** Every publisher MUST initialize its AMQP channel with `confirm.select`.
 2. **Synchronous/Batch Acknowledgement:**
    - The publisher awaits an affirmative Ack from the broker.
    - If a Nack or publish timeout (5000ms) occurs, the transaction MUST NOT be considered published, and the Outbox worker must reschedule the message.
 
-### 4.6 Consumer Acknowledgement & QoS Contract
+### 4.7 Consumer Acknowledgement & QoS Contract
 
 1. **Manual Acknowledgement Only:** `auto_ack = false` is mandatory across all consumers.
 2. **Prefetch Limits:** Every consumer MUST configure `basic.qos(prefetch_count, global=false)` prior to consuming.
 3. **Acknowledgement Policy:**
    - **`basic.ack`**: Issued only after local processing (and associated DB update) successfully commits.
-   - **`basic.nack(requeue=false)`**: Issued when a message fails and is intended for DLX routing or when retry limits are reached.
+   - **`basic.nack(requeue=false)`**: Issued when a message fails permanently, is malformed, or exceeds retry limits, routing it to `voice.dlx` (`voice.dead`).
    - **Prohibition:** Unconditional `basic.nack(requeue=true)` is strictly forbidden because it triggers instant spinning loops and CPU starvation on unrecoverable errors.
 
 ---
 
 ## 5. Retry Policy, Backoff Strategy & Dead-Letter Mechanics
 
-### 5.1 When a Message Enters Retry
-A message qualifies for retry when it fails due to a **transient failure**:
-- Telephony trunk temporary congestion (SIP 486 Busy / 503 Service Unavailable).
-- External API network timeout (Composio, WhatsApp gateway, CRM).
-- Database temporary connection pool exhaustion.
+### 5.1 Rationale for Stage-Based Delay Queues vs. Single Queue Variable TTL
 
-**Non-retryable / Poison errors** (malformed JSON, invalid schema, missing mandatory fields, permanent business rejection) MUST NOT enter retry; they are rejected directly to `voice.dead`.
+In RabbitMQ Classic Queues, per-message TTL (`expiration`) suffers from **Head-of-Line (HoL) Blocking**: RabbitMQ only evaluates message expiration when a message reaches the head of the queue. If a message with an expiration of 600s sits at the head of a queue, subsequent messages with an expiration of 30s will NOT expire or dead-letter until the 600s message expires or is removed.
 
-### 5.2 Deterministic Backoff via RabbitMQ DLX Architecture
+To guarantee **deterministic, non-blocking backoff**, the platform strictly prohibits variable-TTL classic queues and instead defines **stage-based delay queues with fixed queue-level TTL** (`x-message-ttl`).
 
-To avoid blocking consumer threads with `time.Sleep()`, retries utilize **RabbitMQ Dead-Letter TTL Chaining**:
+### 5.2 Deterministic Backoff Lifecycle
 
 ```
-[call.dispatch Worker]
-       │
-       ▼ (Transient Failure, retry_count < 3)
-Increment x-retry-count
-Publish to [voice.commands] with routing key "call.retry.delay"
-Set message expiration = DELAY_MS
-Ack original message from call.dispatch
-       │
-       ▼
-[call.retry] Queue
-  Arguments:
-    x-dead-letter-exchange: "voice.commands"
-    x-dead-letter-routing-key: "call.dispatch"
-       │
-       ▼ (Message waits in call.retry for DELAY_MS without active consumer)
-Message TTL Expires in call.retry
-       │
-       ▼
-RabbitMQ automatically Dead-Letters message to [voice.commands]
-Routing Key: "call.dispatch"
-       │
-       ▼
-Message re-enters [call.dispatch] queue ready for immediate consumption!
+                                [call.dispatch Worker]
+                                           │
+                        ┌──────────────────┴──────────────────┐
+                        ▼                                     ▼
+             [Transient Failure]                    [Permanent / Poison Failure]
+                        │                                     │
+           Is x-retry-count < 3 ?                             │
+           ├── YES ──────────────┐                            │
+           │                     │                            │
+           ▼                     ▼                            ▼
+   x-retry-count == 0    x-retry-count == 1    x-retry-count >= 3
+   Increment to 1        Increment to 2        (Retries Exhausted)
+   Publish to:           Publish to:                  │
+   [call.retry.30s]      [call.retry.120s]            │
+         │                     │                      │
+         │ (wait 30s)          │ (wait 120s)          │
+         ▼                     ▼                      ▼
+   Queue TTL Expired     Queue TTL Expired      Publish directly to:
+         │                     │                [voice.dlx] -> voice.dead
+         └──────────┬──────────┘                (or basic.nack(requeue=false))
+                    │                                 │
+                    ▼                                 ▼
+         Dead-Letter Return to:                 Update PostgreSQL:
+         Exchange: [voice.commands]             status = 'FAILED_EXHAUSTED'
+         Routing Key: call.dispatch             error_reason = 'MAX_RETRIES_EXCEEDED'
+                    │
+                    ▼
+         Message re-enters [call.dispatch]
+         ready for immediate execution
 ```
 
-### 5.3 Exponential Backoff Schedule & Jitter
+### 5.3 Stage Schedule & Routing Matrix
 
-| Retry Attempt | Delay (Seconds) | Full Jitter Window | Effective Delay |
-| :--- | :--- | :--- | :--- |
-| **Attempt 1** | 30s | $\pm 5\text{s}$ | 25s – 35s |
-| **Attempt 2** | 120s (2 min) | $\pm 15\text{s}$ | 105s – 135s |
-| **Attempt 3** | 600s (10 min) | $\pm 60\text{s}$ | 540s – 660s |
-| **Exhausted (> 3)**| Route to `voice.dead` | N/A | N/A |
+| Stage | Trigger Condition | Target Queue | Queue Fixed TTL | DLX Return Exchange | DLX Return Key | Max Delay |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Stage 1** | 1st transient failure (`count = 0 -> 1`) | `call.retry.30s` | **30,000 ms** (30s) | `voice.commands` | `call.dispatch` | 30s |
+| **Stage 2** | 2nd transient failure (`count = 1 -> 2`) | `call.retry.120s`| **120,000 ms** (2m) | `voice.commands` | `call.dispatch` | 120s |
+| **Stage 3** | 3rd transient failure (`count = 2 -> 3`) | `call.retry.600s`| **600,000 ms** (10m)| `voice.commands` | `call.dispatch` | 600s |
+| **Exhausted**| 4th failure (`count >= 3`) | `voice.dead` | *None* | *None* | *None* | Immediate |
 
 ### 5.4 Transition to `voice.dead` & Infinite Loop Prevention
 
-1. **Maximum Retries:** Capped strictly at `3` attempts.
+1. **Maximum Retries:** Capped strictly at `3` retry attempts.
 2. **Loop Prevention Invariant:**
    - The consumer inspects header `x-retry-count`.
    - If `x-retry-count >= x-max-retries`:
-     - Do not publish to `call.retry`.
-     - Update PostgreSQL call state: `status = FAILED_EXHAUSTED`, `error_reason = MAX_RETRIES_EXCEEDED`.
-     - Reject message via `basic.nack(requeue=false)`, causing RabbitMQ to automatically route it to `voice.dead` via `voice.dlx`.
+     - Do not publish to any retry queue.
+     - Update PostgreSQL call state: `status = 'FAILED_EXHAUSTED'`, `error_reason = 'MAX_RETRIES_EXCEEDED'`.
+     - Reject message via `basic.nack(requeue=false)`, causing RabbitMQ to automatically route it to `voice.dead` via `voice.dlx` (or publish directly to `voice.dlx` with routing key `voice.dead`).
      - Emit an OpenTelemetry error event and increment alert metric `voice_calls_dead_letter_total`.
+3. **Dead-Letter Header Inspection:**
+   - Consumers inspect the `x-death` array populated by RabbitMQ on dead-lettering to verify hop count and ensure messages do not cyclically oscillate between queues.
 
 ---
 
@@ -384,11 +410,11 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     exchange VARCHAR(64) NOT NULL,
     routing_key VARCHAR(128) NOT NULL,
     payload JSONB NOT NULL,
-    headers JSONB NOT NULL DEFAULT {}::jsonb,
+    headers JSONB NOT NULL DEFAULT '{}'::jsonb,
     idempotency_key VARCHAR(128) UNIQUE NOT NULL,
     correlation_id UUID NOT NULL,
     trace_id VARCHAR(64),
-    status VARCHAR(24) NOT NULL DEFAULT PENDING, -- PENDING, PUBLISHED, FAILED
+    status VARCHAR(24) NOT NULL DEFAULT 'PENDING', -- PENDING, PUBLISHED, FAILED
     retry_count INT NOT NULL DEFAULT 0,
     published_at TIMESTAMPTZ,
     last_error TEXT,
@@ -398,7 +424,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
 -- Partial index for zero-latency polling of pending records
 CREATE INDEX IF NOT EXISTS idx_outbox_events_pending
 ON outbox_events (created_at ASC)
-WHERE status = PENDING;
+WHERE status = 'PENDING';
 ```
 
 ### 6.2 Atomicity Invariant (No Dual-Write)
@@ -419,7 +445,7 @@ func (s *CallService) DispatchCall(ctx context.Context, cmd DispatchCommand) err
             AggregateID:    cmd.CallID.String(),
             EventType:      "call.dispatch.requested",
             Exchange:       "voice.commands",
-            RoutingKey:     "call.dispatch.direct",
+            RoutingKey:     "call.dispatch",
             Payload:        cmd.ToJSON(),
             IdempotencyKey: fmt.Sprintf("dispatch-%s", cmd.CallID),
             CorrelationID:  telemetry.CorrelationIDFromContext(ctx),
@@ -437,7 +463,7 @@ func (s *CallService) DispatchCall(ctx context.Context, cmd DispatchCommand) err
    ```sql
    SELECT id, exchange, routing_key, payload, headers, correlation_id, trace_id
    FROM outbox_events
-   WHERE status = PENDING
+   WHERE status = 'PENDING'
    ORDER BY created_at ASC
    LIMIT 100
    FOR UPDATE SKIP LOCKED;
@@ -450,7 +476,7 @@ func (s *CallService) DispatchCall(ctx context.Context, cmd DispatchCommand) err
    - Upon confirming publish:
      ```sql
      UPDATE outbox_events
-     SET status = PUBLISHED, published_at = NOW()
+     SET status = 'PUBLISHED', published_at = NOW()
      WHERE id = :id;
      ```
    - If relay crashes after publishing to RabbitMQ but before database update: the next relay instance will re-publish the message.
@@ -525,8 +551,9 @@ All asynchronous communications across Redis, RabbitMQ, and PostgreSQL must prop
 
 ---
 
-## 8. Downstream Implementation Guide & Checklist
+## 8. Downstream Implementation Guide & GRU-61 Reconciliation
 
+### 8.1 Implementation Verification Checklist
 Future engineering issues implementing Redis and RabbitMQ adapters (such as GRU-59, GRU-60, GRU-61, GRU-62) must verify conformance against the following checklist:
 
 - [ ] **No Raw Audio in Brokers:** AudioSocket frame handlers operate purely in-memory; no broker dependencies in the PCM loop.
@@ -535,9 +562,16 @@ Future engineering issues implementing Redis and RabbitMQ adapters (such as GRU-
 - [ ] **Transactional Outbox:** All events published from domain logic use `outbox_events` inside the domain transaction.
 - [ ] **Publisher Confirms:** RabbitMQ client has publisher confirms enabled; publisher handles timeouts and nacks.
 - [ ] **Prefetch Configured:** All consumers call `basic.qos` before `basic.consume`.
-- [ ] **Manual ACKs:** `auto_ack = false`; failures trigger either `call.retry` delayed re-routing or reject to `voice.dead`.
+- [ ] **Manual ACKs:** `auto_ack = false`; failures trigger either stage-based retry routing (`call.retry.30s`, etc.) or reject to `voice.dead`.
+- [ ] **Stage-Based Retry Topology:** Retries utilize dedicated fixed-TTL delay queues (`call.retry.30s`, `call.retry.120s`, `call.retry.600s`) dead-lettering back to `voice.commands`/`call.dispatch`.
 - [ ] **Safe Dead-Letter Handling:** Messages in `voice.dead` trigger operational alerts and do not auto-requeue without operator intervention.
 - [ ] **W3C Trace Context:** `traceparent` is injected on publish and extracted on consume.
+
+### 8.2 Expected Downstream Reconciliation for GRU-61
+The current bootstrap dev environment (PR #3 / GRU-61) provisioned a single `call.retry` queue bound with `x-dead-letter-exchange: voice.dlx`. Following formal approval of this GRU-57 specification, GRU-61's declarative definitions in `deploy/dev/rabbitmq/definitions.json` and smoke testing scripts will be reconciled to:
+1. Replace the single `call.retry` queue with the three stage-based delay queues: `call.retry.30s`, `call.retry.120s`, and `call.retry.600s`.
+2. Configure their fixed queue TTLs (`30000`, `120000`, `600000` ms) and dead-letter arguments pointing to exchange `voice.commands` with routing key `call.dispatch`.
+3. Validate deterministic dead-letter return into `call.dispatch` in automated tests.
 
 ---
 

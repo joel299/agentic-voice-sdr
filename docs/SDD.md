@@ -3,10 +3,11 @@
 ## Stack
 Go 1.27.x, Chi v5, REST/OpenAPI/Scalar, WebSocket events, Asterisk/AudioSocket, Gemini Live, PostgreSQL/Supabase, Redis, RabbitMQ, Tool Registry, Composio, WhatsApp API, Docker, OpenTelemetry.
 
-## Realtime Path (Sub-800ms Latency)
+## Realtime Path & Latency Objective
 $$\text{Fale Paco SIP} \longleftrightarrow \text{Asterisk} \longleftrightarrow \text{AudioSocket} \longleftrightarrow \text{Go Voice Engine} \longleftrightarrow \text{Gemini Live WSS}$$
 
-**Strict Invariant:** No Redis, RabbitMQ, PostgreSQL, or n8n hop is allowed in the PCM audio path.
+- **Latency Objective:** Conversational round-trip latency objective < 800ms (SIP trunk transport, Asterisk jitter buffers, public internet routing, and Gemini Live inference contribute to total latency).
+- **Strict Invariant:** No Redis, RabbitMQ, PostgreSQL, or n8n hop is allowed in the linear PCM audio path.
 
 ## Asynchronous Architecture
 PostgreSQL domain transaction $\longrightarrow$ Transactional Outbox $\longrightarrow$ Outbox Relay $\longrightarrow$ RabbitMQ $\longrightarrow$ Background Consumers $\longrightarrow$ Redis Invalidation / External APIs.
@@ -21,17 +22,20 @@ Formal infrastructure contracts are specified in [docs/infra/REDIS_RABBITMQ_CONT
 
 ## RabbitMQ Topology & Messaging Contract
 - **Exchanges (Topic, Durable):**
-  - `voice.commands`: Imperative commands (`call.dispatch.*`, `call.retry.*`, `tool.job.*`).
+  - `voice.commands`: Imperative commands (`call.dispatch`, `call.retry.*`, `tool.job.*`).
   - `voice.events`: Domain lifecycle events (`call.event.*`, `call.transcript.*`).
-  - `voice.dlx`: Dead Letter Exchange for unrecoverable errors (`#`, `voice.dead`).
+  - `voice.dlx`: Dead Letter Exchange for unrecoverable/poison errors (`#`, `voice.dead`).
 - **Queues (Durable Classic):**
   - `call.dispatch`: Outbound dial requests and telephony dispatch.
-  - `call.retry`: Delayed retry staging queue (Dead-Letter TTL backoff to `call.dispatch`).
   - `tool.jobs`: Async execution of external tools (Composio, CRM, WhatsApp).
   - `transcript.persist`: Async persistence of transcripts and structured call memory.
-  - `voice.dead`: Canonical Dead Letter Queue.
+  - `voice.dead`: Canonical Dead Letter Queue (DLQ).
+- **Stage-Based Retry Delay Queues (No Active Consumers):**
+  - `call.retry.30s`: Fixed TTL 30s $\to$ DLX `voice.commands` (key: `call.dispatch`).
+  - `call.retry.120s`: Fixed TTL 120s $\to$ DLX `voice.commands` (key: `call.dispatch`).
+  - `call.retry.600s`: Fixed TTL 600s $\to$ DLX `voice.commands` (key: `call.dispatch`).
 - **Quality of Service (QoS):** Manual ACK (`auto_ack=false`) and bounded prefetch per worker type.
-- **Retry Mechanics:** Exponential backoff (30s, 120s, 600s) capped at 3 attempts, routing to `voice.dead` upon exhaustion to eliminate infinite loops.
+- **Retry Mechanics:** Deterministic stage-based delay queues capped at 3 attempts (`count >= 3` diverts to `voice.dlx` $\to$ `voice.dead` to prevent infinite loops).
 
 ## CallSession Lifecycle
 `CREATED` $\longrightarrow$ `DIALING` $\longrightarrow$ `RINGING` $\longrightarrow$ `CONNECTED` $\longrightarrow$ `CONVERSING` $\longrightarrow$ `ENDING` $\longrightarrow$ `COMPLETED`.

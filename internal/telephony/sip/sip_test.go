@@ -50,17 +50,45 @@ type MockAsteriskReloader struct {
 	ReloadErr         error
 	HealthErr         error
 	EndpointErr       error
+	StageErr          error
+	CommitErr         error
+	RollbackErr       error
+	RemoveErr         error
 	RemoveCalled      bool
 	ApplyCalled       bool
+	StageCalled       bool
+	CommitCalled      bool
+	RollbackCalled    bool
+}
+
+func (m *MockAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
+	m.StageCalled = true
+	return m.StageErr
+}
+
+func (m *MockAsteriskReloader) CommitPJSIPConfig(ctx context.Context, trunkName string) error {
+	m.CommitCalled = true
+	return m.CommitErr
+}
+
+func (m *MockAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkName string) error {
+	m.RollbackCalled = true
+	return m.RollbackErr
 }
 
 func (m *MockAsteriskReloader) ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
 	m.ApplyCalled = true
-	return m.ReloadErr
+	if err := m.StagePJSIPConfig(ctx, trunkName, pjsipConf); err != nil {
+		return err
+	}
+	return m.CommitPJSIPConfig(ctx, trunkName)
 }
 
 func (m *MockAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
 	m.RemoveCalled = true
+	if m.RemoveErr != nil {
+		return m.RemoveErr
+	}
 	return m.ReloadErr
 }
 
@@ -374,6 +402,9 @@ func TestRegistrationFailures(t *testing.T) {
 		if status.EndpointActive {
 			t.Error("expected EndpointActive to be false on registration failure")
 		}
+		if !reloader.RollbackCalled {
+			t.Error("expected RollbackPJSIPConfig to be called when registration fails")
+		}
 	})
 
 	t.Run("registration error", func(t *testing.T) {
@@ -418,8 +449,8 @@ func TestAsteriskHealthAndEndpointChecks(t *testing.T) {
 		if err == nil {
 			t.Error("expected error when Asterisk is unhealthy, got nil")
 		}
-		if !reloader.RemoveCalled {
-			t.Error("expected RemovePJSIPConfig to be called for rollback when Asterisk is unhealthy")
+		if !reloader.RollbackCalled {
+			t.Error("expected RollbackPJSIPConfig to be called when Asterisk is unhealthy")
 		}
 		if status.Status != sip.StatusConnectionError {
 			t.Errorf("expected STATUS_CONNECTION_ERROR, got %s", status.Status)
@@ -442,8 +473,8 @@ func TestAsteriskHealthAndEndpointChecks(t *testing.T) {
 		if err == nil {
 			t.Error("expected error when endpoint is missing, got nil")
 		}
-		if !reloader.RemoveCalled {
-			t.Error("expected RemovePJSIPConfig to be called for rollback when endpoint is missing")
+		if !reloader.RollbackCalled {
+			t.Error("expected RollbackPJSIPConfig to be called when endpoint is missing")
 		}
 		if status.Status != sip.StatusConfigured {
 			t.Errorf("expected STATUS_CONFIGURED, got %s", status.Status)
@@ -508,22 +539,37 @@ func TestCodecDefensiveCopy(t *testing.T) {
 }
 
 type mockRunner struct {
-	failReload bool
+	failReload      bool
+	failRollback    bool
+	reloadCalls     int
+	statusOutput    string
+	endpointOutput  string
+	regOutput       string
 }
 
 func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
 	cmdStr := strings.Join(args, " ")
 	if strings.Contains(cmdStr, "core show status") {
+		if r.statusOutput != "" {
+			return r.statusOutput, nil
+		}
 		return "Asterisk 20.5.0", nil
 	}
 	if strings.Contains(cmdStr, "pjsip show endpoint") {
+		if r.endpointOutput != "" {
+			return r.endpointOutput, nil
+		}
 		return "Endpoint: trunk-testtrunk/Unregistered", nil
 	}
 	if strings.Contains(cmdStr, "pjsip show registration") {
+		if r.regOutput != "" {
+			return r.regOutput, nil
+		}
 		return "Objects found: 1 Registered", nil
 	}
 	if strings.Contains(cmdStr, "module reload res_pjsip.so") {
-		if r.failReload {
+		r.reloadCalls++
+		if r.failReload || (r.reloadCalls > 1 && r.failRollback) {
 			return "Module reload failed", errors.New("reload error")
 		}
 		return "Module reload succeeded", nil
@@ -531,62 +577,137 @@ func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string
 	return "", nil
 }
 
-func TestRealAsteriskReloaderAtomicTransactions(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "pjsip-test-*")
+func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "pjsip-transaction-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	t.Run("atomic apply success", func(t *testing.T) {
-		runner := &mockRunner{}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+	dialer := &mockDialer{}
 
-		err := reloader.ApplyPJSIPConfig(context.Background(), "testtrunk", "[trunk-testtrunk]\ntype=endpoint\n")
-		if err != nil {
-			t.Fatalf("expected atomic apply to succeed, got: %v", err)
+	// Caso 1 — health failure with old config functional
+	t.Run("Caso 1 - health failure restores old config", func(t *testing.T) {
+		runner := &mockRunner{statusOutput: "Unable to connect to remote PBX daemon"}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		targetFile := filepath.Join(tmpDir, "trunk1.conf")
+		oldContent := "; OLD FUNCTIONAL CONFIG\n[trunk-trunk1]\ntype=endpoint\n"
+		if err := os.WriteFile(targetFile, []byte(oldContent), 0600); err != nil {
+			t.Fatalf("failed to prepare old config: %v", err)
 		}
 
-		targetFile := filepath.Join(tmpDir, "testtrunk.conf")
+		cfg := sip.TrunkConfig{Name: "trunk1", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
+		_, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on health failure, got nil")
+		}
+
+		// Verify old config was restored on filesystem
 		content, err := os.ReadFile(targetFile)
 		if err != nil {
-			t.Fatalf("expected file %s to exist: %v", targetFile, err)
+			t.Fatalf("expected old config file to be restored on disk: %v", err)
 		}
-		if !strings.Contains(string(content), "testtrunk") {
-			t.Errorf("unexpected file content: %s", string(content))
+		if !strings.Contains(string(content), "OLD FUNCTIONAL CONFIG") {
+			t.Errorf("expected old config content to be restored, got: %s", string(content))
 		}
 	})
 
-	t.Run("atomic apply rollback on reload failure", func(t *testing.T) {
-		runner := &mockRunner{failReload: true}
+	// Caso 2 — endpoint failure restores old config
+	t.Run("Caso 2 - endpoint failure restores old config", func(t *testing.T) {
+		runner := &mockRunner{endpointOutput: "Unable to find object"}
 		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		mgr, _ := sip.NewManager(dialer, reloader)
 
-		err := reloader.ApplyPJSIPConfig(context.Background(), "failedtrunk", "[trunk-failedtrunk]\ntype=endpoint\n")
+		targetFile := filepath.Join(tmpDir, "trunk2.conf")
+		oldContent := "; OLD FUNCTIONAL CONFIG TRUNK 2\n"
+		_ = os.WriteFile(targetFile, []byte(oldContent), 0600)
+
+		cfg := sip.TrunkConfig{Name: "trunk2", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
+		_, err := mgr.ApplyTrunk(context.Background(), cfg)
 		if err == nil {
-			t.Error("expected reload failure error, got nil")
+			t.Fatal("expected error on endpoint failure, got nil")
 		}
 
-		targetFile := filepath.Join(tmpDir, "failedtrunk.conf")
+		content, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("expected old config file to be restored: %v", err)
+		}
+		if !strings.Contains(string(content), "OLD FUNCTIONAL CONFIG TRUNK 2") {
+			t.Errorf("expected old config restored, got: %s", string(content))
+		}
+	})
+
+	// Caso 3 — registration failure restores old config
+	t.Run("Caso 3 - registration failure restores old config", func(t *testing.T) {
+		runner := &mockRunner{regOutput: "Objects found: 0 Rejected"}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		targetFile := filepath.Join(tmpDir, "trunk3.conf")
+		oldContent := "; OLD FUNCTIONAL CONFIG TRUNK 3\n"
+		_ = os.WriteFile(targetFile, []byte(oldContent), 0600)
+
+		cfg := sip.TrunkConfig{
+			Name:                 "trunk3",
+			Host:                 "sip.example.invalid",
+			AuthType:             sip.AuthUserPass,
+			AuthUsername:         "user",
+			Secret:               "pass",
+			RegistrationRequired: true,
+			Enabled:              true,
+		}
+		_, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on registration failure, got nil")
+		}
+
+		content, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("expected old config file to be restored: %v", err)
+		}
+		if !strings.Contains(string(content), "OLD FUNCTIONAL CONFIG TRUNK 3") {
+			t.Errorf("expected old config restored, got: %s", string(content))
+		}
+	})
+
+	// Caso 4 — primeira configuração sem old config
+	t.Run("Caso 4 - first config without old config removes new file on failure", func(t *testing.T) {
+		runner := &mockRunner{endpointOutput: "Unable to find object"}
+		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		mgr, _ := sip.NewManager(dialer, reloader)
+
+		targetFile := filepath.Join(tmpDir, "newtrunk.conf")
+
+		cfg := sip.TrunkConfig{Name: "newtrunk", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
+		_, err := mgr.ApplyTrunk(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error on endpoint failure for new trunk, got nil")
+		}
+
+		// Verify targetFile is completely removed
 		if _, err := os.Stat(targetFile); err == nil {
-			t.Error("expected config file to be removed on reload failure rollback")
+			t.Error("expected target config file to be removed when no old config existed")
 		}
 	})
 
-	t.Run("atomic disable rollback on failure", func(t *testing.T) {
-		targetFile := filepath.Join(tmpDir, "disabletrunk.conf")
-		_ = os.WriteFile(targetFile, []byte("existing config"), 0600)
-
-		runner := &mockRunner{failReload: true}
+	// Caso 5 — rollback failure returns compound error
+	t.Run("Caso 5 - rollback failure returns compound error", func(t *testing.T) {
+		runner := &mockRunner{statusOutput: "Unable to connect to remote PBX daemon", failRollback: true}
 		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		mgr, _ := sip.NewManager(dialer, reloader)
 
-		err := reloader.RemovePJSIPConfig(context.Background(), "disabletrunk")
+		cfg := sip.TrunkConfig{Name: "rollbackfail", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
+		report, err := mgr.ApplyTrunk(context.Background(), cfg)
 		if err == nil {
-			t.Error("expected error on disable reload failure, got nil")
+			t.Fatal("expected compound error on rollback failure, got nil")
 		}
-
-		// Verify restored from backup
-		if _, err := os.Stat(targetFile); err != nil {
-			t.Error("expected config file to be restored after failed disable reload")
+		if !strings.Contains(err.Error(), "rollback failed") {
+			t.Errorf("expected compound error containing 'rollback failed', got: %v", err)
+		}
+		if !strings.Contains(report.LastError, "rollback error") {
+			t.Errorf("expected report.LastError to contain rollback error details, got: %s", report.LastError)
 		}
 	})
 }

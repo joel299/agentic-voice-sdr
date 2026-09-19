@@ -28,38 +28,27 @@ type NetworkDialer interface {
 type DefaultNetworkDialer struct{}
 
 func (d DefaultNetworkDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	dialer := net.Dialer{Timeout: 3 * time.Second}
+	dialer := net.Dialer{Timeout: 5 * time.Second}
 	return dialer.DialContext(ctx, network, address)
 }
 
 func (d DefaultNetworkDialer) DialTLSContext(ctx context.Context, network, address string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		host = address
-	}
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	// Strict TLS: InsecureSkipVerify is false by default. ServerName set to target hostname.
-	tlsConfig := &tls.Config{
-		ServerName: host,
-	}
-	conn, err := tls.DialWithDialer(dialer, network, address, tlsConfig)
-	if err != nil {
-		return nil, fmt.Errorf("tls handshake failed for %s: %w", address, err)
-	}
-	return conn, nil
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	tlsConfig := &tls.Config{InsecureSkipVerify: false}
+	return tls.DialWithDialer(&dialer, network, address, tlsConfig)
 }
 
 func (d DefaultNetworkDialer) LookupHost(ctx context.Context, host string) ([]string, error) {
-	resolver := net.DefaultResolver
-	return resolver.LookupHost(ctx, host)
+	var r net.Resolver
+	return r.LookupHost(ctx, host)
 }
 
-// CommandRunner abstracts CLI execution for testing.
+// CommandRunner abstracts shell command execution for Asterisk CLI interaction.
 type CommandRunner interface {
 	RunCommand(ctx context.Context, name string, args ...string) (string, error)
 }
 
-// OSCommandRunner implements CommandRunner using os/exec.
+// OSCommandRunner executes commands via os/exec.
 type OSCommandRunner struct{}
 
 func (r OSCommandRunner) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
@@ -68,12 +57,11 @@ func (r OSCommandRunner) RunCommand(ctx context.Context, name string, args ...st
 	return string(out), err
 }
 
-// AsteriskReloader abstracts Asterisk PJSIP config staging, committing, rollback, removal, and status checks.
+// AsteriskReloader abstracts staging, verification, commit, and rollback for Asterisk PJSIP integration.
 type AsteriskReloader interface {
 	StagePJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error
 	CommitPJSIPConfig(ctx context.Context, trunkName string) error
 	RollbackPJSIPConfig(ctx context.Context, trunkName string) error
-	ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error
 	RemovePJSIPConfig(ctx context.Context, trunkName string) error
 	CheckAsteriskHealth(ctx context.Context) (bool, error)
 	CheckTransport(ctx context.Context, transport TransportType) (bool, error)
@@ -81,10 +69,14 @@ type AsteriskReloader interface {
 	CheckRegistration(ctx context.Context, trunkName string) (string, bool, error)
 }
 
+// ChownFunc abstracts file ownership setting for testability.
+type ChownFunc func(name string, uid, gid int) error
+
 // RealAsteriskReloader is the operational concrete implementation for Asterisk PJSIP integration.
 type RealAsteriskReloader struct {
 	configDir string
 	runner    CommandRunner
+	chownFn   ChownFunc
 }
 
 // NewRealAsteriskReloader creates an operational RealAsteriskReloader instance.
@@ -98,13 +90,21 @@ func NewRealAsteriskReloader(configDir string, runner CommandRunner) *RealAsteri
 	return &RealAsteriskReloader{
 		configDir: configDir,
 		runner:    runner,
+		chownFn:   os.Chown,
 	}
 }
 
-// getConfigPath validates trunkName against allowlist and ensures the final clean path stays inside configDir.
+// SetChownFunc overrides the default os.Chown function for testing or custom security policy verification.
+func (r *RealAsteriskReloader) SetChownFunc(fn ChownFunc) {
+	if fn == nil {
+		fn = os.Chown
+	}
+	r.chownFn = fn
+}
+
 func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
-	if !trunkNameRegex.MatchString(trunkName) {
-		return "", fmt.Errorf("invalid trunk name %q: violates security allowlist", trunkName)
+	if trunkName == "" || strings.Contains(trunkName, "/") || strings.Contains(trunkName, "\\") || strings.Contains(trunkName, "..") {
+		return "", fmt.Errorf("invalid or malicious trunk name %q", trunkName)
 	}
 	cleanDir := filepath.Clean(r.configDir)
 	targetPath := filepath.Clean(filepath.Join(cleanDir, fmt.Sprintf("%s.conf", trunkName)))
@@ -116,7 +116,7 @@ func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
 }
 
 // applySecureFilePermissions enforces 0640 (-rw-r-----) permissions, resolves valid Asterisk owner/group, and fails closed.
-func applySecureFilePermissions(filePath string, dirPath string) error {
+func (r *RealAsteriskReloader) applySecureFilePermissions(filePath string) error {
 	// 1. Enforce 0640 permissions (-rw-r-----)
 	if err := os.Chmod(filePath, 0640); err != nil {
 		return fmt.Errorf("failed to set secure 0640 permissions on %s: %w", filePath, err)
@@ -125,9 +125,9 @@ func applySecureFilePermissions(filePath string, dirPath string) error {
 	targetUid := -1
 	targetGid := -1
 
-	// 2. Try deriving UID/GID from dirPath or parent directory
-	if dirPath != "" {
-		if info, err := os.Stat(dirPath); err == nil {
+	// 2. Try deriving UID/GID from configDir or parent directory
+	if r.configDir != "" {
+		if info, err := os.Stat(r.configDir); err == nil {
 			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 				if stat.Uid != 0 {
 					targetUid = int(stat.Uid)
@@ -137,9 +137,9 @@ func applySecureFilePermissions(filePath string, dirPath string) error {
 				}
 			}
 		}
-		// If dirPath gave GID 0 (root), check parent directory (e.g. /etc/asterisk)
+		// If configDir gave GID 0 (root), check parent directory (e.g. /etc/asterisk)
 		if targetGid <= 0 {
-			parent := filepath.Dir(dirPath)
+			parent := filepath.Dir(r.configDir)
 			if parent != "" && parent != "/" {
 				if info, err := os.Stat(parent); err == nil {
 					if stat, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -161,30 +161,45 @@ func applySecureFilePermissions(filePath string, dirPath string) error {
 		}
 	}
 
-	// 4. Apply chown if target UID or GID was resolved
+	// 4. Apply chown if target UID or GID was resolved. Fail closed on any error (no silent EPERM bypass)
 	if targetUid > 0 || targetGid > 0 {
-		if err := os.Chown(filePath, targetUid, targetGid); err != nil {
-			// Ignore EPERM in unprivileged test environments when running as non-root
-			if !os.IsPermission(err) && !strings.Contains(err.Error(), "operation not permitted") {
-				return fmt.Errorf("failed to apply chown (%d:%d) on %s: %w", targetUid, targetGid, filePath, err)
-			}
+		chownFunc := r.chownFn
+		if chownFunc == nil {
+			chownFunc = os.Chown
+		}
+		if err := chownFunc(filePath, targetUid, targetGid); err != nil {
+			return fmt.Errorf("failed to apply chown (%d:%d) on %s: %w", targetUid, targetGid, filePath, err)
 		}
 	}
 
-	// 5. Stat verification: confirm file is strictly NOT world-readable
+	// 5. Stat verification: confirm file permissions and target ownership strictly match policy
 	statInfo, err := os.Stat(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to verify permissions on %s: %w", filePath, err)
 	}
-	if statInfo.Mode().Perm()&0004 != 0 {
-		return fmt.Errorf("security violation: file %s is world-readable (%04o)", filePath, statInfo.Mode().Perm())
+
+	mode := statInfo.Mode().Perm()
+	if mode&0007 != 0 {
+		return fmt.Errorf("security violation: file %s is world-accessible (%04o)", filePath, mode)
+	}
+	if mode&0020 != 0 {
+		return fmt.Errorf("security violation: file %s is group-writable (%04o)", filePath, mode)
+	}
+
+	if stat, ok := statInfo.Sys().(*syscall.Stat_t); ok {
+		if targetUid > 0 && int(stat.Uid) != targetUid {
+			return fmt.Errorf("security policy failure: file %s UID %d does not match required target UID %d", filePath, stat.Uid, targetUid)
+		}
+		if targetGid > 0 && int(stat.Gid) != targetGid {
+			return fmt.Errorf("security policy failure: file %s GID %d does not match required target GID %d", filePath, stat.Gid, targetGid)
+		}
 	}
 
 	return nil
 }
 
 // copyFile performs a secure file copy with 0640 permissions and secure ownership.
-func copyFile(src, dst string) error {
+func (r *RealAsteriskReloader) copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -204,12 +219,7 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
-	if srcInfo, err := os.Stat(src); err == nil {
-		if stat, ok := srcInfo.Sys().(*syscall.Stat_t); ok {
-			_ = os.Chown(dst, int(stat.Uid), int(stat.Gid))
-		}
-	}
-	return applySecureFilePermissions(dst, filepath.Dir(dst))
+	return r.applySecureFilePermissions(dst)
 }
 
 // StagePJSIPConfig stages a new PJSIP config file, preserves any existing config in .bak, and reloads Asterisk.
@@ -226,7 +236,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 	if err := os.WriteFile(tmpPath, []byte(pjsipConf), 0640); err != nil {
 		return fmt.Errorf("failed to write temp PJSIP config file %s: %w", tmpPath, err)
 	}
-	if err := applySecureFilePermissions(tmpPath, r.configDir); err != nil {
+	if err := r.applySecureFilePermissions(tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("security policy failure on temp file %s: %w", tmpPath, err)
 	}
@@ -234,7 +244,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 	// Step 2: Preserve existing config if present
 	hasPrev := false
 	if _, err := os.Stat(targetPath); err == nil {
-		if err := copyFile(targetPath, bakPath); err != nil {
+		if err := r.copyFile(targetPath, bakPath); err != nil {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("failed to backup existing PJSIP config file: %w", err)
 		}
@@ -249,10 +259,13 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		}
 		return fmt.Errorf("failed to atomically apply PJSIP config file: %w", err)
 	}
-	if err := applySecureFilePermissions(targetPath, r.configDir); err != nil {
+	if err := r.applySecureFilePermissions(targetPath); err != nil {
 		if hasPrev {
-			_ = os.Rename(bakPath, targetPath)
-			_ = applySecureFilePermissions(targetPath, r.configDir)
+			rbErr := os.Rename(bakPath, targetPath)
+			secErr := r.applySecureFilePermissions(targetPath)
+			if rbErr != nil || secErr != nil {
+				return fmt.Errorf("security policy failure on target PJSIP config file %s (%w); rollback failed (restoreErr: %v, secErr: %v)", targetPath, err, rbErr, secErr)
+			}
 		} else {
 			_ = os.Remove(targetPath)
 		}
@@ -265,12 +278,13 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		// Rollback on reload failure during stage
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
+			var secErr error
 			if rbErr == nil {
-				_ = applySecureFilePermissions(targetPath, r.configDir)
+				secErr = r.applySecureFilePermissions(targetPath)
 			}
 			_, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-			if rbErr != nil || reloadErr != nil {
-				return fmt.Errorf("asterisk reload failed during trunk stage (%w, output: %s); rollback failed (restoreErr: %v, reloadErr: %v)", err, out, rbErr, reloadErr)
+			if rbErr != nil || secErr != nil || reloadErr != nil {
+				return fmt.Errorf("asterisk reload failed during trunk stage (%w, output: %s); rollback failed (restoreErr: %v, secErr: %v, reloadErr: %v)", err, out, rbErr, secErr, reloadErr)
 			}
 		} else {
 			removeErr := os.Remove(targetPath)
@@ -282,7 +296,6 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		return fmt.Errorf("asterisk reload failed during trunk stage: %w, output: %s", err, out)
 	}
 
-	// Note: bakPath is kept until CommitPJSIPConfig or RollbackPJSIPConfig!
 	return nil
 }
 
@@ -301,7 +314,7 @@ func (r *RealAsteriskReloader) CommitPJSIPConfig(ctx context.Context, trunkName 
 	return nil
 }
 
-// RollbackPJSIPConfig reverts a staged transaction, restoring any previous config from .bak or removing targetPath, and reloads Asterisk.
+// RollbackPJSIPConfig restores previous config file from backup or removes staged file on transaction failure.
 func (r *RealAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkName string) error {
 	targetPath, err := r.getConfigPath(trunkName)
 	if err != nil {
@@ -310,11 +323,12 @@ func (r *RealAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkNam
 	bakPath := targetPath + ".bak"
 
 	var restoreErr error
+	var secErr error
 	if _, err := os.Stat(bakPath); err == nil {
 		// Restore previous config
 		restoreErr = os.Rename(bakPath, targetPath)
 		if restoreErr == nil {
-			_ = applySecureFilePermissions(targetPath, r.configDir)
+			secErr = r.applySecureFilePermissions(targetPath)
 		}
 	} else {
 		// No previous config: remove targetPath
@@ -326,21 +340,14 @@ func (r *RealAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkNam
 	// Reload Asterisk to apply restored or removed state
 	out, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 
-	if restoreErr != nil || reloadErr != nil {
-		return fmt.Errorf("rollback failed: restoreErr=%v, reloadErr=%v, output=%s", restoreErr, reloadErr, out)
+	if restoreErr != nil || secErr != nil || reloadErr != nil {
+		return fmt.Errorf("rollback failed for trunk %s (restoreErr: %v, secErr: %v, reloadErr: %v, output: %s)", trunkName, restoreErr, secErr, reloadErr, out)
 	}
+
 	return nil
 }
 
-// ApplyPJSIPConfig performs StagePJSIPConfig followed by CommitPJSIPConfig.
-func (r *RealAsteriskReloader) ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
-	if err := r.StagePJSIPConfig(ctx, trunkName, pjsipConf); err != nil {
-		return err
-	}
-	return r.CommitPJSIPConfig(ctx, trunkName)
-}
-
-// RemovePJSIPConfig executes an atomic disable transaction with rollback on failure.
+// RemovePJSIPConfig stages removal of a PJSIP config file, preserves backup, and reloads Asterisk.
 func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
 	targetPath, err := r.getConfigPath(trunkName)
 	if err != nil {
@@ -351,7 +358,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	hasPrev := false
 
 	if _, err := os.Stat(targetPath); err == nil {
-		if err := copyFile(targetPath, bakPath); err != nil {
+		if err := r.copyFile(targetPath, bakPath); err != nil {
 			return fmt.Errorf("failed to backup config prior to removal: %w", err)
 		}
 		hasPrev = true
@@ -366,12 +373,13 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		// Rollback on reload failure during removal
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
+			var secErr error
 			if rbErr == nil {
-				_ = applySecureFilePermissions(targetPath, r.configDir)
+				secErr = r.applySecureFilePermissions(targetPath)
 			}
 			_, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-			if rbErr != nil || reloadErr != nil {
-				return fmt.Errorf("asterisk reload failed during trunk removal (%w, output: %s); rollback failed (restoreErr: %v, reloadErr: %v)", err, out, rbErr, reloadErr)
+			if rbErr != nil || secErr != nil || reloadErr != nil {
+				return fmt.Errorf("asterisk reload failed during trunk removal (%w, output: %s); rollback failed (restoreErr: %v, secErr: %v, reloadErr: %v)", err, out, rbErr, secErr, reloadErr)
 			}
 		}
 		return fmt.Errorf("asterisk reload failed during trunk removal: %w, output: %s", err, out)
@@ -382,12 +390,13 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	if healthErr != nil || !healthy {
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
+			var secErr error
 			if rbErr == nil {
-				_ = applySecureFilePermissions(targetPath, r.configDir)
+				secErr = r.applySecureFilePermissions(targetPath)
 			}
 			_, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-			if rbErr != nil || reloadErr != nil {
-				return fmt.Errorf("asterisk unhealthy after trunk removal (%v); rollback failed (restoreErr: %v, reloadErr: %v)", healthErr, rbErr, reloadErr)
+			if rbErr != nil || secErr != nil || reloadErr != nil {
+				return fmt.Errorf("asterisk unhealthy after trunk removal (%v); rollback failed (restoreErr: %v, secErr: %v, reloadErr: %v)", healthErr, rbErr, secErr, reloadErr)
 			}
 		}
 		return fmt.Errorf("asterisk unhealthy after trunk removal: %v", healthErr)
@@ -403,15 +412,15 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 func (r *RealAsteriskReloader) CheckAsteriskHealth(ctx context.Context) (bool, error) {
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "core show uptime")
 	if err != nil {
-		return false, fmt.Errorf("asterisk health check failed: %w, output: %s", err, out)
+		return false, fmt.Errorf("failed to query Asterisk CLI: %w (output: %s)", err, out)
 	}
-	if strings.Contains(out, "System uptime") || strings.Contains(out, "Asterisk") {
+	if strings.Contains(out, "System uptime") || strings.Contains(out, "Uptime:") || strings.Contains(out, "Asterisk") {
 		return true, nil
 	}
-	return false, fmt.Errorf("unexpected asterisk uptime output: %s", out)
+	return false, fmt.Errorf("unexpected Asterisk uptime output: %s", out)
 }
 
-// CheckTransport queries Asterisk CLI to verify that a shared transport (transport-<type>) is provisioned.
+// CheckTransport queries Asterisk CLI to verify presence of required shared transport.
 func (r *RealAsteriskReloader) CheckTransport(ctx context.Context, transport TransportType) (bool, error) {
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show transport %s", PJSIPTransportObjectName(transport)))
 	if err != nil {
@@ -420,13 +429,13 @@ func (r *RealAsteriskReloader) CheckTransport(ctx context.Context, transport Tra
 	if strings.Contains(out, "Unable to find object") || strings.Contains(out, "No objects found") || strings.Contains(out, "not found") {
 		return false, nil
 	}
-	if strings.Contains(out, "Transport:") || strings.Contains(out, PJSIPTransportObjectName(transport)) {
+	if strings.Contains(out, "Transport:") || strings.Contains(out, string(transport)) {
 		return true, nil
 	}
 	return false, nil
 }
 
-// CheckEndpoint queries Asterisk CLI to verify that an endpoint exists and is active.
+// CheckEndpoint queries Asterisk CLI to verify endpoint presence.
 func (r *RealAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName string) (bool, error) {
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", fmt.Sprintf("pjsip show endpoint %s", PJSIPEndpointObjectName(trunkName)))
 	if err != nil {
@@ -435,7 +444,7 @@ func (r *RealAsteriskReloader) CheckEndpoint(ctx context.Context, trunkName stri
 	if strings.Contains(out, "Unable to find object") || strings.Contains(out, "No objects found") || strings.Contains(out, "not found") {
 		return false, nil
 	}
-	if strings.Contains(out, "Endpoint:") {
+	if strings.Contains(out, "Endpoint:") || strings.Contains(out, PJSIPEndpointObjectName(trunkName)) {
 		return true, nil
 	}
 	return false, nil
@@ -471,7 +480,7 @@ type Manager struct {
 	reloader       AsteriskReloader
 }
 
-// NewManager creates a new Manager instance.
+// NewManager constructs a Manager instance with mandatory dialer and reloader.
 func NewManager(dialer NetworkDialer, reloader AsteriskReloader) (*Manager, error) {
 	if dialer == nil {
 		return nil, fmt.Errorf("dialer is required and cannot be nil")

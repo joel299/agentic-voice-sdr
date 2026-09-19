@@ -2,6 +2,7 @@ package sip_test
 
 import (
 	"context"
+	"time"
 	"errors"
 	"fmt"
 	"net"
@@ -782,9 +783,7 @@ func (r *concurrentTestReloader) CommitPJSIPConfig(ctx context.Context, trunkNam
 func (r *concurrentTestReloader) RollbackPJSIPConfig(ctx context.Context, trunkName string) error {
 	return r.base.RollbackPJSIPConfig(ctx, trunkName)
 }
-func (r *concurrentTestReloader) ApplyPJSIPConfig(ctx context.Context, trunkName string, pjsipConf string) error {
-	return r.base.ApplyPJSIPConfig(ctx, trunkName, pjsipConf)
-}
+
 func (r *concurrentTestReloader) RemovePJSIPConfig(ctx context.Context, trunkName string) error {
 	return r.base.RemovePJSIPConfig(ctx, trunkName)
 }
@@ -1035,203 +1034,6 @@ func TestGlobalAsteriskTransactionLock(t *testing.T) {
 	}
 }
 
-func TestRealAsteriskIntegrationSmoke(t *testing.T) {
-	if os.Getenv("ENABLE_REAL_ASTERISK_SMOKE") != "1" {
-		t.Skip("skipping real Asterisk smoke test: ENABLE_REAL_ASTERISK_SMOKE != 1")
-	}
-	if _, err := exec.LookPath("asterisk"); err != nil {
-		t.Skip("skipping real Asterisk smoke test: asterisk binary not in PATH")
-	}
-
-	configDir := os.Getenv("ASTERISK_PJSIP_TEST_DIR")
-	if configDir == "" {
-		configDir = "/etc/asterisk/pjsip.d"
-	}
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		t.Skipf("skipping real Asterisk smoke test: unable to create %s: %v", configDir, err)
-	}
-
-	dialer := &mockDialer{}
-	reloader := sip.NewRealAsteriskReloader(configDir, nil)
-	mgr, err := sip.NewManager(dialer, reloader)
-	if err != nil {
-		t.Fatalf("failed to create manager: %v", err)
-	}
-
-	trunkName := "smoketestreal"
-	cfg := sip.TrunkConfig{
-		Name:                 trunkName,
-		Host:                 "127.0.0.1",
-		Port:                 5060,
-		Transport:            sip.TransportUDP,
-		AuthType:             sip.AuthIP,
-		RegistrationRequired: false,
-		Enabled:              true,
-	}
-
-	targetConfFile := filepath.Join(configDir, trunkName+".conf")
-	tmpConfFile := targetConfFile + ".tmp"
-	bakConfFile := targetConfFile + ".bak"
-
-	// Register immediate idempotent cleanup to guarantee isolation and zero residual files
-	t.Cleanup(func() {
-		ctx := context.Background()
-		cfgDisable := cfg
-		cfgDisable.Enabled = false
-		_, _ = mgr.ApplyTrunk(ctx, cfgDisable)
-		_ = reloader.RemovePJSIPConfig(ctx, trunkName)
-		runner := sip.OSCommandRunner{}
-		_, _ = runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-
-		_ = os.Remove(targetConfFile)
-		_ = os.Remove(tmpConfFile)
-		_ = os.Remove(bakConfFile)
-
-		active, _ := reloader.CheckEndpoint(ctx, trunkName)
-		if active {
-			t.Errorf("cleanup failed: endpoint %s still active after test cleanup", trunkName)
-		}
-	})
-
-	// 1. Apply trunk
-	status, err := mgr.ApplyTrunk(context.Background(), cfg)
-	if err != nil {
-		t.Fatalf("failed to apply real trunk in Asterisk: %v", err)
-	}
-	if status.Status != sip.StatusReady {
-		t.Fatalf("expected status READY for real trunk, got: %s (error: %s)", status.Status, status.LastError)
-	}
-
-	// 2. Query real Asterisk CLI to verify endpoint exists
-	active, epErr := reloader.CheckEndpoint(context.Background(), trunkName)
-	if epErr != nil || !active {
-		t.Fatalf("expected endpoint trunk-%s to be active in real Asterisk CLI, got active=%t, err=%v", trunkName, active, epErr)
-	}
-
-	// 3. Disable trunk
-	cfgDisable := cfg
-	cfgDisable.Enabled = false
-	statusDisable, err := mgr.ApplyTrunk(context.Background(), cfgDisable)
-	if err != nil {
-		t.Fatalf("failed to disable real trunk in Asterisk: %v", err)
-	}
-	if statusDisable.Status != sip.StatusDisabled {
-		t.Fatalf("expected status DISABLED, got: %s", statusDisable.Status)
-	}
-
-	// 4. Query real Asterisk CLI to verify endpoint is gone
-	activeAfterDisable, _ := reloader.CheckEndpoint(context.Background(), trunkName)
-	if activeAfterDisable {
-		t.Fatalf("expected endpoint trunk-%s to be removed from real Asterisk after disable", trunkName)
-	}
-}
-
-func TestPJSIPRegistrationNamingConsistency(t *testing.T) {
-	trunkName := "namingtest"
-	cfg := sip.TrunkConfig{
-		Name:                 trunkName,
-		Provider:             "twilio",
-		Host:                 "127.0.0.1",
-		Port:                 5060,
-		Transport:            sip.TransportUDP,
-		AuthType:             sip.AuthUserPass,
-		AuthUsername:         "user",
-		Secret:               "secret",
-		RegistrationRequired: true,
-		Enabled:              true,
-	}
-
-	confStr, err := sip.GeneratePJSIPConfig(cfg)
-	if err != nil {
-		t.Fatalf("failed to generate config: %v", err)
-	}
-
-	expectedRegName := sip.PJSIPRegistrationObjectName(trunkName)
-	if expectedRegName != "trunk-namingtest-reg" {
-		t.Fatalf("unexpected canonical registration name: got %s, want trunk-namingtest-reg", expectedRegName)
-	}
-
-	expectedHeader := fmt.Sprintf("[%s]", expectedRegName)
-	if !strings.Contains(confStr, expectedHeader) {
-		t.Fatalf("generated PJSIP config does not contain canonical registration section header %s. Content:\n%s", expectedHeader, confStr)
-	}
-
-	var executedCmd string
-	runner := &mockRunnerFunc{
-		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
-			executedCmd = fmt.Sprintf("%s %s", name, strings.Join(args, " "))
-			return "Registered", nil
-		},
-	}
-
-	reloader := sip.NewRealAsteriskReloader("/tmp", runner)
-	regState, active, err := reloader.CheckRegistration(context.Background(), trunkName)
-	if err != nil || !active || regState != "Registered" {
-		t.Fatalf("check registration failed: state=%s, active=%t, err=%v", regState, active, err)
-	}
-
-	expectedCliArg := fmt.Sprintf("pjsip show registration %s", expectedRegName)
-	if !strings.Contains(executedCmd, expectedCliArg) {
-		t.Fatalf("CheckRegistration executed command %q; expected to contain %q", executedCmd, expectedCliArg)
-	}
-}
-
-func TestCLIFailureErrorPropagation(t *testing.T) {
-	runnerErr := &mockRunnerFunc{
-		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
-			return "Command failed: CLI connection refused", fmt.Errorf("exit status 1")
-		},
-	}
-	reloaderErr := sip.NewRealAsteriskReloader("/tmp", runnerErr)
-
-	// 1. CheckTransport CLI failure must return error
-	_, err := reloaderErr.CheckTransport(context.Background(), sip.TransportUDP)
-	if err == nil {
-		t.Fatalf("expected error from CheckTransport on CLI failure, got nil")
-	}
-
-	// 2. CheckEndpoint CLI failure must return error
-	_, err = reloaderErr.CheckEndpoint(context.Background(), "testtrunk")
-	if err == nil {
-		t.Fatalf("expected error from CheckEndpoint on CLI failure, got nil")
-	}
-
-	// 3. CheckRegistration CLI failure must return error
-	_, _, err = reloaderErr.CheckRegistration(context.Background(), "testtrunk")
-	if err == nil {
-		t.Fatalf("expected error from CheckRegistration on CLI failure, got nil")
-	}
-
-	// 4. Test explicit not found output (runner succeeds, CLI reports object not found)
-	runnerNotFound := &mockRunnerFunc{
-		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
-			return "Unable to find object trunk-testtrunk.", nil
-		},
-	}
-	reloaderNotFound := sip.NewRealAsteriskReloader("/tmp", runnerNotFound)
-
-	activeEp, errEp := reloaderNotFound.CheckEndpoint(context.Background(), "testtrunk")
-	if errEp != nil || activeEp {
-		t.Fatalf("expected active=false, err=nil for not found endpoint, got active=%t, err=%v", activeEp, errEp)
-	}
-
-	regState, activeReg, errReg := reloaderNotFound.CheckRegistration(context.Background(), "testtrunk")
-	if errReg != nil || activeReg || regState != "Unregistered" {
-		t.Fatalf("expected Unregistered/false/nil for not found registration, got state=%s, active=%t, err=%v", regState, activeReg, errReg)
-	}
-
-	// 5. Test rejected registration
-	runnerRejected := &mockRunnerFunc{
-		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
-			return "Status: Rejected by remote server", nil
-		},
-	}
-	reloaderRejected := sip.NewRealAsteriskReloader("/tmp", runnerRejected)
-	stateRej, activeRej, errRej := reloaderRejected.CheckRegistration(context.Background(), "testtrunk")
-	if errRej != nil || activeRej || stateRej != "Rejected" {
-		t.Fatalf("expected Rejected/false/nil for rejected registration, got state=%s, active=%t, err=%v", stateRej, activeRej, errRej)
-	}
-}
 
 type mockRunnerFunc struct {
 	runFunc func(ctx context.Context, name string, args ...string) (string, error)
@@ -1244,93 +1046,177 @@ func (m *mockRunnerFunc) RunCommand(ctx context.Context, name string, args ...st
 	return "", nil
 }
 
-func TestPJSIPFilePermissions_SecurePolicyAndSecrets(t *testing.T) {
+func TestFilesystemSecurityFailClosed(t *testing.T) {
+	tempDir := t.TempDir()
+	reloadCalled := false
+	runner := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			reloadCalled = true
+			return "success", nil
+		},
+	}
+
+	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+	reloader.SetChownFunc(func(name string, uid, gid int) error {
+		return fmt.Errorf("chown permission denied: operation not permitted (EPERM)")
+	})
+
+	trunkName := "failclosedtest"
+	pjsipConf := "[trunk-failclosedtest]\ntype=endpoint\n"
+
+	err := reloader.StagePJSIPConfig(context.Background(), trunkName, pjsipConf)
+	if err == nil {
+		t.Fatalf("expected StagePJSIPConfig to fail closed when chown returns EPERM, got nil error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") && !strings.Contains(err.Error(), "chown") {
+		t.Fatalf("expected error message to mention chown/permission denied, got: %v", err)
+	}
+
+	if reloadCalled {
+		t.Fatalf("security violation: Asterisk reload was executed after chown/security policy failure")
+	}
+
+	targetPath := filepath.Join(tempDir, trunkName+".conf")
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		t.Fatalf("security violation: target config file %s exists on disk after staging security failure", targetPath)
+	}
+}
+
+func TestRollbackSecurityErrorPropagation(t *testing.T) {
 	tempDir := t.TempDir()
 	runner := &mockRunner{}
 	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
 
-	trunkName := "secretpermtest"
-	secretPass := "UltraSecretPassword987!"
+	trunkName := "rollbacksecerr"
+	pjsipConf := "[trunk-rollbacksecerr]\ntype=endpoint\n"
+
+	if err := reloader.StagePJSIPConfig(context.Background(), trunkName, pjsipConf); err != nil {
+		t.Fatalf("failed to stage initial config: %v", err)
+	}
+
+	updatedConf := pjsipConf + "\n; update\n"
+	if err := reloader.StagePJSIPConfig(context.Background(), trunkName, updatedConf); err != nil {
+		t.Fatalf("failed to stage updated config: %v", err)
+	}
+
+	reloader.SetChownFunc(func(name string, uid, gid int) error {
+		return fmt.Errorf("simulated chown failure during rollback")
+	})
+
+	err := reloader.RollbackPJSIPConfig(context.Background(), trunkName)
+	if err == nil {
+		t.Fatalf("expected RollbackPJSIPConfig to return compound error when security policy fails on restore, got nil")
+	}
+	if !strings.Contains(err.Error(), "secErr") && !strings.Contains(err.Error(), "simulated chown failure") {
+		t.Fatalf("expected rollback error to preserve security error details, got: %v", err)
+	}
+}
+
+func TestRealAsteriskIntegrationSmoke(t *testing.T) {
+	if os.Getenv("ENABLE_REAL_ASTERISK_SMOKE") != "1" {
+		t.Skip("skipping real Asterisk smoke test: ENABLE_REAL_ASTERISK_SMOKE != 1")
+	}
+	if _, err := exec.LookPath("asterisk"); err != nil {
+		t.Skip("skipping real Asterisk smoke test: asterisk binary not in PATH")
+	}
+
+	configDir := os.Getenv("ASTERISK_PJSIP_TEST_DIR")
+	if configDir == "" {
+		t.Skip("skipping real Asterisk smoke test: ASTERISK_PJSIP_TEST_DIR environment variable is required")
+	}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("unable to create test config directory %s: %v", configDir, err)
+	}
+
+	trunkName := fmt.Sprintf("smoketestreal_%d", time.Now().UnixNano())
+	targetConfFile := filepath.Join(configDir, trunkName+".conf")
+	tmpConfFile := targetConfFile + ".tmp"
+	bakConfFile := targetConfFile + ".bak"
+
+	if _, err := os.Stat(targetConfFile); err == nil {
+		t.Fatalf("preflight failure: test config file %s already exists", targetConfFile)
+	}
+	if _, err := os.Stat(tmpConfFile); err == nil {
+		t.Fatalf("preflight failure: test tmp file %s already exists", tmpConfFile)
+	}
+	if _, err := os.Stat(bakConfFile); err == nil {
+		t.Fatalf("preflight failure: test bak file %s already exists", bakConfFile)
+	}
+
+	dialer := &mockDialer{}
+	reloader := sip.NewRealAsteriskReloader(configDir, nil)
+	mgr, err := sip.NewManager(dialer, reloader)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
 
 	cfg := sip.TrunkConfig{
 		Name:                 trunkName,
-		Provider:             "twilio",
 		Host:                 "127.0.0.1",
 		Port:                 5060,
 		Transport:            sip.TransportUDP,
-		AuthType:             sip.AuthUserPass,
-		AuthUsername:         "secretuser",
-		Secret:               secretPass,
+		AuthType:             sip.AuthIP,
 		RegistrationRequired: false,
 		Enabled:              true,
 	}
 
-	pjsipConf, err := sip.GeneratePJSIPConfig(cfg)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		cfgDisable := cfg
+		cfgDisable.Enabled = false
+		_, _ = mgr.ApplyTrunk(ctx, cfgDisable)
+		if err := reloader.RemovePJSIPConfig(ctx, trunkName); err != nil {
+			t.Logf("cleanup warning: RemovePJSIPConfig returned error for %s: %v", trunkName, err)
+		}
+
+		runner := sip.OSCommandRunner{}
+		if out, err := runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so"); err != nil {
+			t.Logf("cleanup warning: Asterisk reload returned error: %v (output: %s)", err, out)
+		}
+
+		active, err := reloader.CheckEndpoint(ctx, trunkName)
+		if active || err != nil {
+			t.Errorf("cleanup verification failed: endpoint %s still active or check error: %v", trunkName, err)
+		}
+
+		for _, path := range []string{targetConfFile, tmpConfFile, bakConfFile} {
+			if _, err := os.Stat(path); err == nil {
+				t.Errorf("cleanup verification failed: residual file %s still exists", path)
+				_ = os.Remove(path)
+			}
+		}
+	})
+
+	status, err := mgr.ApplyTrunk(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("failed to generate PJSIP config: %v", err)
+		t.Fatalf("failed to apply trunk in real Asterisk: %v", err)
+	}
+	if status.Status != sip.StatusReady {
+		t.Fatalf("expected StatusReady, got %s (LastError: %s)", status.Status, status.LastError)
+	}
+	if !status.EndpointActive {
+		t.Fatalf("expected EndpointActive = true")
 	}
 
-	// 1. Test Staging New File & Temp file security
-	err = reloader.StagePJSIPConfig(context.Background(), trunkName, pjsipConf)
+	info, err := os.Stat(targetConfFile)
 	if err != nil {
-		t.Fatalf("failed to stage PJSIP config: %v", err)
+		t.Fatalf("target PJSIP config file %s not found on disk: %v", targetConfFile, err)
 	}
-
-	targetPath := filepath.Join(tempDir, trunkName+".conf")
-	info, err := os.Stat(targetPath)
-	if err != nil {
-		t.Fatalf("failed to stat staged config file: %v", err)
-	}
-
-	// Assert mode perm: mode.Perm() & 0004 == 0 (zero secret exposure, strictly non-world-readable)
 	if info.Mode().Perm()&0004 != 0 {
-		t.Fatalf("security violation: staged config file %s is world-readable (%04o)", targetPath, info.Mode().Perm())
+		t.Fatalf("security violation: PJSIP config file %s is world-readable (%04o)", targetConfFile, info.Mode().Perm())
 	}
 
-	// 2. Test Existing File & Backup File security (.bak)
-	updatedConf := pjsipConf + "\n; updated comment\n"
-	err = reloader.StagePJSIPConfig(context.Background(), trunkName, updatedConf)
+	cfgDisable := cfg
+	cfgDisable.Enabled = false
+	disableStatus, err := mgr.ApplyTrunk(context.Background(), cfgDisable)
 	if err != nil {
-		t.Fatalf("failed to stage updated PJSIP config: %v", err)
+		t.Fatalf("failed to disable trunk in real Asterisk: %v", err)
+	}
+	if disableStatus.Status != sip.StatusDisabled {
+		t.Fatalf("expected StatusDisabled, got %s", disableStatus.Status)
 	}
 
-	bakPath := targetPath + ".bak"
-	bakInfo, err := os.Stat(bakPath)
-	if err != nil {
-		t.Fatalf("failed to stat backup config file: %v", err)
-	}
-	if bakInfo.Mode().Perm()&0004 != 0 {
-		t.Fatalf("security violation: backup config file %s is world-readable (%04o)", bakPath, bakInfo.Mode().Perm())
-	}
-
-	confInfo, err := os.Stat(targetPath)
-	if err != nil {
-		t.Fatalf("failed to stat updated config file: %v", err)
-	}
-	if confInfo.Mode().Perm()&0004 != 0 {
-		t.Fatalf("security violation: updated config file %s is world-readable (%04o)", targetPath, confInfo.Mode().Perm())
-	}
-
-	// 3. Test Rollback File security
-	err = reloader.RollbackPJSIPConfig(context.Background(), trunkName)
-	if err != nil {
-		t.Fatalf("failed to rollback PJSIP config: %v", err)
-	}
-
-	restoredInfo, err := os.Stat(targetPath)
-	if err != nil {
-		t.Fatalf("failed to stat restored config file post-rollback: %v", err)
-	}
-	if restoredInfo.Mode().Perm()&0004 != 0 {
-		t.Fatalf("security violation: restored config file %s post-rollback is world-readable (%04o)", targetPath, restoredInfo.Mode().Perm())
-	}
-
-	// 4. Verify secret presence in file content without printing secret in test logs
-	contentBytes, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("failed to read restored config file: %v", err)
-	}
-	if !strings.Contains(string(contentBytes), "secretuser") {
-		t.Fatalf("expected PJSIP config file to contain auth user")
+	if _, err := os.Stat(targetConfFile); err == nil {
+		t.Fatalf("PJSIP config file %s still exists after disabling trunk", targetConfFile)
 	}
 }

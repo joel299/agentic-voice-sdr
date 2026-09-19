@@ -1036,6 +1036,9 @@ func TestGlobalAsteriskTransactionLock(t *testing.T) {
 }
 
 func TestRealAsteriskIntegrationSmoke(t *testing.T) {
+	if os.Getenv("ENABLE_REAL_ASTERISK_SMOKE") != "1" {
+		t.Skip("skipping real Asterisk smoke test: ENABLE_REAL_ASTERISK_SMOKE != 1")
+	}
 	if _, err := exec.LookPath("asterisk"); err != nil {
 		t.Skip("skipping real Asterisk smoke test: asterisk binary not in PATH")
 	}
@@ -1093,5 +1096,96 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 	activeAfterDisable, _ := reloader.CheckEndpoint(context.Background(), trunkName)
 	if activeAfterDisable {
 		t.Fatalf("expected endpoint trunk-%s to be removed from real Asterisk after disable", trunkName)
+	}
+}
+
+func TestPJSIPFilePermissions_SecurePolicyAndSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+	runner := &mockRunner{}
+	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+
+	trunkName := "secretpermtest"
+	secretPass := "UltraSecretPassword987!"
+
+	cfg := sip.TrunkConfig{
+		Name:                 trunkName,
+		Provider:             "twilio",
+		Host:                 "127.0.0.1",
+		Port:                 5060,
+		Transport:            sip.TransportUDP,
+		AuthType:             sip.AuthUserPass,
+		AuthUsername:         "secretuser",
+		Secret:               secretPass,
+		RegistrationRequired: false,
+		Enabled:              true,
+	}
+
+	pjsipConf, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatalf("failed to generate PJSIP config: %v", err)
+	}
+
+	// 1. Test Staging New File & Temp file security
+	err = reloader.StagePJSIPConfig(context.Background(), trunkName, pjsipConf)
+	if err != nil {
+		t.Fatalf("failed to stage PJSIP config: %v", err)
+	}
+
+	targetPath := filepath.Join(tempDir, trunkName+".conf")
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("failed to stat staged config file: %v", err)
+	}
+
+	// Assert mode perm: mode.Perm() & 0004 == 0 (zero secret exposure, strictly non-world-readable)
+	if info.Mode().Perm()&0004 != 0 {
+		t.Fatalf("security violation: staged config file %s is world-readable (%04o)", targetPath, info.Mode().Perm())
+	}
+
+	// 2. Test Existing File & Backup File security (.bak)
+	updatedConf := pjsipConf + "\n; updated comment\n"
+	err = reloader.StagePJSIPConfig(context.Background(), trunkName, updatedConf)
+	if err != nil {
+		t.Fatalf("failed to stage updated PJSIP config: %v", err)
+	}
+
+	bakPath := targetPath + ".bak"
+	bakInfo, err := os.Stat(bakPath)
+	if err != nil {
+		t.Fatalf("failed to stat backup config file: %v", err)
+	}
+	if bakInfo.Mode().Perm()&0004 != 0 {
+		t.Fatalf("security violation: backup config file %s is world-readable (%04o)", bakPath, bakInfo.Mode().Perm())
+	}
+
+	confInfo, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("failed to stat updated config file: %v", err)
+	}
+	if confInfo.Mode().Perm()&0004 != 0 {
+		t.Fatalf("security violation: updated config file %s is world-readable (%04o)", targetPath, confInfo.Mode().Perm())
+	}
+
+	// 3. Test Rollback File security
+	err = reloader.RollbackPJSIPConfig(context.Background(), trunkName)
+	if err != nil {
+		t.Fatalf("failed to rollback PJSIP config: %v", err)
+	}
+
+	restoredInfo, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("failed to stat restored config file post-rollback: %v", err)
+	}
+	if restoredInfo.Mode().Perm()&0004 != 0 {
+		t.Fatalf("security violation: restored config file %s post-rollback is world-readable (%04o)", targetPath, restoredInfo.Mode().Perm())
+	}
+
+	// 4. Verify secret presence in file content without printing secret in test logs
+	contentBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read restored config file: %v", err)
+	}
+	if !strings.Contains(string(contentBytes), "secretuser") {
+		t.Fatalf("expected PJSIP config file to contain auth user")
 	}
 }

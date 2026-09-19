@@ -112,9 +112,9 @@ echo "  - Binding: voice.commands -> call.dispatch (key: call.dispatch)"
 api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/call.dispatch" \
   '{"routing_key":"call.dispatch","arguments":{}}' > /dev/null
 
-echo "  - Binding: voice.commands -> tool.jobs (key: tool.jobs)"
+echo "  - Binding: voice.commands -> tool.jobs (key: tool.job.#)"
 api_req POST "/bindings/${ENCODED_VHOST}/e/voice.commands/q/tool.jobs" \
-  '{"routing_key":"tool.jobs","arguments":{}}' > /dev/null
+  '{"routing_key":"tool.job.#","arguments":{}}' > /dev/null
 
 # voice.commands -> retry delay queues
 for rk in call.retry.30s call.retry.120s call.retry.600s; do
@@ -124,9 +124,9 @@ for rk in call.retry.30s call.retry.120s call.retry.600s; do
 done
 
 # voice.events -> transcript.persist
-echo "  - Binding: voice.events -> transcript.persist (key: transcript.persist)"
+echo "  - Binding: voice.events -> transcript.persist (key: call.transcript.#)"
 api_req POST "/bindings/${ENCODED_VHOST}/e/voice.events/q/transcript.persist" \
-  '{"routing_key":"transcript.persist","arguments":{}}' > /dev/null
+  '{"routing_key":"call.transcript.#","arguments":{}}' > /dev/null
 
 # voice.dlx -> voice.dead
 echo "  - Binding: voice.dlx -> voice.dead (key: voice.dead)"

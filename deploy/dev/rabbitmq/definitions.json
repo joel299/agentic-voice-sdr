@@ -144,7 +144,7 @@
       "vhost": "/",
       "destination": "tool.jobs",
       "destination_type": "queue",
-      "routing_key": "tool.jobs",
+      "routing_key": "tool.job.#",
       "arguments": {}
     },
     {
@@ -152,7 +152,7 @@
       "vhost": "/",
       "destination": "transcript.persist",
       "destination_type": "queue",
-      "routing_key": "transcript.persist",
+      "routing_key": "call.transcript.#",
       "arguments": {}
     },
     {

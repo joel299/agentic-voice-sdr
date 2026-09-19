@@ -89,10 +89,10 @@ echo "[+] 2. Starting Docker Compose dev stack..."
 docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d
 
 # 3. Wait for services to become healthy
-echo "[+] 3. Waiting for containers to become healthy (timeout: 90s)..."
+echo "[+] 3. Waiting for containers to become healthy (timeout: 120s)..."
 wait_healthy() {
   local container="$1"
-  local max_attempts=45
+  local max_attempts=60
   local attempt=1
 
   while [ "$attempt" -le "$max_attempts" ]; do
@@ -279,8 +279,8 @@ check_binding "voice.commands" "call.dispatch" "call.dispatch"
 check_binding "voice.commands" "call.retry.30s" "call.retry.30s"
 check_binding "voice.commands" "call.retry.120s" "call.retry.120s"
 check_binding "voice.commands" "call.retry.600s" "call.retry.600s"
-check_binding "voice.commands" "tool.jobs" "tool.jobs"
-check_binding "voice.events" "transcript.persist" "transcript.persist"
+check_binding "voice.commands" "tool.jobs" "tool.job.#"
+check_binding "voice.events" "transcript.persist" "call.transcript.#"
 check_binding "voice.dlx" "voice.dead" "voice.dead"
 check_binding "voice.dlx" "voice.dead" "#"
 
@@ -324,7 +324,45 @@ if [ "$DLQ_FOUND" != "True" ]; then
 fi
 echo "    [✓] Dead Letter Queue routing (voice.dlx -> voice.dead) verified."
 
-echo "[+] 5.9. Testing Stage-Based Retry Delay Return (call.retry.30s -> TTL -> call.dispatch)..."
+echo "[+] 5.9. Testing Tool Job routing (voice.commands -> tool.jobs via tool.job.#)..."
+TOOL_TOKEN="smoke_tool_job_${RANDOM}_$(date +%s)"
+TOOL_PAYLOAD="{\"properties\":{},\"routing_key\":\"tool.job.smoke\",\"payload\":\"{\\\"token\\\":\\\"${TOOL_TOKEN}\\\"}\",\"payload_encoding\":\"string\"}"
+curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+  -d "$TOOL_PAYLOAD" \
+  "${API_BASE}/exchanges/%2F/voice.commands/publish" > /dev/null
+
+CONSUMED_TOOL=$(curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+  -d "$CONSUME_PAYLOAD" \
+  "${API_BASE}/queues/%2F/tool.jobs/get")
+
+TOOL_FOUND=$(echo "$CONSUMED_TOOL" | python3 -c 'import sys, json; token = sys.argv[1]; msgs = json.load(sys.stdin); print(len(msgs) > 0 and token in msgs[0].get("payload", ""))' "$TOOL_TOKEN")
+if [ "$TOOL_FOUND" != "True" ]; then
+  echo "[-] ERROR: Failed to consume test message from tool.jobs (routing_key: tool.job.smoke)."
+  echo "    Response: ${CONSUMED_TOOL}"
+  exit 1
+fi
+echo "    [✓] Publishing to voice.commands (tool.job.smoke) and consuming from tool.jobs verified."
+
+echo "[+] 5.10. Testing Transcript routing (voice.events -> transcript.persist via call.transcript.#)..."
+TRANSCRIPT_TOKEN="smoke_transcript_${RANDOM}_$(date +%s)"
+TRANSCRIPT_PAYLOAD="{\"properties\":{},\"routing_key\":\"call.transcript.smoke\",\"payload\":\"{\\\"token\\\":\\\"${TRANSCRIPT_TOKEN}\\\"}\",\"payload_encoding\":\"string\"}"
+curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+  -d "$TRANSCRIPT_PAYLOAD" \
+  "${API_BASE}/exchanges/%2F/voice.events/publish" > /dev/null
+
+CONSUMED_TRANSCRIPT=$(curl -s -S -f -u "${RABBIT_USER}:${RABBIT_PASS}" -H "Content-Type: application/json" \
+  -d "$CONSUME_PAYLOAD" \
+  "${API_BASE}/queues/%2F/transcript.persist/get")
+
+TRANSCRIPT_FOUND=$(echo "$CONSUMED_TRANSCRIPT" | python3 -c 'import sys, json; token = sys.argv[1]; msgs = json.load(sys.stdin); print(len(msgs) > 0 and token in msgs[0].get("payload", ""))' "$TRANSCRIPT_TOKEN")
+if [ "$TRANSCRIPT_FOUND" != "True" ]; then
+  echo "[-] ERROR: Failed to consume test message from transcript.persist (routing_key: call.transcript.smoke)."
+  echo "    Response: ${CONSUMED_TRANSCRIPT}"
+  exit 1
+fi
+echo "    [✓] Publishing to voice.events (call.transcript.smoke) and consuming from transcript.persist verified."
+
+echo "[+] 5.11. Testing Stage-Based Retry Delay Return (call.retry.30s -> TTL -> call.dispatch)..."
 # Publish test message to voice.commands with routing key call.retry.30s
 RETRY_TOKEN="smoke_retry_return_$(date +%s)"
 RETRY_PAYLOAD="{\"properties\":{},\"routing_key\":\"call.retry.30s\",\"payload\":\"{\\\"token\\\":\\\"${RETRY_TOKEN}\\\"}\",\"payload_encoding\":\"string\"}"

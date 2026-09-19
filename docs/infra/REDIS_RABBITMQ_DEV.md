@@ -76,8 +76,8 @@ Estas filas **não possuem consumidores ativos**. Elas retêm mensagens durante 
 * `voice.commands` -> `call.retry.30s` (routing_key: `call.retry.30s`)
 * `voice.commands` -> `call.retry.120s` (routing_key: `call.retry.120s`)
 * `voice.commands` -> `call.retry.600s` (routing_key: `call.retry.600s`)
-* `voice.commands` -> `tool.jobs` (routing_key: `tool.jobs`)
-* `voice.events` -> `transcript.persist` (routing_key: `transcript.persist`)
+* `voice.commands` -> `tool.jobs` (routing_key: `tool.job.#`)
+* `voice.events` -> `transcript.persist` (routing_key: `call.transcript.#`)
 * `voice.dlx` -> `voice.dead` (routing_key: `voice.dead` e `#`)
 
 ---

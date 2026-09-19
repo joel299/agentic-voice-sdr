@@ -38,6 +38,8 @@ Mandatory:
    - Work Queues: `call.dispatch`, `tool.jobs`, `transcript.persist` (com DLX configurada para `voice.dlx` e routing key `voice.dead`).
    - Stage-Based Delay Queues: `call.retry.30s` (TTL 30s), `call.retry.120s` (TTL 120s) e `call.retry.600s` (TTL 600s), todas com DLX configurada para `voice.commands` e routing key `call.dispatch`.
    - DLQ: `voice.dead` durável.
+   - Bindings declarativos: `voice.commands -> tool.jobs (tool.job.#)`, `voice.events -> transcript.persist (call.transcript.#)`, retry queues e DLQ.
+
 
 3. **Automação e Validação (`scripts/infra/`):**
    - `setup-rabbitmq-topology.sh`: script opcional/idempotente de recovery e reaplicação manual atualizado com as filas de delay por estágio.

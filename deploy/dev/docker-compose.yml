@@ -67,10 +67,10 @@ services:
       test:
         - CMD-SHELL
         - test -f /tmp/rabbitmq_ready && rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity
-      interval: 3s
-      timeout: 3s
-      retries: 25
-      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     networks:
       - voice-dev-net
 

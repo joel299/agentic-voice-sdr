@@ -34,10 +34,8 @@ jobs:
           git fetch origin "${{ github.base_ref }}" --depth=1
 
           mapfile -t FILES < <(git diff --name-only "${BASE}...HEAD")
-          printf 'Changed files:
-'
-          printf ' - %s
-' "${FILES[@]}"
+          printf 'Changed files:\n'
+          printf ' - %s\n' "${FILES[@]}"
 
           allowed() {
             local file="$1"
@@ -50,9 +48,6 @@ jobs:
                 ;;
               agent/antigravity/redis-rabbitmq-dev-infra)
                 [[ "$file" == ".env.example" || "$file" == deploy/dev/* || "$file" == scripts/infra/* || "$file" == docs/infra/* ]]
-                ;;
-              agent/antigravity/postgres-outbox-dev-foundation)
-                [[ "$file" == ".env.example" || "$file" == deploy/dev/* || "$file" == scripts/db/* || "$file" == docs/infra/* || "$file" == .github/workflows/* ]]
                 ;;
               agent/cursor/audiosocket-frame-codec)
                 [[ "$file" == internal/telephony/audiosocket/* ]]
@@ -202,10 +197,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f scripts/infra/smoke-test.sh ]]; then
-            chmod +x scripts/infra/smoke-test.sh
-            ./scripts/infra/smoke-test.sh --down
-          fi
+          chmod +x scripts/infra/smoke-test.sh
+          ./scripts/infra/smoke-test.sh --down
 
       - name: PostgreSQL + Outbox foundation smoke test
         if: steps.infra.outputs.present == 'true'

@@ -46,7 +46,7 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 }
 
 func serve(ctx context.Context, cfg config.Config) error {
-	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouter())
+	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfig(cfg))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout
 	server.IdleTimeout = cfg.IdleTimeout

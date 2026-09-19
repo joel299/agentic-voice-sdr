@@ -14,33 +14,33 @@ import (
 // HTTPProvider is an adapter boundary. Endpoint paths are injected by the
 // provider-specific adapter; this package does not guess an external contract.
 type HTTPProvider struct {
-	Client           *http.Client
-	ListInstancesURL string
-	StatusURL        func(instanceID string) string
+	Client            *http.Client
+	ListInstancesPath string
+	StatusPath        func(baseURL, instanceID string) string
 }
 
-func NewHTTPProvider(listURL string, statusURL func(string) string) *HTTPProvider {
-	return &HTTPProvider{Client: &http.Client{Timeout: 5 * time.Second}, ListInstancesURL: listURL, StatusURL: statusURL}
+func NewHTTPProvider(listPath string, statusPath func(string, string) string) *HTTPProvider {
+	return &HTTPProvider{Client: &http.Client{Timeout: 5 * time.Second}, ListInstancesPath: listPath, StatusPath: statusPath}
 }
 
-func (p *HTTPProvider) ValidateConnection(ctx context.Context, credential string) error {
-	if _, err := p.request(ctx, p.ListInstancesURL, credential); err != nil {
+func (p *HTTPProvider) ValidateConnection(ctx context.Context, baseURL, credential string) error {
+	if _, err := p.request(ctx, joinEndpoint(baseURL, p.ListInstancesPath), credential); err != nil {
 		return err
 	}
 	return nil
 }
-func (p *HTTPProvider) ListInstances(ctx context.Context, credential string) ([]Instance, error) {
-	body, err := p.request(ctx, p.ListInstancesURL, credential)
+func (p *HTTPProvider) ListInstances(ctx context.Context, baseURL, credential string) ([]Instance, error) {
+	body, err := p.request(ctx, joinEndpoint(baseURL, p.ListInstancesPath), credential)
 	if err != nil {
 		return nil, err
 	}
 	return normalizeInstances(body)
 }
-func (p *HTTPProvider) GetInstanceStatus(ctx context.Context, credential, instanceID string) (Instance, error) {
-	if p.StatusURL == nil {
+func (p *HTTPProvider) GetInstanceStatus(ctx context.Context, baseURL, credential, instanceID string) (Instance, error) {
+	if p.StatusPath == nil {
 		return Instance{}, errors.New("provider status endpoint is unavailable")
 	}
-	body, err := p.request(ctx, p.StatusURL(instanceID), credential)
+	body, err := p.request(ctx, p.StatusPath(baseURL, instanceID), credential)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -57,8 +57,12 @@ func (p *HTTPProvider) GetInstanceStatus(ctx context.Context, credential, instan
 	}
 	return instance, nil
 }
-func (p *HTTPProvider) SendMessage(context.Context, string, string, string, string) error {
+func (p *HTTPProvider) SendMessage(context.Context, string, string, string, string, string) error {
 	return errors.New("provider send-message contract is not configured")
+}
+
+func joinEndpoint(baseURL, path string) string {
+	return strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(path, "/")
 }
 
 func (p *HTTPProvider) request(ctx context.Context, endpoint, credential string) ([]byte, error) {

@@ -24,6 +24,7 @@ var (
 	ErrInstanceNotReady    = errors.New("whatsapp instance is not connected or ready")
 	ErrNotConfigured       = errors.New("whatsapp provider is not configured")
 	ErrNoActiveInstance    = errors.New("no active whatsapp instance")
+	ErrProviderOperation   = errors.New("whatsapp provider operation failed")
 )
 
 type Instance struct {
@@ -51,10 +52,10 @@ type SafeConfig struct {
 }
 
 type WhatsAppProvider interface {
-	ValidateConnection(ctx context.Context, credential string) error
-	ListInstances(ctx context.Context, credential string) ([]Instance, error)
-	GetInstanceStatus(ctx context.Context, credential, instanceID string) (Instance, error)
-	SendMessage(ctx context.Context, credential, instanceID, to, body string) error
+	ValidateConnection(ctx context.Context, baseURL, credential string) error
+	ListInstances(ctx context.Context, baseURL, credential string) ([]Instance, error)
+	GetInstanceStatus(ctx context.Context, baseURL, credential, instanceID string) (Instance, error)
+	SendMessage(ctx context.Context, baseURL, credential, instanceID, to, body string) error
 }
 
 type ProviderRegistry struct {
@@ -76,17 +77,19 @@ func (r *ProviderRegistry) Get(name string) (WhatsAppProvider, bool) {
 
 type RuntimeBinding interface {
 	SetActiveWhatsAppInstance(context.Context, Instance) error
+	ClearActiveWhatsAppInstance(context.Context) error
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	registry *ProviderRegistry
-	binding  RuntimeBinding
-	provider string
-	baseURL  string
-	secret   string
-	active   Instance
-	verified time.Time
+	mu           sync.RWMutex
+	transitionMu sync.Mutex
+	registry     *ProviderRegistry
+	binding      RuntimeBinding
+	provider     string
+	baseURL      string
+	secret       string
+	active       Instance
+	verified     time.Time
 }
 
 func NewService(registry *ProviderRegistry, binding RuntimeBinding) *Service {
@@ -97,6 +100,8 @@ func NewService(registry *ProviderRegistry, binding RuntimeBinding) *Service {
 }
 
 func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
 	providerName := strings.TrimSpace(input.Provider)
 	if providerName == "" {
 		return SafeConfig{}, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
@@ -111,8 +116,13 @@ func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig,
 	if !ok {
 		return SafeConfig{}, fmt.Errorf("%w: %s", ErrProviderUnavailable, providerName)
 	}
-	if err := provider.ValidateConnection(ctx, input.Credential); err != nil {
-		return SafeConfig{}, fmt.Errorf("validate provider connection: %w", err)
+	if err := provider.ValidateConnection(ctx, input.BaseURL, input.Credential); err != nil {
+		return SafeConfig{}, fmt.Errorf("%w: validate provider connection: %v", ErrProviderOperation, err)
+	}
+	if s.binding != nil {
+		if err := s.binding.ClearActiveWhatsAppInstance(ctx); err != nil {
+			return SafeConfig{}, fmt.Errorf("%w: clear runtime binding: %v", ErrProviderOperation, err)
+		}
 	}
 	s.mu.Lock()
 	s.provider, s.baseURL, s.secret, s.active, s.verified = providerName, strings.TrimSpace(input.BaseURL), input.Credential, Instance{}, time.Now().UTC()
@@ -121,13 +131,13 @@ func (s *Service) Configure(ctx context.Context, input ConfigInput) (SafeConfig,
 }
 
 func (s *Service) Discover(ctx context.Context) ([]Instance, error) {
-	provider, credential, err := s.providerAndCredential()
+	provider, baseURL, credential, err := s.providerAndCredential()
 	if err != nil {
 		return nil, err
 	}
-	instances, err := provider.ListInstances(ctx, credential)
+	instances, err := provider.ListInstances(ctx, baseURL, credential)
 	if err != nil {
-		return nil, fmt.Errorf("list whatsapp instances: %w", err)
+		return nil, fmt.Errorf("%w: list instances: %v", ErrProviderOperation, err)
 	}
 	if len(instances) > 1000 {
 		return nil, errors.New("provider returned too many instances")
@@ -139,16 +149,18 @@ func (s *Service) Discover(ctx context.Context) ([]Instance, error) {
 }
 
 func (s *Service) SelectInstance(ctx context.Context, instanceID string) (SafeConfig, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
 	if strings.TrimSpace(instanceID) == "" {
 		return SafeConfig{}, errors.New("instance_id is required")
 	}
-	provider, credential, err := s.providerAndCredential()
+	provider, baseURL, credential, err := s.providerAndCredential()
 	if err != nil {
 		return SafeConfig{}, err
 	}
-	instances, err := provider.ListInstances(ctx, credential)
+	instances, err := provider.ListInstances(ctx, baseURL, credential)
 	if err != nil {
-		return SafeConfig{}, fmt.Errorf("list whatsapp instances: %w", err)
+		return SafeConfig{}, fmt.Errorf("%w: list instances: %v", ErrProviderOperation, err)
 	}
 	var selected Instance
 	found := false
@@ -161,9 +173,12 @@ func (s *Service) SelectInstance(ctx context.Context, instanceID string) (SafeCo
 	if !found {
 		return SafeConfig{}, ErrInstanceNotFound
 	}
-	status, err := provider.GetInstanceStatus(ctx, credential, instanceID)
+	status, err := provider.GetInstanceStatus(ctx, baseURL, credential, instanceID)
 	if err != nil {
-		return SafeConfig{}, fmt.Errorf("get whatsapp instance status: %w", err)
+		if errors.Is(err, ErrInstanceNotFound) {
+			return SafeConfig{}, ErrInstanceNotFound
+		}
+		return SafeConfig{}, fmt.Errorf("%w: get instance status: %v", ErrProviderOperation, err)
 	}
 	if !ready(status.Status) {
 		return SafeConfig{}, ErrInstanceNotReady
@@ -181,7 +196,7 @@ func (s *Service) SelectInstance(ctx context.Context, instanceID string) (SafeCo
 }
 
 func (s *Service) Get(ctx context.Context) (SafeConfig, error) {
-	provider, credential, err := s.providerAndCredential()
+	provider, baseURL, credential, err := s.providerAndCredential()
 	if err != nil {
 		return SafeConfig{}, err
 	}
@@ -190,11 +205,18 @@ func (s *Service) Get(ctx context.Context) (SafeConfig, error) {
 	s.mu.RUnlock()
 	status := StatusConnected
 	if active.ID != "" {
-		refreshed, refreshErr := provider.GetInstanceStatus(ctx, credential, active.ID)
+		refreshed, refreshErr := provider.GetInstanceStatus(ctx, baseURL, credential, active.ID)
 		if refreshErr != nil {
-			return SafeConfig{}, refreshErr
+			if errors.Is(refreshErr, ErrInstanceNotFound) {
+				return SafeConfig{}, ErrInstanceNotFound
+			}
+			return SafeConfig{}, fmt.Errorf("%w: refresh instance status: %v", ErrProviderOperation, refreshErr)
 		}
-		active.Status, active.Phone, status = refreshed.Status, firstNonEmpty(refreshed.Phone, active.Phone), refreshed.Status
+		active.ID = firstNonEmpty(refreshed.ID, active.ID)
+		active.Name = firstNonEmpty(refreshed.Name, active.Name)
+		active.Status = firstNonEmpty(refreshed.Status, active.Status)
+		active.Phone = firstNonEmpty(refreshed.Phone, active.Phone)
+		status = active.Status
 		s.mu.Lock()
 		s.active = active
 		s.mu.Unlock()
@@ -203,12 +225,12 @@ func (s *Service) Get(ctx context.Context) (SafeConfig, error) {
 }
 
 func (s *Service) Test(ctx context.Context) (SafeConfig, error) {
-	provider, credential, err := s.providerAndCredential()
+	provider, baseURL, credential, err := s.providerAndCredential()
 	if err != nil {
 		return SafeConfig{}, err
 	}
-	if err := provider.ValidateConnection(ctx, credential); err != nil {
-		return SafeConfig{}, fmt.Errorf("validate provider connection: %w", err)
+	if err := provider.ValidateConnection(ctx, baseURL, credential); err != nil {
+		return SafeConfig{}, fmt.Errorf("%w: validate provider connection: %v", ErrProviderOperation, err)
 	}
 	s.mu.RLock()
 	active := s.active
@@ -216,10 +238,16 @@ func (s *Service) Test(ctx context.Context) (SafeConfig, error) {
 	if active.ID == "" {
 		return SafeConfig{}, ErrNoActiveInstance
 	}
-	refreshed, err := provider.GetInstanceStatus(ctx, credential, active.ID)
+	refreshed, err := provider.GetInstanceStatus(ctx, baseURL, credential, active.ID)
 	if err != nil {
-		return SafeConfig{}, ErrInstanceNotFound
+		if errors.Is(err, ErrInstanceNotFound) {
+			return SafeConfig{}, ErrInstanceNotFound
+		}
+		return SafeConfig{}, fmt.Errorf("%w: refresh instance status: %v", ErrProviderOperation, err)
 	}
+	refreshed.ID = firstNonEmpty(refreshed.ID, active.ID)
+	refreshed.Name = firstNonEmpty(refreshed.Name, active.Name)
+	refreshed.Phone = firstNonEmpty(refreshed.Phone, active.Phone)
 	if !ready(refreshed.Status) {
 		return SafeConfig{}, ErrInstanceNotReady
 	}
@@ -229,18 +257,18 @@ func (s *Service) Test(ctx context.Context) (SafeConfig, error) {
 	return s.safeConfig(refreshed.Status), nil
 }
 
-func (s *Service) providerAndCredential() (WhatsAppProvider, string, error) {
+func (s *Service) providerAndCredential() (WhatsAppProvider, string, string, error) {
 	s.mu.RLock()
-	name, credential := s.provider, s.secret
+	name, baseURL, credential := s.provider, s.baseURL, s.secret
 	s.mu.RUnlock()
 	if name == "" || credential == "" {
-		return nil, "", ErrNotConfigured
+		return nil, "", "", ErrNotConfigured
 	}
 	provider, ok := s.registry.Get(name)
 	if !ok {
-		return nil, "", ErrProviderUnavailable
+		return nil, "", "", ErrProviderUnavailable
 	}
-	return provider, credential, nil
+	return provider, baseURL, credential, nil
 }
 
 func (s *Service) safeConfig(status string) SafeConfig {

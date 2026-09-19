@@ -15,11 +15,11 @@ import (
 
 type apiProvider struct{ instances []whatsapp.Instance }
 
-func (p *apiProvider) ValidateConnection(context.Context, string) error { return nil }
-func (p *apiProvider) ListInstances(context.Context, string) ([]whatsapp.Instance, error) {
+func (p *apiProvider) ValidateConnection(context.Context, string, string) error { return nil }
+func (p *apiProvider) ListInstances(context.Context, string, string) ([]whatsapp.Instance, error) {
 	return p.instances, nil
 }
-func (p *apiProvider) GetInstanceStatus(_ context.Context, _ string, id string) (whatsapp.Instance, error) {
+func (p *apiProvider) GetInstanceStatus(_ context.Context, _ string, _ string, id string) (whatsapp.Instance, error) {
 	for _, instance := range p.instances {
 		if instance.ID == id {
 			return instance, nil
@@ -27,7 +27,9 @@ func (p *apiProvider) GetInstanceStatus(_ context.Context, _ string, id string) 
 	}
 	return whatsapp.Instance{}, whatsapp.ErrInstanceNotFound
 }
-func (p *apiProvider) SendMessage(context.Context, string, string, string, string) error { return nil }
+func (p *apiProvider) SendMessage(context.Context, string, string, string, string, string) error {
+	return nil
+}
 
 type apiSIP struct{ configured bool }
 

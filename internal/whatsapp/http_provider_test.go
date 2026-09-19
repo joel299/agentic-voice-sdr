@@ -20,12 +20,12 @@ func TestHTTPProviderNormalizesBoundedContract(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"i-1","status":"READY","phone":"+5511"}`))
 	}))
 	defer server.Close()
-	provider := NewHTTPProvider(server.URL+"/instances", func(string) string { return server.URL + "/status" })
-	instances, err := provider.ListInstances(context.Background(), "secret")
+	provider := NewHTTPProvider("/instances", func(baseURL, _ string) string { return baseURL + "/status" })
+	instances, err := provider.ListInstances(context.Background(), server.URL, "secret")
 	if err != nil || len(instances) != 1 || instances[0].ID != "i-1" || instances[0].Status != "CONNECTED" {
 		t.Fatalf("instances=%+v err=%v", instances, err)
 	}
-	status, err := provider.GetInstanceStatus(context.Background(), "secret", "i-1")
+	status, err := provider.GetInstanceStatus(context.Background(), server.URL, "secret", "i-1")
 	if err != nil || status.Status != "READY" {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
@@ -34,8 +34,8 @@ func TestHTTPProviderNormalizesBoundedContract(t *testing.T) {
 func TestHTTPProviderDoesNotExposeAuthErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "secret-token", http.StatusUnauthorized) }))
 	defer server.Close()
-	provider := NewHTTPProvider(server.URL, nil)
-	if err := provider.ValidateConnection(context.Background(), "secret-token"); err == nil || err.Error() != "provider authentication failed" {
+	provider := NewHTTPProvider("/", nil)
+	if err := provider.ValidateConnection(context.Background(), server.URL, "secret-token"); err == nil || err.Error() != "provider authentication failed" {
 		t.Fatalf("err=%v", err)
 	}
 }

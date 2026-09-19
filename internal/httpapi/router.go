@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -155,6 +154,10 @@ func writeConfigError(w http.ResponseWriter, err error) {
 }
 func safeError(err error) string {
 	switch {
+	case errors.Is(err, whatsapp.ErrInvalidConfig):
+		return "invalid whatsapp configuration"
+	case errors.Is(err, whatsapp.ErrProviderOperation):
+		return "whatsapp provider request failed"
 	case errors.Is(err, whatsapp.ErrInstanceNotFound):
 		return "whatsapp instance not found"
 	case errors.Is(err, whatsapp.ErrInstanceNotReady):
@@ -163,13 +166,10 @@ func safeError(err error) string {
 		return "whatsapp provider is not configured"
 	case errors.Is(err, whatsapp.ErrProviderUnavailable):
 		return "whatsapp provider adapter unavailable"
+	case errors.Is(err, whatsapp.ErrNoActiveInstance):
+		return "no active whatsapp instance"
 	}
-	message := err.Error()
-	lower := strings.ToLower(message)
-	if strings.Contains(lower, "credential") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") {
-		return "provider validation failed"
-	}
-	return message
+	return "whatsapp configuration request failed"
 }
 func writeStatus(w http.ResponseWriter, status int, value string) {
 	writeJSON(w, status, map[string]string{"status": value})

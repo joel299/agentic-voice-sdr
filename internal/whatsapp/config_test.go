@@ -11,6 +11,8 @@ type fakeProvider struct {
 	instances   []Instance
 	validateErr error
 	statusByID  map[string]Instance
+	statusErr   error
+	lastBaseURL string
 }
 
 type fakeBinding struct{ active Instance }
@@ -20,18 +22,32 @@ func (b *fakeBinding) SetActiveWhatsAppInstance(_ context.Context, instance Inst
 	return nil
 }
 
-func (f *fakeProvider) ValidateConnection(context.Context, string) error { return f.validateErr }
-func (f *fakeProvider) ListInstances(context.Context, string) ([]Instance, error) {
+func (b *fakeBinding) ClearActiveWhatsAppInstance(context.Context) error {
+	b.active = Instance{}
+	return nil
+}
+
+func (f *fakeProvider) ValidateConnection(context.Context, string, string) error {
+	return f.validateErr
+}
+func (f *fakeProvider) ListInstances(_ context.Context, baseURL, _ string) ([]Instance, error) {
+	f.lastBaseURL = baseURL
 	return append([]Instance(nil), f.instances...), nil
 }
-func (f *fakeProvider) GetInstanceStatus(_ context.Context, _ string, id string) (Instance, error) {
+func (f *fakeProvider) GetInstanceStatus(_ context.Context, baseURL, _ string, id string) (Instance, error) {
+	f.lastBaseURL = baseURL
+	if f.statusErr != nil {
+		return Instance{}, f.statusErr
+	}
 	instance, ok := f.statusByID[id]
 	if !ok {
 		return Instance{}, ErrInstanceNotFound
 	}
 	return instance, nil
 }
-func (f *fakeProvider) SendMessage(context.Context, string, string, string, string) error { return nil }
+func (f *fakeProvider) SendMessage(context.Context, string, string, string, string, string) error {
+	return nil
+}
 
 func configuredService(provider *fakeProvider) *Service {
 	return NewService(NewRegistry(map[string]WhatsAppProvider{"test": provider}), nil)
@@ -133,6 +149,51 @@ func TestTestConnectionRejectsDisconnectedAndAuthFailure(t *testing.T) {
 	provider.statusByID["wa-1"] = Instance{ID: "wa-1", Status: StatusDisconnected}
 	if _, err := svc.Test(context.Background()); !errors.Is(err, ErrInstanceNotReady) {
 		t.Fatalf("test err=%v", err)
+	}
+}
+
+func TestReconfigureClearsRuntimeBindingAndUsesBaseURL(t *testing.T) {
+	provider := &fakeProvider{instances: []Instance{{ID: "wa-1", Status: StatusConnected}}, statusByID: map[string]Instance{"wa-1": {ID: "wa-1", Status: StatusReady}}}
+	binding := &fakeBinding{}
+	svc := NewService(NewRegistry(map[string]WhatsAppProvider{"test": provider}), binding)
+	first := ConfigInput{Provider: "test", BaseURL: "https://first.example.test/api", Credential: "x"}
+	if _, err := svc.Configure(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SelectInstance(context.Background(), "wa-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Configure(context.Background(), ConfigInput{Provider: "test", BaseURL: "https://second.example.test/api", Credential: "y"}); err != nil {
+		t.Fatal(err)
+	}
+	if binding.active.ID != "" {
+		t.Fatalf("stale runtime binding: %+v", binding.active)
+	}
+	if _, err := svc.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.lastBaseURL != "https://second.example.test/api" {
+		t.Fatalf("base URL not forwarded: %q", provider.lastBaseURL)
+	}
+}
+
+func TestTestPreservesProviderErrorAndSparseStatus(t *testing.T) {
+	provider := &fakeProvider{instances: []Instance{{ID: "wa-1", Phone: "+5511", Status: StatusConnected}}, statusByID: map[string]Instance{"wa-1": {ID: "wa-1", Phone: "+5511", Status: StatusReady}}}
+	svc := configuredService(provider)
+	if _, err := svc.Configure(context.Background(), ConfigInput{Provider: "test", BaseURL: "https://provider.example.test", Credential: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SelectInstance(context.Background(), "wa-1"); err != nil {
+		t.Fatal(err)
+	}
+	provider.statusByID["wa-1"] = Instance{ID: "wa-1", Status: StatusReady}
+	got, err := svc.Test(context.Background())
+	if err != nil || got.ActiveInstancePhone != "+5511" {
+		t.Fatalf("sparse status merge=%+v err=%v", got, err)
+	}
+	provider.statusErr = errors.New("provider leaked-value")
+	if _, err := svc.Test(context.Background()); !errors.Is(err, ErrProviderOperation) {
+		t.Fatalf("provider error=%v", err)
 	}
 }
 

@@ -8,6 +8,21 @@ import (
 	"text/template"
 )
 
+// PJSIPRegistrationObjectName returns the canonical Asterisk PJSIP registration object name for a trunk.
+func PJSIPRegistrationObjectName(trunkName string) string {
+	return fmt.Sprintf("trunk-%s-reg", trunkName)
+}
+
+// PJSIPEndpointObjectName returns the canonical Asterisk PJSIP endpoint object name for a trunk.
+func PJSIPEndpointObjectName(trunkName string) string {
+	return fmt.Sprintf("trunk-%s", trunkName)
+}
+
+// PJSIPTransportObjectName returns the canonical Asterisk PJSIP transport object name for a transport type.
+func PJSIPTransportObjectName(transport TransportType) string {
+	return fmt.Sprintf("transport-%s", transport)
+}
+
 const pjsipTmplText = `; ==============================================================================
 ; PJSIP Trunk Configuration: {{ .Name }} (Provider: {{ .Provider }})
 ; Generated automatically by Agentic Voice SDR SIP Reconciler

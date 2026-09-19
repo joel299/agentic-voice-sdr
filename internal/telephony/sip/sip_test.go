@@ -1043,7 +1043,10 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 		t.Skip("skipping real Asterisk smoke test: asterisk binary not in PATH")
 	}
 
-	configDir := "/etc/asterisk/pjsip.d"
+	configDir := os.Getenv("ASTERISK_PJSIP_TEST_DIR")
+	if configDir == "" {
+		configDir = "/etc/asterisk/pjsip.d"
+	}
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		t.Skipf("skipping real Asterisk smoke test: unable to create %s: %v", configDir, err)
 	}
@@ -1065,6 +1068,30 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 		RegistrationRequired: false,
 		Enabled:              true,
 	}
+
+	targetConfFile := filepath.Join(configDir, trunkName+".conf")
+	tmpConfFile := targetConfFile + ".tmp"
+	bakConfFile := targetConfFile + ".bak"
+
+	// Register immediate idempotent cleanup to guarantee isolation and zero residual files
+	t.Cleanup(func() {
+		ctx := context.Background()
+		cfgDisable := cfg
+		cfgDisable.Enabled = false
+		_, _ = mgr.ApplyTrunk(ctx, cfgDisable)
+		_ = reloader.RemovePJSIPConfig(ctx, trunkName)
+		runner := sip.OSCommandRunner{}
+		_, _ = runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
+
+		_ = os.Remove(targetConfFile)
+		_ = os.Remove(tmpConfFile)
+		_ = os.Remove(bakConfFile)
+
+		active, _ := reloader.CheckEndpoint(ctx, trunkName)
+		if active {
+			t.Errorf("cleanup failed: endpoint %s still active after test cleanup", trunkName)
+		}
+	})
 
 	// 1. Apply trunk
 	status, err := mgr.ApplyTrunk(context.Background(), cfg)
@@ -1097,6 +1124,124 @@ func TestRealAsteriskIntegrationSmoke(t *testing.T) {
 	if activeAfterDisable {
 		t.Fatalf("expected endpoint trunk-%s to be removed from real Asterisk after disable", trunkName)
 	}
+}
+
+func TestPJSIPRegistrationNamingConsistency(t *testing.T) {
+	trunkName := "namingtest"
+	cfg := sip.TrunkConfig{
+		Name:                 trunkName,
+		Provider:             "twilio",
+		Host:                 "127.0.0.1",
+		Port:                 5060,
+		Transport:            sip.TransportUDP,
+		AuthType:             sip.AuthUserPass,
+		AuthUsername:         "user",
+		Secret:               "secret",
+		RegistrationRequired: true,
+		Enabled:              true,
+	}
+
+	confStr, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatalf("failed to generate config: %v", err)
+	}
+
+	expectedRegName := sip.PJSIPRegistrationObjectName(trunkName)
+	if expectedRegName != "trunk-namingtest-reg" {
+		t.Fatalf("unexpected canonical registration name: got %s, want trunk-namingtest-reg", expectedRegName)
+	}
+
+	expectedHeader := fmt.Sprintf("[%s]", expectedRegName)
+	if !strings.Contains(confStr, expectedHeader) {
+		t.Fatalf("generated PJSIP config does not contain canonical registration section header %s. Content:\n%s", expectedHeader, confStr)
+	}
+
+	var executedCmd string
+	runner := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			executedCmd = fmt.Sprintf("%s %s", name, strings.Join(args, " "))
+			return "Registered", nil
+		},
+	}
+
+	reloader := sip.NewRealAsteriskReloader("/tmp", runner)
+	regState, active, err := reloader.CheckRegistration(context.Background(), trunkName)
+	if err != nil || !active || regState != "Registered" {
+		t.Fatalf("check registration failed: state=%s, active=%t, err=%v", regState, active, err)
+	}
+
+	expectedCliArg := fmt.Sprintf("pjsip show registration %s", expectedRegName)
+	if !strings.Contains(executedCmd, expectedCliArg) {
+		t.Fatalf("CheckRegistration executed command %q; expected to contain %q", executedCmd, expectedCliArg)
+	}
+}
+
+func TestCLIFailureErrorPropagation(t *testing.T) {
+	runnerErr := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			return "Command failed: CLI connection refused", fmt.Errorf("exit status 1")
+		},
+	}
+	reloaderErr := sip.NewRealAsteriskReloader("/tmp", runnerErr)
+
+	// 1. CheckTransport CLI failure must return error
+	_, err := reloaderErr.CheckTransport(context.Background(), sip.TransportUDP)
+	if err == nil {
+		t.Fatalf("expected error from CheckTransport on CLI failure, got nil")
+	}
+
+	// 2. CheckEndpoint CLI failure must return error
+	_, err = reloaderErr.CheckEndpoint(context.Background(), "testtrunk")
+	if err == nil {
+		t.Fatalf("expected error from CheckEndpoint on CLI failure, got nil")
+	}
+
+	// 3. CheckRegistration CLI failure must return error
+	_, _, err = reloaderErr.CheckRegistration(context.Background(), "testtrunk")
+	if err == nil {
+		t.Fatalf("expected error from CheckRegistration on CLI failure, got nil")
+	}
+
+	// 4. Test explicit not found output (runner succeeds, CLI reports object not found)
+	runnerNotFound := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			return "Unable to find object trunk-testtrunk.", nil
+		},
+	}
+	reloaderNotFound := sip.NewRealAsteriskReloader("/tmp", runnerNotFound)
+
+	activeEp, errEp := reloaderNotFound.CheckEndpoint(context.Background(), "testtrunk")
+	if errEp != nil || activeEp {
+		t.Fatalf("expected active=false, err=nil for not found endpoint, got active=%t, err=%v", activeEp, errEp)
+	}
+
+	regState, activeReg, errReg := reloaderNotFound.CheckRegistration(context.Background(), "testtrunk")
+	if errReg != nil || activeReg || regState != "Unregistered" {
+		t.Fatalf("expected Unregistered/false/nil for not found registration, got state=%s, active=%t, err=%v", regState, activeReg, errReg)
+	}
+
+	// 5. Test rejected registration
+	runnerRejected := &mockRunnerFunc{
+		runFunc: func(ctx context.Context, name string, args ...string) (string, error) {
+			return "Status: Rejected by remote server", nil
+		},
+	}
+	reloaderRejected := sip.NewRealAsteriskReloader("/tmp", runnerRejected)
+	stateRej, activeRej, errRej := reloaderRejected.CheckRegistration(context.Background(), "testtrunk")
+	if errRej != nil || activeRej || stateRej != "Rejected" {
+		t.Fatalf("expected Rejected/false/nil for rejected registration, got state=%s, active=%t, err=%v", stateRej, activeRej, errRej)
+	}
+}
+
+type mockRunnerFunc struct {
+	runFunc func(ctx context.Context, name string, args ...string) (string, error)
+}
+
+func (m *mockRunnerFunc) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
+	if m.runFunc != nil {
+		return m.runFunc(ctx, name, args...)
+	}
+	return "", nil
 }
 
 func TestPJSIPFilePermissions_SecurePolicyAndSecrets(t *testing.T) {

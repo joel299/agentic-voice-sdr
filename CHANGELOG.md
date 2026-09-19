@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The approved wire format uses one type byte, a two-byte big-endian payload length, and the payload.
   - `0x02` / silence is not supported; it is rejected as an unknown type.
 
-## [v0.1.0-alpha.2] — Wave 002
+## [Unreleased] — Wave 002
 
 ### Added
 

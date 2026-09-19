@@ -116,7 +116,7 @@ func (c *TrunkConfig) Validate() error {
 		"provider":       c.Provider,
 		"host":           c.Host,
 		"registrar":      c.Registrar,
-		"outbound_proxy":  c.OutboundProxy,
+		"outbound_proxy": c.OutboundProxy,
 		"auth_username":  c.AuthUsername,
 		"secret":         c.Secret,
 		"realm":          c.Realm,

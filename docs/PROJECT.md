@@ -6,11 +6,31 @@
 
 ## Core Flow
 
+### Business / orchestration
+
+```text
+Lead Ingestion -> Campaign Dispatcher -> Command Queue -> Outbound Call
+```
+
+### Realtime voice path
+
 ```text
 Fale Paco SIP -> Asterisk -> AudioSocket -> Go Voice Engine -> Gemini Live WSS
-
-State Machine Update <- Persistence <- Tool Execution / WhatsApp Fallback
 ```
+
+### Conversation / tools
+
+```text
+Natural Conversation -> Identify Interest -> Tool Execution / Scheduling -> WhatsApp Fallback when applicable
+```
+
+### Persistence / outcome
+
+```text
+Persistence -> Transcript -> Memory -> State Update -> State Machine Update
+```
+
+These flows are complementary: business orchestration dispatches the outbound call, the realtime voice path carries the live audio, conversation and tools determine the outcome, and persistence records the approved transcript, memory, and state updates.
 
 ## Functional Scope (MVP)
 

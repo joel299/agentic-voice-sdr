@@ -222,6 +222,14 @@ func (r *RealAsteriskReloader) renameResolverFile(oldPath, newPath string) error
 	return os.Rename(oldPath, newPath)
 }
 
+func (r *RealAsteriskReloader) removeResolverFile(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
 	s, err := r.captureResolver()
 	if err != nil {
@@ -301,17 +309,20 @@ func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
 			return s, fmt.Errorf("failed to write managed resolver file %s: %w", path, err)
 		}
 		if err := r.applySecureFilePermissions(tmp); err != nil {
-			_ = os.Remove(tmp)
-			return s, fmt.Errorf("failed to secure managed resolver file %s: %w", path, err)
+			cleanupErr := r.removeResolverFile(tmp)
+			return s, compoundRollback(fmt.Errorf("failed to secure managed resolver file %s: %w", path, err), cleanupErr)
 		}
 	}
 	for _, item := range newState {
 		if err := r.renameResolverFile(item.path+".tmp", item.path); err != nil {
+			var cleanupErrs []error
 			for _, pending := range newState {
-				_ = os.Remove(pending.path + ".tmp")
+				if cleanupErr := r.removeResolverFile(pending.path + ".tmp"); cleanupErr != nil {
+					cleanupErrs = append(cleanupErrs, cleanupErr)
+				}
 			}
 			restoreErr := r.restoreResolver(s)
-			return s, compoundRollback(fmt.Errorf("failed to install managed resolver file %s: %w", item.path, err), restoreErr)
+			return s, compoundRollback(fmt.Errorf("failed to install managed resolver file %s: %w", item.path, err), errors.Join(append(cleanupErrs, restoreErr)...))
 		}
 	}
 	return s, nil
@@ -327,7 +338,7 @@ func (r *RealAsteriskReloader) restoreResolver(s resolverSnapshot) error {
 			if err := r.applySecureFilePermissions(path); err != nil {
 				return err
 			}
-		} else if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		} else if err := r.removeResolverFile(path); err != nil {
 			return err
 		}
 	}

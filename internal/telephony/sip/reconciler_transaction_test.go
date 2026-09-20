@@ -219,6 +219,21 @@ func TestResolverTransaction(t *testing.T) {
 	}
 }
 
+func TestGeneratePJSIPConfigIPv6UsesBrackets(t *testing.T) {
+	cfg := TrunkConfig{Name: "ipv6", Host: "sip.provider.test", HostNetworkAddress: "2001:db8::10", Registrar: "reg.provider.test", RegistrarNetworkAddress: "[2001:db8::11]:5070", Port: 5061, Transport: TransportTLS, AuthType: AuthIP, Enabled: true, RegistrationRequired: true, OutboundProxy: "proxy.provider.test", OutboundProxyNetworkAddress: "[2001:db8::12]:5090", FromUser: "test"}
+	rendered, err := GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"contact=sip:[2001:db8::10]:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:[2001:db8::12]:5090"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("IPv6 rendering missing %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "sip:2001:db8::") {
+		t.Fatalf("unbracketed IPv6 URI rendered: %s", rendered)
+	}
+}
 func TestOutboundProxyHostPortMetadataUsesHostname(t *testing.T) {
 	cfg := TrunkConfig{Name: "proxy", Host: "provider.test", HostNetworkAddress: "192.0.2.10", Port: 5061, Transport: TransportTLS, AuthType: AuthIP, Enabled: true, OutboundProxy: "proxy.provider.test:5061", OutboundProxyNetworkAddress: "192.0.2.20:5061"}
 	rendered, err := GeneratePJSIPConfig(cfg)

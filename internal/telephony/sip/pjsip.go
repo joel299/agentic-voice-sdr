@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -38,7 +39,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .HostNetworkAddressOrHost }}:{{ .Port }}
+contact=sip:{{ .HostNetworkAddressOrHost }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -57,9 +58,9 @@ aors=trunk-{{ .Name }}-aor
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
-server_uri=sip:{{ .RegistrarOrHost }}:{{ .Port }}
+server_uri=sip:{{ .RegistrarOrHost }}
 {{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
-client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}:{{ .Port }}
+client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 retry_interval=60
 {{ end }}
 ; gru83-pin host={{ .Host }} address={{ .HostNetworkAddress }}
@@ -76,6 +77,23 @@ func pinnedResolverHost(value string) string {
 		return host
 	}
 	return strings.Trim(value, "[]")
+}
+
+func sipHostPort(host string, port int) string {
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return "[" + host + "]:" + fmt.Sprint(port)
+	}
+	return host + ":" + fmt.Sprint(port)
+}
+
+func sipURIHostPort(value string, fallbackPort int) string {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		parsed, parseErr := strconv.Atoi(port)
+		if parseErr == nil {
+			return sipHostPort(host, parsed)
+		}
+	}
+	return sipHostPort(strings.Trim(value, "[]"), fallbackPort)
 }
 
 type pjsipTemplateData struct {
@@ -125,10 +143,10 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 	data := pjsipTemplateData{
 		TrunkConfig:                        cfg,
 		CodecsString:                       codecsStr,
-		RegistrarOrHost:                    regHost,
-		RegistrarNetworkAddressOrHost:      regNetwork,
-		HostNetworkAddressOrHost:           hostNetwork,
-		OutboundProxyNetworkAddressOrProxy: proxyNetwork,
+		RegistrarOrHost:                    sipHostPort(regHost, cfg.Port),
+		RegistrarNetworkAddressOrHost:      sipURIHostPort(regNetwork, cfg.Port),
+		HostNetworkAddressOrHost:           sipURIHostPort(hostNetwork, cfg.Port),
+		OutboundProxyNetworkAddressOrProxy: sipURIHostPort(proxyNetwork, cfg.Port),
 		RegistrationIdentity:               regIdentity,
 	}
 	data.OutboundProxy = pinnedResolverHost(cfg.OutboundProxy)

@@ -222,12 +222,41 @@ func (r *RealAsteriskReloader) renameResolverFile(oldPath, newPath string) error
 	return os.Rename(oldPath, newPath)
 }
 
-func (r *RealAsteriskReloader) removeResolverFile(path string) error {
+func removeFile(path string) error {
 	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
+}
+
+func cleanupTempFiles(paths ...string) error {
+	var failures []error
+	for _, path := range paths {
+		if err := removeFile(path); err != nil {
+			failures = append(failures, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+func rollbackFailure(format string, values ...error) error {
+	for _, value := range values {
+		if value != nil {
+			return fmt.Errorf("ROLLBACK FAILURE: "+format, errorValues(values)...)
+		}
+	}
+	return nil
+}
+
+func errorValues(values []error) []any {
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = value
+	}
+	return result
+}
+func (r *RealAsteriskReloader) removeResolverFile(path string) error {
+	return removeFile(path)
 }
 
 func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
@@ -301,15 +330,17 @@ func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
 	}
 	resolverContent = strings.Join(lines, "\n") + "\n"
 	newState := []struct{ path, content string }{{s.hostsPath, hostsContent}, {s.resolverPath, resolverContent}}
+	tmpPaths := []string{newState[0].path + ".tmp", newState[1].path + ".tmp"}
 	// Stage both files before touching either live path, then install with rollback.
-	for _, item := range newState {
+	for i, item := range newState {
 		path, content := item.path, item.content
-		tmp := path + ".tmp"
+		tmp := tmpPaths[i]
 		if err := r.writeResolverFile(tmp, []byte(content), 0640); err != nil {
-			return s, fmt.Errorf("failed to write managed resolver file %s: %w", path, err)
+			cleanupErr := cleanupTempFiles(tmpPaths...)
+			return s, compoundRollback(fmt.Errorf("failed to write managed resolver file %s: %w", path, err), cleanupErr)
 		}
 		if err := r.applySecureFilePermissions(tmp); err != nil {
-			cleanupErr := r.removeResolverFile(tmp)
+			cleanupErr := cleanupTempFiles(tmpPaths...)
 			return s, compoundRollback(fmt.Errorf("failed to secure managed resolver file %s: %w", path, err), cleanupErr)
 		}
 	}
@@ -496,27 +527,28 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		return fmt.Errorf("failed to write temp PJSIP config file %s: %w", tmpPath, err)
 	}
 	if err := r.applySecureFilePermissions(tmpPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("security policy failure on temp file %s: %w", tmpPath, err)
+		cleanupErr := removeFile(tmpPath)
+		return compoundRollback(fmt.Errorf("security policy failure on temp file %s: %w", tmpPath, err), cleanupErr)
 	}
 
 	// Step 2: Preserve existing config if present
 	hasPrev := false
 	if _, err := os.Stat(targetPath); err == nil {
 		if err := r.copyFile(targetPath, bakPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("failed to backup existing PJSIP config file: %w", err)
+			cleanupErr := removeFile(tmpPath)
+			return compoundRollback(fmt.Errorf("failed to backup existing PJSIP config file: %w", err), cleanupErr)
 		}
 		hasPrev = true
 	}
 
 	// Step 3: Atomic rename and enforce secure filesystem policy on target file BEFORE reload
 	if err := os.Rename(tmpPath, targetPath); err != nil {
-		_ = os.Remove(tmpPath)
+		cleanupErr := removeFile(tmpPath)
+		backupCleanupErr := error(nil)
 		if hasPrev {
-			_ = os.Remove(bakPath)
+			backupCleanupErr = removeFile(bakPath)
 		}
-		return fmt.Errorf("failed to atomically apply PJSIP config file: %w", err)
+		return compoundRollback(fmt.Errorf("failed to atomically apply PJSIP config file: %w", err), cleanupErr, backupCleanupErr)
 	}
 	if err := r.applySecureFilePermissions(targetPath); err != nil {
 		if hasPrev {
@@ -526,29 +558,33 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 				return fmt.Errorf("security policy failure on target PJSIP config file %s (%w); rollback failed (restoreErr: %v, secErr: %v)", targetPath, err, rbErr, secErr)
 			}
 		} else {
-			_ = os.Remove(targetPath)
+			removeErr := removeFile(targetPath)
+			return compoundRollback(fmt.Errorf("security policy failure on target PJSIP config file %s: %w", targetPath, err), removeErr)
 		}
 		return fmt.Errorf("security policy failure on target PJSIP config file %s: %w", targetPath, err)
 	}
 
 	resolverPrev, err := r.syncPinnedResolver()
 	if err != nil {
-		if hasPrev {
-			_ = os.Rename(bakPath, targetPath)
-		} else {
-			_ = os.Remove(targetPath)
-		}
-		return fmt.Errorf("failed to synchronize pinned resolver before Asterisk reload: %w", err)
-	}
-	if err := r.reloadResolver(ctx); err != nil {
-		resolverRestoreErr := r.restoreResolver(resolverPrev)
 		var pjsipRestoreErr error
 		if hasPrev {
 			pjsipRestoreErr = os.Rename(bakPath, targetPath)
 		} else {
-			pjsipRestoreErr = os.Remove(targetPath)
+			pjsipRestoreErr = removeFile(targetPath)
 		}
-		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: resolver reload failed: %w", err), fmt.Errorf("ROLLBACK FAILURE: resolver restore=%v pjsip restore=%v", resolverRestoreErr, pjsipRestoreErr))
+		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: failed to synchronize pinned resolver before Asterisk reload: %w", err), pjsipRestoreErr)
+	}
+	if err := r.reloadResolver(ctx); err != nil {
+		resolverRestoreErr := r.restoreResolver(resolverPrev)
+		resolverReloadErr := r.reloadResolver(ctx)
+		var pjsipRestoreErr error
+		if hasPrev {
+			pjsipRestoreErr = os.Rename(bakPath, targetPath)
+		} else {
+			pjsipRestoreErr = removeFile(targetPath)
+		}
+		rollbackErr := rollbackFailure("resolver restore=%v resolver reload=%v pjsip restore=%v", resolverRestoreErr, resolverReloadErr, pjsipRestoreErr)
+		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: resolver reload failed: %w", err), rollbackErr)
 	}
 
 	// Step 5: Reload Asterisk PJSIP module
@@ -649,8 +685,8 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		}
 		hasPrev = true
 		if err := os.Remove(targetPath); err != nil {
-			_ = os.Remove(bakPath)
-			return fmt.Errorf("failed to remove PJSIP config file %s: %w", targetPath, err)
+			cleanupErr := removeFile(bakPath)
+			return compoundRollback(fmt.Errorf("failed to remove PJSIP config file %s: %w", targetPath, err), cleanupErr)
 		}
 	}
 
@@ -665,11 +701,13 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	}
 	if err := r.reloadResolver(ctx); err != nil {
 		resolverRestoreErr := r.restoreResolver(resolverPrev)
+		resolverReloadErr := r.reloadResolver(ctx)
 		var pjsipRestoreErr error
 		if hasPrev {
 			pjsipRestoreErr = os.Rename(bakPath, targetPath)
 		}
-		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: resolver reload failed during trunk removal: %w", err), fmt.Errorf("ROLLBACK FAILURE: resolver restore=%v pjsip restore=%v", resolverRestoreErr, pjsipRestoreErr))
+		rollbackErr := rollbackFailure("resolver restore=%v resolver reload=%v pjsip restore=%v", resolverRestoreErr, resolverReloadErr, pjsipRestoreErr)
+		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: resolver reload failed during trunk removal: %w", err), rollbackErr)
 	}
 
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")

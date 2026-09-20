@@ -214,8 +214,8 @@ func TestResolverTransaction(t *testing.T) {
 	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.test address=192.0.2.1\n", resolverMarker+"\n192.0.2.1 old.test\n", resolverMarker+"\n[general]\nresolv = system\n")
 	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{pjsipFailures: 1, resolverFailures: 1})
 	err := r.StagePJSIPConfig(context.Background(), trunk, "; gru83-pin host=new.test address=192.0.2.2\n")
-	if err == nil || !strings.Contains(err.Error(), "ROLLBACK FAILURE") {
-		t.Fatalf("rollback error was not propagated: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || strings.Contains(err.Error(), "ROLLBACK FAILURE") {
+		t.Fatalf("rollback result was not classified correctly: %v", err)
 	}
 }
 

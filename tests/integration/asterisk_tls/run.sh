@@ -8,12 +8,13 @@ if [[ "$mode" != real ]]; then
 fi
 for bin in openssl asterisk ps; do command -v "$bin" >/dev/null || { echo "$bin is required" >&2; exit 2; }; done
 port=${ASTERISK_GRU83_TLS_PORT:-15061}
-port_b=$((port + 1))
+port_b=${ASTERISK_GRU83_TLS_PORT_B:-$port}
 root=$(mktemp -d)
 mkdir -p "$root"/{etc,var,run,log,keys,spool,agi}
 cleanup() {
   local status=$?
-  if [[ "$status" -ne 0 && -f "$root/asterisk.log" ]]; then cp "$root/asterisk.log" /tmp/gru83-last-asterisk.log; fi
+  if [[ -f "$root/asterisk.log" ]]; then cp "$root/asterisk.log" /tmp/gru83-last-asterisk.log; fi
+  if [[ -f "$root/cli.log" ]]; then cp "$root/cli.log" /tmp/gru83-last-cli.log; fi
   if [[ -n "${ast_pid:-}" ]]; then kill "$ast_pid" 2>/dev/null || true; wait "$ast_pid" 2>/dev/null || true; fi
   if [[ -n "${server_pid:-}" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
   if [[ -n "${server_b_pid:-}" ]]; then kill "$server_b_pid" 2>/dev/null || true; wait "$server_b_pid" 2>/dev/null || true; fi
@@ -126,8 +127,10 @@ write_pjsip sip.provider.test
 
 openssl s_server -accept "$port" -cert "$root/cert.pem" -key "$root/key.pem" \
   -tls1_2 -quiet >"$root/server.log" 2>&1 & server_pid=$!
-openssl s_server -accept "$port_b" -cert "$root/cert.pem" -key "$root/key.pem" \
-  -tls1_2 -quiet >"$root/server-b.log" 2>&1 & server_b_pid=$!
+if [[ "$port_b" != "$port" ]]; then
+  openssl s_server -accept "$port_b" -cert "$root/cert.pem" -key "$root/key.pem" \
+    -tls1_2 -quiet >"$root/server-b.log" 2>&1 & server_b_pid=$!
+fi
 asters=(unshare -m bash -c "mount --bind '$hosts' /etc/hosts && exec asterisk -C '$root/etc/asterisk.conf' -f -U root -G root -vv >'$root/asterisk.log' 2>&1")
 "${asters[@]}" & ast_pid=$!
 wait_log() { local pattern=$1; for _ in $(seq 1 20); do grep -Eq "$pattern" "$root/asterisk.log" && return 0; sleep 1; done; return 1; }
@@ -159,15 +162,19 @@ wait_log 'does not match to any identities specified in the certificate|hostname
 write_pjsip sip.provider.test
 printf '127.0.0.2 sip.provider.test\n' >"$hosts"
 printf '127.0.0.2\n' >"$dns_state"
-sed -i "s/:$port/:$port_b/g; s/127.0.0.1:$port_b/127.0.0.2:$port_b/g" "$pjsip"
+printf '127.0.0.2 sip.provider.test\n' >"$root/etc/.gru83-pinned.hosts-b"
+sed -i "s|$hosts|$root/etc/.gru83-pinned.hosts-b|" "$resolver"
+sed -i "s/:$port/:$port_b/g; s/127.0.0.1:$port_b/127.0.0.2:$port_b/g; s/\[reg\]/[reg-b]/g" "$pjsip"
 cli 'module reload res_resolver_unbound.so' | grep -qiE 'reloaded successfully|Reloading module'
 cli 'core reload' >/dev/null
 cli 'module reload res_pjsip.so' | grep -qiE 'reloaded successfully|Reloading module'
-cli 'pjsip send unregister reg' >/dev/null
-cli 'pjsip send register reg' >/dev/null
+cli 'module reload res_pjsip_outbound_registration.so' | grep -qiE 'reloaded successfully|Reloading module'
+cli 'pjsip send unregister reg-b' >/dev/null
+cli 'pjsip send register reg-b' >/dev/null
 wait_log "Transport 'transport-tls' to remote 'sip.provider.test' - 127.0.0.2:$port_b - OK"
 pid_after=$(ps -o pid= -p "$ast_pid" | tr -d ' ')
 [[ "$pid_before" == "$pid_after" ]]
 
+printf 'PID_BEFORE: %s\nPID_AFTER: %s\n' "$pid_before" "$pid_after"
 printf 'Asterisk version: %s\n' "$(asterisk -V)"
 printf 'Asterisk/PJSIP: PASS\nCorrect hostname: PASS\nWrong hostname: FAIL AS EXPECTED\nverify_server: ENABLED\nResolver reload: PASS\nPJSIP reload: PASS\nPinned A: PASS\nPinned B: PASS\nHot update: PASS\nSame Asterisk PID: PASS\n'

@@ -575,15 +575,11 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 
 	// Handling Enabled = false (Disable transaction)
 	if !cfg.Enabled {
-		m.mu.Lock()
-		prevCfg, exists := m.trunks[cfg.Name]
-		m.mu.Unlock()
-
-		if exists && prevCfg.Enabled {
-			// Remove PJSIP config from Asterisk with rollback on failure
-			if err := m.reloader.RemovePJSIPConfig(ctx, cfg.Name); err != nil {
-				return StatusReport{}, fmt.Errorf("failed to disable trunk in Asterisk: %w", err)
-			}
+		// Remove the named PJSIP config independently of in-memory history. This
+		// is required after a process restart, when m.trunks is empty but the
+		// operational file may still be active in Asterisk.
+		if err := m.reloader.RemovePJSIPConfig(ctx, cfg.Name); err != nil {
+			return StatusReport{}, fmt.Errorf("failed to disable trunk in Asterisk: %w", err)
 		}
 
 		report := StatusReport{

@@ -11,6 +11,7 @@ import (
 )
 
 var errSIPBoundaryUnavailable = errors.New("sip configuration boundary unavailable")
+var errSIPCanonicalValidation = errors.New("invalid canonical SIP configuration")
 
 type SIPAuthRequest struct {
 	Type     string `json:"type"`
@@ -82,7 +83,7 @@ func NewCanonicalSIPConfigurator(manager interface {
 func (c *CanonicalSIPConfigurator) Configure(ctx context.Context, request SIPConfigRequest) error {
 	canonical, err := request.ToCanonical()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errSIPCanonicalValidation, err)
 	}
 	_, err = c.manager.ApplyTrunk(ctx, canonical)
 	return err
@@ -135,7 +136,7 @@ func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
 	if err := c.Validate(); err != nil {
 		return sip.TrunkConfig{}, err
 	}
-	return sip.TrunkConfig{
+	canonical := sip.TrunkConfig{
 		Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port,
 		Transport: sip.TransportType(strings.ToLower(strings.TrimSpace(c.Transport))),
 		Registrar: c.Registrar, OutboundProxy: c.OutboundProxy,
@@ -144,5 +145,9 @@ func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
 		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID,
 		Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired,
 		Enabled: c.Enabled,
-	}, nil
+	}
+	if err := canonical.Validate(); err != nil {
+		return sip.TrunkConfig{}, err
+	}
+	return canonical, nil
 }

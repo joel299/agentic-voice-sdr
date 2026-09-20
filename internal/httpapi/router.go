@@ -46,7 +46,7 @@ func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
 		return unavailableSIPConfigurator{}
 	}
 	reloader := sip.NewRealAsteriskReloader(cfg.SIPConfigDir, nil)
-	manager, err := sip.NewManager(sip.DefaultNetworkDialer{}, reloader)
+	manager, err := sip.NewManager(newSafeSIPNetworkDialer(), reloader)
 	if err != nil {
 		return unavailableSIPConfigurator{}
 	}
@@ -139,6 +139,10 @@ func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.sip.Configure(r.Context(), input); err != nil {
+		if errors.Is(err, errSIPCanonicalValidation) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid SIP configuration"})
+			return
+		}
 		if errors.Is(err, errSIPBoundaryUnavailable) {
 			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "SIP operational boundary unavailable"})
 			return
@@ -179,7 +183,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 func writeConfigError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	switch {
-	case errors.Is(err, whatsapp.ErrInvalidConfig), errors.Is(err, whatsapp.ErrNotConfigured), errors.Is(err, whatsapp.ErrNoActiveInstance), errors.Is(err, whatsapp.ErrInstanceNotFound), errors.Is(err, whatsapp.ErrInstanceNotReady):
+	case errors.Is(err, errSIPCanonicalValidation), errors.Is(err, whatsapp.ErrInvalidConfig), errors.Is(err, whatsapp.ErrNotConfigured), errors.Is(err, whatsapp.ErrNoActiveInstance), errors.Is(err, whatsapp.ErrInstanceNotFound), errors.Is(err, whatsapp.ErrInstanceNotReady):
 		status = http.StatusBadRequest
 	case errors.Is(err, whatsapp.ErrProviderUnavailable):
 		status = http.StatusNotImplemented
@@ -188,6 +192,8 @@ func writeConfigError(w http.ResponseWriter, err error) {
 }
 func safeError(err error) string {
 	switch {
+	case errors.Is(err, errSIPCanonicalValidation):
+		return "invalid SIP configuration"
 	case errors.Is(err, whatsapp.ErrInvalidConfig):
 		return "invalid whatsapp configuration"
 	case errors.Is(err, whatsapp.ErrProviderOperation):

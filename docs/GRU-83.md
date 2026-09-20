@@ -20,7 +20,7 @@ HTTP /v1/config/sip-trunk
   → Asterisk
 ```
 
-`ASTERISK_PJSIP_CONFIG_DIR` enables the operational composition. The configured path must exist and be a directory. Without it, or when construction is invalid, the router uses a fail-closed boundary and returns `501 SIP operational boundary unavailable`; it does not report a false success.
+`ASTERISK_PJSIP_CONFIG_DIR` enables the operational composition. The configured path must exist and be a directory. Without it, or when construction is invalid, the router uses a fail-closed boundary and returns `501 SIP operational boundary unavailable`; it does not report a false success. The HTTP composition uses a resolver-aware SIP dialer that rejects private/loopback/link-local destinations both during initial resolution and again at dial time.
 
 ## Security
 

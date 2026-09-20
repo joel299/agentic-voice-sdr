@@ -195,3 +195,16 @@ func TestSIPCompositionIsFailClosedOrCanonical(t *testing.T) {
 func testAPIService() *whatsapp.Service {
 	return whatsapp.NewService(whatsapp.NewRegistry(map[string]whatsapp.WhatsAppProvider{"test": &apiProvider{}}), nil)
 }
+
+func TestSIPCanonicalValidationIsClientError(t *testing.T) {
+	manager := &canonicalManager{}
+	configurator, err := NewCanonicalSIPConfigurator(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewRouterWithServices(testAPIService(), configurator)
+	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"bad/name","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"none"},"registration_required":true,"enabled":true}`)
+	if res.Code != http.StatusBadRequest || manager.calls != 0 || !strings.Contains(res.Body.String(), "invalid SIP configuration") {
+		t.Fatalf("canonical validation should be 400 without manager call: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	}
+}

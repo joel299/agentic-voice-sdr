@@ -1,6 +1,6 @@
 # GRU-83 — SIP HTTP API → canonical Asterisk runtime
 
-Status: In Progress / PR #48
+Status: In Review / PR #48
 
 ## Ownership
 

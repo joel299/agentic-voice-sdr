@@ -3,7 +3,9 @@ package sip
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -37,7 +39,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .Host }}:{{ .Port }}
+contact=sip:{{ .HostNetworkAddressOrHost }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -49,26 +51,59 @@ allow={{ .CodecsString }}
 aors=trunk-{{ .Name }}-aor
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
 
 {{ if .RegistrationRequired }}[trunk-{{ .Name }}-reg]
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
-server_uri=sip:{{ .RegistrarOrHost }}:{{ .Port }}
-client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}:{{ .Port }}
+server_uri=sip:{{ .RegistrarOrHost }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
+client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 retry_interval=60
+{{ end }}
+; gru83-pin host={{ .Host }} address={{ .HostNetworkAddress }}
+{{ if .Registrar }}; gru83-pin host={{ .Registrar }} address={{ .RegistrarNetworkAddress }}
+{{ end }}
+{{ if .OutboundProxy }}; gru83-pin host={{ .OutboundProxy }} address={{ .OutboundProxyNetworkAddress }}
 {{ end }}
 `
 
 var pjsipTemplate = template.Must(template.New("pjsip").Parse(pjsipTmplText))
 
+func pinnedResolverHost(value string) string {
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return host
+	}
+	return strings.Trim(value, "[]")
+}
+
+func sipHostPort(host string, port int) string {
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return "[" + host + "]:" + fmt.Sprint(port)
+	}
+	return host + ":" + fmt.Sprint(port)
+}
+
+func sipURIHostPort(value string, fallbackPort int) string {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		parsed, parseErr := strconv.Atoi(port)
+		if parseErr == nil {
+			return sipHostPort(host, parsed)
+		}
+	}
+	return sipHostPort(strings.Trim(value, "[]"), fallbackPort)
+}
+
 type pjsipTemplateData struct {
 	TrunkConfig
-	CodecsString         string
-	RegistrarOrHost      string
-	RegistrationIdentity string
+	CodecsString                       string
+	RegistrarOrHost                    string
+	RegistrarNetworkAddressOrHost      string
+	HostNetworkAddressOrHost           string
+	OutboundProxyNetworkAddressOrProxy string
+	RegistrationIdentity               string
 }
 
 // GeneratePJSIPConfig renders an Asterisk pjsip.conf snippet for the trunk.
@@ -92,12 +127,29 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regIdentity = cfg.FromUser
 	}
 
-	data := pjsipTemplateData{
-		TrunkConfig:          cfg,
-		CodecsString:         codecsStr,
-		RegistrarOrHost:      regHost,
-		RegistrationIdentity: regIdentity,
+	hostNetwork := cfg.HostNetworkAddress
+	if hostNetwork == "" {
+		hostNetwork = cfg.Host
 	}
+	regNetwork := cfg.RegistrarNetworkAddress
+	if regNetwork == "" {
+		regNetwork = regHost
+	}
+	proxyNetwork := cfg.OutboundProxyNetworkAddress
+	if proxyNetwork == "" {
+		proxyNetwork = cfg.OutboundProxy
+	}
+
+	data := pjsipTemplateData{
+		TrunkConfig:                        cfg,
+		CodecsString:                       codecsStr,
+		RegistrarOrHost:                    sipHostPort(regHost, cfg.Port),
+		RegistrarNetworkAddressOrHost:      sipURIHostPort(regNetwork, cfg.Port),
+		HostNetworkAddressOrHost:           sipURIHostPort(hostNetwork, cfg.Port),
+		OutboundProxyNetworkAddressOrProxy: sipURIHostPort(proxyNetwork, cfg.Port),
+		RegistrationIdentity:               regIdentity,
+	}
+	data.OutboundProxy = pinnedResolverHost(cfg.OutboundProxy)
 
 	var buf bytes.Buffer
 	if err := pjsipTemplate.Execute(&buf, data); err != nil {

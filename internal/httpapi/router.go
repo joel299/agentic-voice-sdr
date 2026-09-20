@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -32,7 +34,27 @@ func NewRouterWithConfig(cfg config.Config) http.Handler {
 	if cfg.WhatsAppConfigPath != "" {
 		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
 	}
-	return NewRouterWithWhatsAppStore(store)
+	return NewRouterWithServices(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg))
+}
+
+func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
+	if cfg.SIPConfigDir == "" {
+		return unavailableSIPConfigurator{}
+	}
+	info, err := os.Stat(cfg.SIPConfigDir)
+	if err != nil || !info.IsDir() {
+		return unavailableSIPConfigurator{}
+	}
+	reloader := sip.NewRealAsteriskReloader(cfg.SIPConfigDir, nil)
+	manager, err := sip.NewManager(newSafeSIPNetworkDialer(), reloader)
+	if err != nil {
+		return unavailableSIPConfigurator{}
+	}
+	configurator, err := newCanonicalSIPConfiguratorWithPolicy(manager, newSIPDestinationPolicy())
+	if err != nil {
+		return unavailableSIPConfigurator{}
+	}
+	return configurator
 }
 
 func NewRouterWithWhatsAppStore(store whatsapp.ConfigStore) http.Handler {
@@ -117,6 +139,10 @@ func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.sip.Configure(r.Context(), input); err != nil {
+		if errors.Is(err, errSIPCanonicalValidation) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid SIP configuration"})
+			return
+		}
 		if errors.Is(err, errSIPBoundaryUnavailable) {
 			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "SIP operational boundary unavailable"})
 			return
@@ -157,7 +183,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 func writeConfigError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	switch {
-	case errors.Is(err, whatsapp.ErrInvalidConfig), errors.Is(err, whatsapp.ErrNotConfigured), errors.Is(err, whatsapp.ErrNoActiveInstance), errors.Is(err, whatsapp.ErrInstanceNotFound), errors.Is(err, whatsapp.ErrInstanceNotReady):
+	case errors.Is(err, errSIPCanonicalValidation), errors.Is(err, whatsapp.ErrInvalidConfig), errors.Is(err, whatsapp.ErrNotConfigured), errors.Is(err, whatsapp.ErrNoActiveInstance), errors.Is(err, whatsapp.ErrInstanceNotFound), errors.Is(err, whatsapp.ErrInstanceNotReady):
 		status = http.StatusBadRequest
 	case errors.Is(err, whatsapp.ErrProviderUnavailable):
 		status = http.StatusNotImplemented
@@ -166,6 +192,8 @@ func writeConfigError(w http.ResponseWriter, err error) {
 }
 func safeError(err error) string {
 	switch {
+	case errors.Is(err, errSIPCanonicalValidation):
+		return "invalid SIP configuration"
 	case errors.Is(err, whatsapp.ErrInvalidConfig):
 		return "invalid whatsapp configuration"
 	case errors.Is(err, whatsapp.ErrProviderOperation):

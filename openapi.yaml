@@ -59,7 +59,8 @@ paths:
       responses:
         '200': { description: Safe SIP configuration, content: { application/json: { schema: { $ref: '#/components/schemas/SIPSafeResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '501': { description: Operational SIP boundary unavailable }
+        '501': { description: Operational SIP boundary unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '502': { $ref: '#/components/responses/RuntimeFailure' }
     get:
       operationId: getSIPTrunk
       responses:
@@ -69,6 +70,7 @@ components:
   responses:
     BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     ProviderFailure: { description: Safe provider failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    RuntimeFailure: { description: Safe SIP/Asterisk runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Error: { type: object, required: [error], properties: { error: { type: string } } }
     WhatsAppConfigRequest:
@@ -104,11 +106,11 @@ components:
       properties:
         provider: { type: string }
         name: { type: string }
-        host: { type: string }
+        host: { type: string, description: Public SIP destination; production runtime resolves and pins the operational IP }
         port: { type: integer, minimum: 1, maximum: 65535 }
         transport: { type: string, enum: [udp, tcp, tls] }
-        registrar: { type: string }
-        outbound_proxy: { type: string }
+        registrar: { type: string, description: Optional SIP registrar destination; resolved and pinned by the production runtime }
+        outbound_proxy: { type: string, description: Optional SIP outbound proxy destination; resolved and pinned by the production runtime }
         auth: { $ref: '#/components/schemas/SIPAuth' }
         from_user: { type: string }
         from_domain: { type: string }

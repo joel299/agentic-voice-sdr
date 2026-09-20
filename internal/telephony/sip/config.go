@@ -46,23 +46,27 @@ var trunkNameRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 // TrunkConfig defines the provider-agnostic SIP trunk configuration.
 type TrunkConfig struct {
-	Provider             string        `json:"provider"`
-	Name                 string        `json:"name"`
-	Host                 string        `json:"host"`
-	Port                 int           `json:"port"`
-	Transport            TransportType `json:"transport"`
-	Registrar            string        `json:"registrar,omitempty"`
-	OutboundProxy        string        `json:"outbound_proxy,omitempty"`
-	AuthType             AuthType      `json:"auth_type"`
-	AuthUsername         string        `json:"auth_username,omitempty"`
-	Secret               string        `json:"secret,omitempty"`
-	Realm                string        `json:"realm,omitempty"`
-	FromUser             string        `json:"from_user,omitempty"`
-	FromDomain           string        `json:"from_domain,omitempty"`
-	CallerID             string        `json:"caller_id,omitempty"`
-	Codecs               []string      `json:"codecs,omitempty"`
-	RegistrationRequired bool          `json:"registration_required"`
-	Enabled              bool          `json:"enabled"`
+	Provider                    string        `json:"provider"`
+	Name                        string        `json:"name"`
+	Host                        string        `json:"host"`
+	HostNetworkAddress          string        `json:"-"`
+	Port                        int           `json:"port"`
+	Transport                   TransportType `json:"transport"`
+	Registrar                   string        `json:"registrar,omitempty"`
+	RegistrarNetworkAddress     string        `json:"-"`
+	OutboundProxy               string        `json:"outbound_proxy,omitempty"`
+	OutboundProxyNetworkAddress string        `json:"-"`
+	TLSServiceName              string        `json:"-"`
+	AuthType                    AuthType      `json:"auth_type"`
+	AuthUsername                string        `json:"auth_username,omitempty"`
+	Secret                      string        `json:"secret,omitempty"`
+	Realm                       string        `json:"realm,omitempty"`
+	FromUser                    string        `json:"from_user,omitempty"`
+	FromDomain                  string        `json:"from_domain,omitempty"`
+	CallerID                    string        `json:"caller_id,omitempty"`
+	Codecs                      []string      `json:"codecs,omitempty"`
+	RegistrationRequired        bool          `json:"registration_required"`
+	Enabled                     bool          `json:"enabled"`
 }
 
 // Clone returns a deep copy of TrunkConfig with cloned Codecs slice.

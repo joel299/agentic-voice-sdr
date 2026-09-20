@@ -17,6 +17,12 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
 
+func newTestRealReloader(dir string, runner sip.CommandRunner) *sip.RealAsteriskReloader {
+	r := sip.NewRealAsteriskReloader(dir, runner)
+	r.SetGroupLookupFunc(func(string) (*user.Group, error) { return &user.Group{Name: "asterisk", Gid: "1234"}, nil })
+	return r
+}
+
 type mockDialer struct {
 	lookupErr error
 	dialErr   error
@@ -609,7 +615,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 1 — health failure with old config functional
 	t.Run("Caso 1 - health failure restores old config", func(t *testing.T) {
 		runner := &mockRunner{statusOutput: "Unable to connect to remote PBX daemon"}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		targetFile := filepath.Join(tmpDir, "trunk1.conf")
@@ -637,7 +643,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 2 — endpoint failure restores old config
 	t.Run("Caso 2 - endpoint failure restores old config", func(t *testing.T) {
 		runner := &mockRunner{endpointOutput: "Unable to find object"}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		targetFile := filepath.Join(tmpDir, "trunk2.conf")
@@ -662,7 +668,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 3 — registration failure restores old config
 	t.Run("Caso 3 - registration failure restores old config", func(t *testing.T) {
 		runner := &mockRunner{regOutput: "Objects found: 0 Rejected"}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		targetFile := filepath.Join(tmpDir, "trunk3.conf")
@@ -695,7 +701,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 4 — primeira configuração sem old config
 	t.Run("Caso 4 - first config without old config removes new file on failure", func(t *testing.T) {
 		runner := &mockRunner{endpointOutput: "Unable to find object"}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		targetFile := filepath.Join(tmpDir, "newtrunk.conf")
@@ -715,7 +721,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 5 — rollback failure returns compound error
 	t.Run("Caso 5 - rollback failure returns compound error", func(t *testing.T) {
 		runner := &mockRunner{statusOutput: "Unable to connect to remote PBX daemon", failRollback: true}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 		mgr, _ := sip.NewManager(dialer, reloader)
 
 		cfg := sip.TrunkConfig{Name: "rollbackfail", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
@@ -734,7 +740,7 @@ func TestRealAsteriskReloaderTransactionalRollbackCases(t *testing.T) {
 	// Caso 6 — initial reload failure without previous config and rollback failure returns compound error
 	t.Run("Caso 6 - initial reload failure without previous config and rollback failure returns compound error", func(t *testing.T) {
 		runner := &mockRunner{failReload: true, failRollback: true}
-		reloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+		reloader := newTestRealReloader(tmpDir, runner)
 
 		cfg := sip.TrunkConfig{Name: "noreprevfail", Host: "sip.example.invalid", AuthType: sip.AuthIP, Enabled: true}
 		pjsipConf, err := sip.GeneratePJSIPConfig(cfg)
@@ -811,7 +817,7 @@ func TestSameTrunkConcurrentSerialization(t *testing.T) {
 
 	dialer := &mockDialer{}
 	runner := &mockRunner{}
-	realReloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+	realReloader := newTestRealReloader(tmpDir, runner)
 	testReloader := newConcurrentTestReloader(realReloader)
 
 	mgr, err := sip.NewManager(dialer, testReloader)
@@ -981,7 +987,7 @@ func TestGlobalAsteriskTransactionLock(t *testing.T) {
 
 	dialer := &mockDialer{}
 	runner := &mockRunner{}
-	realReloader := sip.NewRealAsteriskReloader(tmpDir, runner)
+	realReloader := newTestRealReloader(tmpDir, runner)
 	testReloader := newConcurrentTestReloader(realReloader)
 
 	mgr, err := sip.NewManager(dialer, testReloader)
@@ -1057,7 +1063,7 @@ func TestFilesystemSecurityFailClosed(t *testing.T) {
 		},
 	}
 
-	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+	reloader := newTestRealReloader(tempDir, runner)
 	reloader.SetChownFunc(func(name string, uid, gid int) error {
 		return fmt.Errorf("chown permission denied: operation not permitted (EPERM)")
 	})
@@ -1086,7 +1092,7 @@ func TestFilesystemSecurityFailClosed(t *testing.T) {
 func TestRollbackSecurityErrorPropagation(t *testing.T) {
 	tempDir := t.TempDir()
 	runner := &mockRunner{}
-	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+	reloader := newTestRealReloader(tempDir, runner)
 
 	trunkName := "rollbacksecerr"
 	pjsipConf := "[trunk-rollbacksecerr]\ntype=endpoint\n"
@@ -1243,7 +1249,7 @@ func TestUnresolvedOwnershipFailClosed(t *testing.T) {
 		},
 	}
 
-	reloader := sip.NewRealAsteriskReloader(tempDir, runner)
+	reloader := newTestRealReloader(tempDir, runner)
 
 	reloader.SetDirStatFunc(func(path string) (os.FileInfo, error) {
 		return mockRootFileInfo{path: path}, nil
@@ -1271,5 +1277,22 @@ func TestUnresolvedOwnershipFailClosed(t *testing.T) {
 	targetPath := filepath.Join(tempDir, trunkName+".conf")
 	if _, statErr := os.Stat(targetPath); statErr == nil {
 		t.Fatalf("security violation: target config file %s exists on disk after unresolved ownership policy failure", targetPath)
+	}
+}
+
+func TestRemovePJSIPConfigPropagatesBackupCleanupFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "cleanup-test.conf")
+	if err := os.WriteFile(target, []byte("password=not-a-real-secret\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	reloader := sip.NewRealAsteriskReloader(tmpDir, &mockRunner{})
+	reloader.SetGroupLookupFunc(func(string) (*user.Group, error) { return &user.Group{Name: "asterisk", Gid: "1234"}, nil })
+	reloader.SetRemoveFunc(func(string) error { return errors.New("simulated backup cleanup failure") })
+	if err := reloader.RemovePJSIPConfig(context.Background(), "cleanup-test"); err == nil || !strings.Contains(err.Error(), "finalize trunk removal cleanup") {
+		t.Fatalf("expected explicit cleanup failure, got %v", err)
+	}
+	if _, err := os.Stat(target + ".bak"); err != nil {
+		t.Fatalf("backup should remain observable after cleanup failure: %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package sip
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 	"text/template"
@@ -70,6 +71,13 @@ retry_interval=60
 
 var pjsipTemplate = template.Must(template.New("pjsip").Parse(pjsipTmplText))
 
+func pinnedResolverHost(value string) string {
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return host
+	}
+	return strings.Trim(value, "[]")
+}
+
 type pjsipTemplateData struct {
 	TrunkConfig
 	CodecsString                       string
@@ -123,6 +131,7 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		OutboundProxyNetworkAddressOrProxy: proxyNetwork,
 		RegistrationIdentity:               regIdentity,
 	}
+	data.OutboundProxy = pinnedResolverHost(cfg.OutboundProxy)
 
 	var buf bytes.Buffer
 	if err := pjsipTemplate.Execute(&buf, data); err != nil {

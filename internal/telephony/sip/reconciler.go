@@ -163,6 +163,12 @@ func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
 
 const resolverMarker = "; managed by agentic-voice-sdr GRU-83; do not edit"
 
+type resolverSnapshot struct {
+	hostsPath, resolverPath     string
+	hosts, resolver             []byte
+	hostsExists, resolverExists bool
+}
+
 func (r *RealAsteriskReloader) resolverDir() string {
 	dir := filepath.Clean(r.configDir)
 	if filepath.Base(dir) == "pjsip.d" {
@@ -171,17 +177,46 @@ func (r *RealAsteriskReloader) resolverDir() string {
 	return dir
 }
 
-func (r *RealAsteriskReloader) syncPinnedResolver() error {
+func (r *RealAsteriskReloader) captureResolver() (resolverSnapshot, error) {
+	dir := r.resolverDir()
+	s := resolverSnapshot{hostsPath: filepath.Join(dir, ".gru83-pinned.hosts"), resolverPath: filepath.Join(dir, "resolver_unbound.conf")}
+	for path, dst := range map[string]*[]byte{s.hostsPath: &s.hosts, s.resolverPath: &s.resolver} {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			*dst = data
+			if path == s.hostsPath {
+				s.hostsExists = true
+			} else {
+				s.resolverExists = true
+			}
+		} else if !os.IsNotExist(err) {
+			return s, fmt.Errorf("failed to read resolver state %s: %w", path, err)
+		}
+	}
+	if s.resolverExists && !strings.Contains(string(s.resolver), resolverMarker) {
+		return s, fmt.Errorf("refusing to overwrite unmanaged resolver configuration %s", s.resolverPath)
+	}
+	if s.hostsExists && !strings.Contains(string(s.hosts), resolverMarker) {
+		return s, fmt.Errorf("refusing to overwrite unmanaged pinned hosts file %s", s.hostsPath)
+	}
+	return s, nil
+}
+
+func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
+	s, err := r.captureResolver()
+	if err != nil {
+		return s, err
+	}
 	dir := r.resolverDir()
 	entries, err := filepath.Glob(filepath.Join(r.configDir, "*.conf"))
 	if err != nil {
-		return fmt.Errorf("failed to enumerate PJSIP configs for resolver sync: %w", err)
+		return s, fmt.Errorf("failed to enumerate PJSIP configs for resolver sync: %w", err)
 	}
 	byHost := make(map[string]string)
 	for _, path := range entries {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("failed to read PJSIP config %s for resolver sync: %w", path, readErr)
+			return s, fmt.Errorf("failed to read PJSIP config %s for resolver sync: %w", path, readErr)
 		}
 		for _, line := range strings.Split(string(data), "\n") {
 			fields := strings.Fields(line)
@@ -218,25 +253,70 @@ func (r *RealAsteriskReloader) syncPinnedResolver() error {
 	}
 	sort.Strings(hosts)
 	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("failed to create resolver directory %s: %w", dir, err)
+		return s, fmt.Errorf("failed to create resolver directory %s: %w", dir, err)
 	}
-	hostsPath := filepath.Join(dir, ".gru83-pinned.hosts")
-	resolverPath := filepath.Join(dir, "resolver_unbound.conf")
 	hostsContent := resolverMarker + "\n" + strings.Join(hosts, "\n") + "\n"
-	resolverContent := resolverMarker + "\n[general]\nhosts = " + hostsPath + "\nresolv = /dev/null\n"
-	for path, content := range map[string]string{hostsPath: hostsContent, resolverPath: resolverContent} {
+	resolverContent := string(s.resolver)
+	if resolverContent == "" {
+		resolverContent = resolverMarker + "\n[general]\nresolv = system\n"
+	}
+	lines := strings.Split(strings.TrimRight(resolverContent, "\n"), "\n")
+	foundHosts := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "hosts =") {
+			lines[i] = "hosts = " + s.hostsPath
+			foundHosts = true
+		}
+	}
+	if !foundHosts {
+		lines = append(lines, "hosts = "+s.hostsPath)
+	}
+	resolverContent = strings.Join(lines, "\n") + "\n"
+	newState := []struct{ path, content string }{{s.hostsPath, hostsContent}, {s.resolverPath, resolverContent}}
+	// Stage both files before touching either live path, then install with rollback.
+	for _, item := range newState {
+		path, content := item.path, item.content
 		tmp := path + ".tmp"
 		if err := os.WriteFile(tmp, []byte(content), 0640); err != nil {
-			return fmt.Errorf("failed to write managed resolver file %s: %w", path, err)
+			return s, fmt.Errorf("failed to write managed resolver file %s: %w", path, err)
 		}
 		if err := r.applySecureFilePermissions(tmp); err != nil {
 			_ = os.Remove(tmp)
-			return fmt.Errorf("failed to secure managed resolver file %s: %w", path, err)
+			return s, fmt.Errorf("failed to secure managed resolver file %s: %w", path, err)
 		}
-		if err := os.Rename(tmp, path); err != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("failed to install managed resolver file %s: %w", path, err)
+	}
+	for _, item := range newState {
+		if err := os.Rename(item.path+".tmp", item.path); err != nil {
+			for _, pending := range newState {
+				_ = os.Remove(pending.path + ".tmp")
+			}
+			_ = r.restoreResolver(s)
+			return s, fmt.Errorf("failed to install managed resolver file %s: %w", item.path, err)
 		}
+	}
+	return s, nil
+}
+
+func (r *RealAsteriskReloader) restoreResolver(s resolverSnapshot) error {
+	for path, data := range map[string][]byte{s.hostsPath: s.hosts, s.resolverPath: s.resolver} {
+		exists := (path == s.hostsPath && s.hostsExists) || (path == s.resolverPath && s.resolverExists)
+		if exists {
+			if err := os.WriteFile(path, data, 0640); err != nil {
+				return err
+			}
+			if err := r.applySecureFilePermissions(path); err != nil {
+				return err
+			}
+		} else if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RealAsteriskReloader) reloadResolver(ctx context.Context) error {
+	if _, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_resolver_unbound.so"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -410,9 +490,8 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		return fmt.Errorf("security policy failure on target PJSIP config file %s: %w", targetPath, err)
 	}
 
-	// Step 4: Synchronize the resolver before Asterisk reload. PJSIP keeps
-	// logical hostnames for TLS identity while this managed map pins routing.
-	if err := r.syncPinnedResolver(); err != nil {
+	resolverPrev, err := r.syncPinnedResolver()
+	if err != nil {
 		if hasPrev {
 			_ = os.Rename(bakPath, targetPath)
 		} else {
@@ -420,11 +499,21 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		}
 		return fmt.Errorf("failed to synchronize pinned resolver before Asterisk reload: %w", err)
 	}
+	if err := r.reloadResolver(ctx); err != nil {
+		_ = r.restoreResolver(resolverPrev)
+		if hasPrev {
+			_ = os.Rename(bakPath, targetPath)
+		} else {
+			_ = os.Remove(targetPath)
+		}
+		return fmt.Errorf("failed to reload pinned resolver: %w", err)
+	}
 
 	// Step 5: Reload Asterisk PJSIP module
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 	if err != nil {
-		// Rollback on reload failure during stage
+		_ = r.restoreResolver(resolverPrev)
+		_ = r.reloadResolver(ctx)
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
 			var secErr error
@@ -486,11 +575,17 @@ func (r *RealAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkNam
 		}
 	}
 
+	resolverErr := error(nil)
+	if _, syncErr := r.syncPinnedResolver(); syncErr != nil {
+		resolverErr = syncErr
+	} else {
+		resolverErr = r.reloadResolver(ctx)
+	}
 	// Reload Asterisk to apply restored or removed state
 	out, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 
-	if restoreErr != nil || secErr != nil || reloadErr != nil {
-		return fmt.Errorf("rollback failed for trunk %s (restoreErr: %v, secErr: %v, reloadErr: %v, output: %s)", trunkName, restoreErr, secErr, reloadErr, out)
+	if restoreErr != nil || secErr != nil || resolverErr != nil || reloadErr != nil {
+		return fmt.Errorf("rollback failed for trunk %s (restoreErr: %v, secErr: %v, resolverErr: %v, reloadErr: %v, output: %s)", trunkName, restoreErr, secErr, resolverErr, reloadErr, out)
 	}
 
 	return nil
@@ -517,7 +612,8 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		}
 	}
 
-	if err := r.syncPinnedResolver(); err != nil {
+	resolverPrev, err := r.syncPinnedResolver()
+	if err != nil {
 		if hasPrev {
 			if restoreErr := os.Rename(bakPath, targetPath); restoreErr != nil {
 				return fmt.Errorf("failed to synchronize pinned resolver before trunk removal and rollback failed: %w (restore: %v)", err, restoreErr)
@@ -525,10 +621,18 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		}
 		return fmt.Errorf("failed to synchronize pinned resolver before trunk removal: %w", err)
 	}
+	if err := r.reloadResolver(ctx); err != nil {
+		_ = r.restoreResolver(resolverPrev)
+		if hasPrev {
+			_ = os.Rename(bakPath, targetPath)
+		}
+		return fmt.Errorf("failed to reload pinned resolver before trunk removal: %w", err)
+	}
 
 	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
 	if err != nil {
-		// Rollback on reload failure during removal
+		_ = r.restoreResolver(resolverPrev)
+		resolverReloadErr := r.reloadResolver(ctx)
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
 			var secErr error
@@ -536,7 +640,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 				secErr = r.applySecureFilePermissions(targetPath)
 			}
 			_, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-			if rbErr != nil || secErr != nil || reloadErr != nil {
+			if rbErr != nil || secErr != nil || resolverReloadErr != nil || reloadErr != nil {
 				return fmt.Errorf("asterisk reload failed during trunk removal (%w, output: %s); rollback failed (restoreErr: %v, secErr: %v, reloadErr: %v)", err, out, rbErr, secErr, reloadErr)
 			}
 		}
@@ -546,6 +650,8 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	// Verify health post-removal
 	healthy, healthErr := r.CheckAsteriskHealth(ctx)
 	if healthErr != nil || !healthy {
+		_ = r.restoreResolver(resolverPrev)
+		resolverReloadErr := r.reloadResolver(ctx)
 		if hasPrev {
 			rbErr := os.Rename(bakPath, targetPath)
 			var secErr error
@@ -553,8 +659,8 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 				secErr = r.applySecureFilePermissions(targetPath)
 			}
 			_, reloadErr := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_pjsip.so")
-			if rbErr != nil || secErr != nil || reloadErr != nil {
-				return fmt.Errorf("asterisk unhealthy after trunk removal (%v); rollback failed (restoreErr: %v, secErr: %v, reloadErr: %v)", healthErr, rbErr, secErr, reloadErr)
+			if rbErr != nil || secErr != nil || resolverReloadErr != nil || reloadErr != nil {
+				return fmt.Errorf("asterisk unhealthy after trunk removal (%v); rollback failed (restoreErr: %v, secErr: %v, resolverReloadErr: %v, reloadErr: %v)", healthErr, rbErr, secErr, resolverReloadErr, reloadErr)
 			}
 		}
 		return fmt.Errorf("asterisk unhealthy after trunk removal: %v", healthErr)

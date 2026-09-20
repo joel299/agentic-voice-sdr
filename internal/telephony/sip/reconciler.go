@@ -24,6 +24,12 @@ type NetworkDialer interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
+// TLSIdentityDialer optionally separates the pinned network address from the
+// logical TLS service name used for certificate/SNI verification.
+type TLSIdentityDialer interface {
+	DialTLSContextWithServerName(ctx context.Context, network, address, serverName string) (net.Conn, error)
+}
+
 // DefaultNetworkDialer implements NetworkDialer using standard net and crypto/tls packages.
 type DefaultNetworkDialer struct{}
 
@@ -623,7 +629,11 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	}
 
 	// Step 1: DNS Resolution Check
-	_, err := m.dialer.LookupHost(ctx, cfg.Host)
+	dialHost := cfg.HostNetworkAddress
+	if dialHost == "" {
+		dialHost = cfg.Host
+	}
+	_, err := m.dialer.LookupHost(ctx, dialHost)
 	if err != nil {
 		report.Status = StatusDNSError
 		report.LastError = fmt.Sprintf("DNS lookup failed for host %s: %v", cfg.Host, err)
@@ -631,11 +641,20 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	}
 
 	// Step 2: Connection / Reachability & TLS Check
-	address := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	address := fmt.Sprintf("%s:%d", dialHost, cfg.Port)
 	network := string(cfg.Transport)
 
 	if cfg.Transport == TransportTLS {
-		conn, err := m.dialer.DialTLSContext(ctx, "tcp", address)
+		serverName := cfg.TLSServiceName
+		if serverName == "" {
+			serverName = cfg.Host
+		}
+		var conn net.Conn
+		if identityDialer, ok := m.dialer.(TLSIdentityDialer); ok {
+			conn, err = identityDialer.DialTLSContextWithServerName(ctx, "tcp", address, serverName)
+		} else {
+			conn, err = m.dialer.DialTLSContext(ctx, "tcp", address)
+		}
 		if err != nil {
 			report.Status = StatusConnectionError
 			report.LastError = fmt.Sprintf("TLS connection/handshake failed to %s: %v", address, err)

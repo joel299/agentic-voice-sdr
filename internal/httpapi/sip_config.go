@@ -97,7 +97,7 @@ func (c *CanonicalSIPConfigurator) Configure(ctx context.Context, request SIPCon
 	if err != nil {
 		return fmt.Errorf("%w: %v", errSIPCanonicalValidation, err)
 	}
-	if c.policy != nil {
+	if c.policy != nil && canonical.Enabled {
 		canonical, err = c.policy.PinConfig(ctx, canonical)
 		if err != nil {
 			return fmt.Errorf("%w: %v", errSIPCanonicalValidation, err)

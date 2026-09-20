@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 
@@ -12,6 +13,10 @@ type sequenceSIPResolver struct {
 	answers [][]string
 	calls   int
 }
+
+type errorSIPResolver struct{ err error }
+
+func (r *errorSIPResolver) LookupHost(context.Context, string) ([]string, error) { return nil, r.err }
 
 func (r *sequenceSIPResolver) LookupHost(context.Context, string) ([]string, error) {
 	answer := r.answers[r.calls]
@@ -82,7 +87,7 @@ func TestSIPDestinationPolicyPinsOperationalDestination(t *testing.T) {
 	policy.dialer.resolver = resolver
 	cfg := sip.TrunkConfig{Host: "rebind.example.test"}
 	pinned, err := policy.PinConfig(context.Background(), cfg)
-	if err != nil || pinned.Host != "93.184.216.34" {
+	if err != nil || pinned.Host != "rebind.example.test" || pinned.HostNetworkAddress != "93.184.216.34" {
 		t.Fatalf("pinning failed: cfg=%#v err=%v", pinned, err)
 	}
 	if resolver.calls != 1 {
@@ -111,5 +116,45 @@ func TestSIPDestinationPolicyRejectsPrivateAndMixedDNS(t *testing.T) {
 				t.Fatal("unsafe DNS result accepted")
 			}
 		})
+	}
+}
+
+func TestPinnedSIPDestinationPreservesLogicalIdentity(t *testing.T) {
+	resolver := &sequenceSIPResolver{answers: [][]string{{"93.184.216.34"}, {"93.184.216.35"}, {"93.184.216.36"}}}
+	policy := &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+	policy.dialer.resolver = resolver
+	cfg := sip.TrunkConfig{Name: "provider_tls", Provider: "provider", Host: "sip.provider.test", Port: 5061, Transport: sip.TransportTLS, Registrar: "registrar.provider.test", OutboundProxy: "proxy.provider.test:5061", AuthType: sip.AuthUserPass, AuthUsername: "user", Secret: "secret", RegistrationRequired: true, Enabled: true}
+	pinned, err := policy.PinConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Host != cfg.Host || pinned.HostNetworkAddress != "93.184.216.34" || pinned.TLSServiceName != "sip.provider.test" || pinned.Registrar != cfg.Registrar || pinned.RegistrarNetworkAddress != "93.184.216.35" || pinned.OutboundProxy != cfg.OutboundProxy || pinned.OutboundProxyNetworkAddress != "93.184.216.36:5061" {
+		t.Fatalf("logical and network identities were not separated: %#v", pinned)
+	}
+	config, err := sip.GeneratePJSIPConfig(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"contact=sip:93.184.216.34:5061", "server_uri=sip:93.184.216.35:5061", "client_uri=sip:user@registrar.provider.test:5061", "outbound_proxy=sip:93.184.216.36:5061"} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("rendered config missing %q:\n%s", want, config)
+		}
+	}
+}
+
+func TestSafeSIPTLSKeepsLogicalServerName(t *testing.T) {
+	resolver := &sequenceSIPResolver{answers: [][]string{{"93.184.216.34"}}}
+	dialer := newSafeSIPNetworkDialer()
+	dialer.resolver = resolver
+	var gotNetwork, gotAddress, gotServerName string
+	dialer.tlsDialFn = func(_ context.Context, network, address, serverName string) (net.Conn, error) {
+		gotNetwork, gotAddress, gotServerName = network, address, serverName
+		return nil, nil
+	}
+	if _, err := dialer.DialTLSContextWithServerName(context.Background(), "tcp", "sip.provider.test:5061", "sip.provider.test"); err != nil {
+		t.Fatal(err)
+	}
+	if gotNetwork != "tcp" || gotAddress != "93.184.216.34:5061" || gotServerName != "sip.provider.test" {
+		t.Fatalf("TLS identity/destination mixed: network=%q address=%q serverName=%q", gotNetwork, gotAddress, gotServerName)
 	}
 }

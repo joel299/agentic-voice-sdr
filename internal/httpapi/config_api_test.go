@@ -222,3 +222,17 @@ func TestSIPDestinationPolicyBlocksBeforeManager(t *testing.T) {
 		t.Fatalf("unsafe destination must be rejected before manager: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
 	}
 }
+
+func TestSIPDisableDoesNotDependOnDNS(t *testing.T) {
+	manager := &canonicalManager{}
+	policy := &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+	policy.dialer.resolver = &errorSIPResolver{err: errors.New("provider DNS unavailable")}
+	configurator, err := newCanonicalSIPConfiguratorWithPolicy(manager, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := requestJSON(t, NewRouterWithServices(testAPIService(), configurator), http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"existing","host":"removed.provider.example","port":5060,"transport":"tls","registrar":"removed.registrar.example","outbound_proxy":"removed.proxy.example:5061","auth":{"type":"none"},"enabled":false}`)
+	if res.Code != http.StatusOK || manager.calls != 1 || manager.got.Enabled {
+		t.Fatalf("disable must reach Manager without DNS: status=%d calls=%d cfg=%#v body=%s", res.Code, manager.calls, manager.got, res.Body)
+	}
+}

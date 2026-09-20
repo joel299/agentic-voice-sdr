@@ -37,7 +37,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .Host }}:{{ .Port }}
+contact=sip:{{ .HostNetworkAddressOrHost }}:{{ .Port }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -49,14 +49,14 @@ allow={{ .CodecsString }}
 aors=trunk-{{ .Name }}-aor
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
 
 {{ if .RegistrationRequired }}[trunk-{{ .Name }}-reg]
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
-server_uri=sip:{{ .RegistrarOrHost }}:{{ .Port }}
+server_uri=sip:{{ .RegistrarNetworkAddressOrHost }}:{{ .Port }}
 client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}:{{ .Port }}
 retry_interval=60
 {{ end }}
@@ -66,9 +66,12 @@ var pjsipTemplate = template.Must(template.New("pjsip").Parse(pjsipTmplText))
 
 type pjsipTemplateData struct {
 	TrunkConfig
-	CodecsString         string
-	RegistrarOrHost      string
-	RegistrationIdentity string
+	CodecsString                       string
+	RegistrarOrHost                    string
+	RegistrarNetworkAddressOrHost      string
+	HostNetworkAddressOrHost           string
+	OutboundProxyNetworkAddressOrProxy string
+	RegistrationIdentity               string
 }
 
 // GeneratePJSIPConfig renders an Asterisk pjsip.conf snippet for the trunk.
@@ -92,11 +95,27 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regIdentity = cfg.FromUser
 	}
 
+	hostNetwork := cfg.HostNetworkAddress
+	if hostNetwork == "" {
+		hostNetwork = cfg.Host
+	}
+	regNetwork := cfg.RegistrarNetworkAddress
+	if regNetwork == "" {
+		regNetwork = regHost
+	}
+	proxyNetwork := cfg.OutboundProxyNetworkAddress
+	if proxyNetwork == "" {
+		proxyNetwork = cfg.OutboundProxy
+	}
+
 	data := pjsipTemplateData{
-		TrunkConfig:          cfg,
-		CodecsString:         codecsStr,
-		RegistrarOrHost:      regHost,
-		RegistrationIdentity: regIdentity,
+		TrunkConfig:                        cfg,
+		CodecsString:                       codecsStr,
+		RegistrarOrHost:                    regHost,
+		RegistrarNetworkAddressOrHost:      regNetwork,
+		HostNetworkAddressOrHost:           hostNetwork,
+		OutboundProxyNetworkAddressOrProxy: proxyNetwork,
+		RegistrationIdentity:               regIdentity,
 	}
 
 	var buf bytes.Buffer

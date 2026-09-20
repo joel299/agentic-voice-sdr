@@ -22,8 +22,9 @@ func (defaultSIPHostResolver) LookupHost(ctx context.Context, host string) ([]st
 }
 
 type safeSIPNetworkDialer struct {
-	resolver sipHostResolver
-	dialer   net.Dialer
+	resolver  sipHostResolver
+	dialer    net.Dialer
+	tlsDialFn func(context.Context, string, string, string) (net.Conn, error)
 }
 
 type sipDestinationPolicy struct {
@@ -38,16 +39,19 @@ func newSIPDestinationPolicy() *sipDestinationPolicy {
 // with the validated IP. This removes the Go-validation/Asterisk-resolution TOCTOU.
 func (p *sipDestinationPolicy) PinConfig(ctx context.Context, cfg sip.TrunkConfig) (sip.TrunkConfig, error) {
 	var err error
-	if cfg.Host, err = p.pinHost(ctx, cfg.Host); err != nil {
+	if cfg.HostNetworkAddress, err = p.pinHost(ctx, cfg.Host); err != nil {
 		return sip.TrunkConfig{}, fmt.Errorf("host destination rejected: %w", err)
 	}
+	if cfg.Transport == sip.TransportTLS {
+		cfg.TLSServiceName = cfg.Host
+	}
 	if cfg.Registrar != "" {
-		if cfg.Registrar, err = p.pinHost(ctx, cfg.Registrar); err != nil {
+		if cfg.RegistrarNetworkAddress, err = p.pinHost(ctx, cfg.Registrar); err != nil {
 			return sip.TrunkConfig{}, fmt.Errorf("registrar destination rejected: %w", err)
 		}
 	}
 	if cfg.OutboundProxy != "" {
-		if cfg.OutboundProxy, err = p.pinHostPort(ctx, cfg.OutboundProxy); err != nil {
+		if cfg.OutboundProxyNetworkAddress, err = p.pinHostPort(ctx, cfg.OutboundProxy); err != nil {
 			return sip.TrunkConfig{}, fmt.Errorf("outbound proxy destination rejected: %w", err)
 		}
 	}
@@ -121,6 +125,21 @@ func (d *safeSIPNetworkDialer) DialTLSContext(ctx context.Context, network, addr
 	resolved, serverName, err := d.resolveAddress(ctx, address)
 	if err != nil {
 		return nil, err
+	}
+	return d.dialTLS(ctx, network, resolved, serverName)
+}
+
+func (d *safeSIPNetworkDialer) DialTLSContextWithServerName(ctx context.Context, network, address, serverName string) (net.Conn, error) {
+	resolved, _, err := d.resolveAddress(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return d.dialTLS(ctx, network, resolved, serverName)
+}
+
+func (d *safeSIPNetworkDialer) dialTLS(ctx context.Context, network, resolved, serverName string) (net.Conn, error) {
+	if d.tlsDialFn != nil {
+		return d.tlsDialFn(ctx, network, resolved, serverName)
 	}
 	if network == "udp" {
 		network = "tcp"

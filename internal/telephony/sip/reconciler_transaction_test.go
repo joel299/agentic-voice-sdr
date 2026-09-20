@@ -264,3 +264,142 @@ func assertNoTmp(t *testing.T, dir string) {
 		}
 	}
 }
+
+type removeRollbackRunner struct {
+	pjsipCalls, resolverCalls   int
+	failPJSIPAt, failResolverAt int
+	failPJSIPAt2                bool
+	healthFailure               bool
+}
+
+func (r *removeRollbackRunner) RunCommand(_ context.Context, _ string, args ...string) (string, error) {
+	cmd := strings.Join(args, " ")
+	switch {
+	case strings.Contains(cmd, "res_resolver_unbound"):
+		r.resolverCalls++
+		if r.failResolverAt == r.resolverCalls {
+			return "resolver reload failed", errors.New("resolver reload failed")
+		}
+		return "resolver reload ok", nil
+	case strings.Contains(cmd, "module reload res_pjsip.so"):
+		r.pjsipCalls++
+		if r.failPJSIPAt == r.pjsipCalls || (r.failPJSIPAt == 1 && r.pjsipCalls == 2 && r.failPJSIPAt2) {
+			return "pjsip reload failed", errors.New("pjsip reload failed")
+		}
+		return "pjsip reload ok", nil
+	case strings.Contains(cmd, "core show uptime"):
+		if r.healthFailure {
+			return "health failed", errors.New("health failed")
+		}
+		return "System uptime: 1 second", nil
+	default:
+		return "", nil
+	}
+}
+
+func newRemoveRollbackReloader(t *testing.T, dir string, runner *removeRollbackRunner) *RealAsteriskReloader {
+	t.Helper()
+	r := NewRealAsteriskReloader(dir, runner)
+	r.groupLookupFn = func(string) (*user.Group, error) { return &user.Group{Gid: "1"}, nil }
+	return r
+}
+
+func prepareRemoveRollbackFixture(t *testing.T, dir, trunk string) (string, string, string) {
+	t.Helper()
+	oldPJSIP := "; gru83-pin host=old.provider.test address=192.0.2.10\n"
+	oldHosts := resolverMarker + "\n192.0.2.10 old.provider.test\n"
+	oldResolver := resolverMarker + "\n[general]\nresolv = system\nhosts = " + filepath.Join(dir, ".gru83-pinned.hosts") + "\n"
+	writeResolverFixture(t, dir, trunk, oldPJSIP, oldHosts, oldResolver)
+	return oldPJSIP, oldHosts, oldResolver
+}
+
+func assertRemoveRollbackState(t *testing.T, dir, trunk, oldPJSIP, oldHosts, oldResolver string) {
+	t.Helper()
+	assertFile(t, filepath.Join(dir, trunk+".conf"), oldPJSIP)
+	assertFile(t, filepath.Join(dir, ".gru83-pinned.hosts"), oldHosts)
+	assertFile(t, filepath.Join(dir, "resolver_unbound.conf"), oldResolver)
+	assertNoTmp(t, dir)
+	if _, err := os.Stat(filepath.Join(dir, trunk+".conf.bak")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected backup residual: %v", err)
+	}
+}
+
+func TestRemovePJSIPConfigRollbackOnPJSIPReloadFailure(t *testing.T) {
+	dir := t.TempDir()
+	oldPJSIP, oldHosts, oldResolver := prepareRemoveRollbackFixture(t, dir, "remove-pjsip")
+	runner := &removeRollbackRunner{failPJSIPAt: 1}
+	r := newRemoveRollbackReloader(t, dir, runner)
+	err := r.RemovePJSIPConfig(context.Background(), "remove-pjsip")
+	if err == nil || !strings.Contains(err.Error(), "asterisk reload failed during trunk removal") {
+		t.Fatalf("expected primary PJSIP reload failure, got %v", err)
+	}
+	assertRemoveRollbackState(t, dir, "remove-pjsip", oldPJSIP, oldHosts, oldResolver)
+	if runner.resolverCalls != 2 || runner.pjsipCalls != 2 {
+		t.Fatalf("expected resolver/PJSIP rollback reloads, got resolver=%d pjsip=%d", runner.resolverCalls, runner.pjsipCalls)
+	}
+}
+
+func TestRemovePJSIPConfigRollbackOnHealthFailure(t *testing.T) {
+	dir := t.TempDir()
+	oldPJSIP, oldHosts, oldResolver := prepareRemoveRollbackFixture(t, dir, "remove-health")
+	r := newRemoveRollbackReloader(t, dir, &removeRollbackRunner{healthFailure: true})
+	err := r.RemovePJSIPConfig(context.Background(), "remove-health")
+	if err == nil || !strings.Contains(err.Error(), "asterisk unhealthy after trunk removal") {
+		t.Fatalf("expected health failure, got %v", err)
+	}
+	assertRemoveRollbackState(t, dir, "remove-health", oldPJSIP, oldHosts, oldResolver)
+}
+
+func TestRemovePJSIPConfigPropagatesResolverRestoreFailure(t *testing.T) {
+	dir := t.TempDir()
+	prepareRemoveRollbackFixture(t, dir, "remove-resolver-restore")
+	runner := &removeRollbackRunner{failPJSIPAt: 1}
+	r := newRemoveRollbackReloader(t, dir, runner)
+	r.writeFileFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == filepath.Join(dir, "resolver_unbound.conf") {
+			return errors.New("resolver restore write failed")
+		}
+		return os.WriteFile(path, data, mode)
+	}
+	err := r.RemovePJSIPConfig(context.Background(), "remove-resolver-restore")
+	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || !strings.Contains(err.Error(), "ROLLBACK FAILURE") {
+		t.Fatalf("expected primary and rollback failures, got %v", err)
+	}
+}
+
+func TestRemovePJSIPConfigPropagatesResolverRollbackReloadFailure(t *testing.T) {
+	dir := t.TempDir()
+	prepareRemoveRollbackFixture(t, dir, "remove-resolver-reload")
+	r := newRemoveRollbackReloader(t, dir, &removeRollbackRunner{failPJSIPAt: 1, failResolverAt: 2})
+	err := r.RemovePJSIPConfig(context.Background(), "remove-resolver-reload")
+	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || !strings.Contains(err.Error(), "ROLLBACK FAILURE") {
+		t.Fatalf("expected resolver rollback reload failure, got %v", err)
+	}
+}
+
+func TestRemovePJSIPConfigPropagatesPJSIPRestoreFailure(t *testing.T) {
+	dir := t.TempDir()
+	prepareRemoveRollbackFixture(t, dir, "remove-pjsip-restore")
+	runner := &removeRollbackRunner{failPJSIPAt: 1}
+	r := newRemoveRollbackReloader(t, dir, runner)
+	r.renameFn = func(old, new string) error {
+		if strings.HasSuffix(old, ".bak") && strings.HasSuffix(new, ".conf") {
+			return errors.New("pjsip restore rename failed")
+		}
+		return os.Rename(old, new)
+	}
+	err := r.RemovePJSIPConfig(context.Background(), "remove-pjsip-restore")
+	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || !strings.Contains(err.Error(), "ROLLBACK FAILURE") {
+		t.Fatalf("expected PJSIP restore rollback failure, got %v", err)
+	}
+}
+
+func TestRemovePJSIPConfigPropagatesPJSIPRollbackReloadFailure(t *testing.T) {
+	dir := t.TempDir()
+	prepareRemoveRollbackFixture(t, dir, "remove-pjsip-reload")
+	r := newRemoveRollbackReloader(t, dir, &removeRollbackRunner{failPJSIPAt: 1, failPJSIPAt2: true})
+	err := r.RemovePJSIPConfig(context.Background(), "remove-pjsip-reload")
+	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || !strings.Contains(err.Error(), "ROLLBACK FAILURE") {
+		t.Fatalf("expected PJSIP rollback reload failure, got %v", err)
+	}
+}

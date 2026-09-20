@@ -222,6 +222,13 @@ func (r *RealAsteriskReloader) renameResolverFile(oldPath, newPath string) error
 	return os.Rename(oldPath, newPath)
 }
 
+func (r *RealAsteriskReloader) renamePJSIPFile(oldPath, newPath string) error {
+	if r.renameFn != nil {
+		return r.renameFn(oldPath, newPath)
+	}
+	return os.Rename(oldPath, newPath)
+}
+
 func removeFile(path string) error {
 	err := os.Remove(path)
 	if os.IsNotExist(err) {
@@ -552,7 +559,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 	}
 	if err := r.applySecureFilePermissions(targetPath); err != nil {
 		if hasPrev {
-			rbErr := os.Rename(bakPath, targetPath)
+			rbErr := r.renamePJSIPFile(bakPath, targetPath)
 			secErr := r.applySecureFilePermissions(targetPath)
 			if rbErr != nil || secErr != nil {
 				return fmt.Errorf("security policy failure on target PJSIP config file %s (%w); rollback failed (restoreErr: %v, secErr: %v)", targetPath, err, rbErr, secErr)
@@ -568,7 +575,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 	if err != nil {
 		var pjsipRestoreErr error
 		if hasPrev {
-			pjsipRestoreErr = os.Rename(bakPath, targetPath)
+			pjsipRestoreErr = r.renamePJSIPFile(bakPath, targetPath)
 		} else {
 			pjsipRestoreErr = removeFile(targetPath)
 		}
@@ -579,7 +586,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		resolverReloadErr := r.reloadResolver(ctx)
 		var pjsipRestoreErr error
 		if hasPrev {
-			pjsipRestoreErr = os.Rename(bakPath, targetPath)
+			pjsipRestoreErr = r.renamePJSIPFile(bakPath, targetPath)
 		} else {
 			pjsipRestoreErr = removeFile(targetPath)
 		}
@@ -593,7 +600,7 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 		resolverRestoreErr := r.restoreResolver(resolverPrev)
 		resolverReloadErr := r.reloadResolver(ctx)
 		if hasPrev {
-			rbErr := os.Rename(bakPath, targetPath)
+			rbErr := r.renamePJSIPFile(bakPath, targetPath)
 			var secErr error
 			if rbErr == nil {
 				secErr = r.applySecureFilePermissions(targetPath)
@@ -642,7 +649,7 @@ func (r *RealAsteriskReloader) RollbackPJSIPConfig(ctx context.Context, trunkNam
 	var secErr error
 	if _, err := os.Stat(bakPath); err == nil {
 		// Restore previous config
-		restoreErr = os.Rename(bakPath, targetPath)
+		restoreErr = r.renamePJSIPFile(bakPath, targetPath)
 		if restoreErr == nil {
 			secErr = r.applySecureFilePermissions(targetPath)
 		}
@@ -693,7 +700,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	resolverPrev, err := r.syncPinnedResolver()
 	if err != nil {
 		if hasPrev {
-			if restoreErr := os.Rename(bakPath, targetPath); restoreErr != nil {
+			if restoreErr := r.renamePJSIPFile(bakPath, targetPath); restoreErr != nil {
 				return fmt.Errorf("failed to synchronize pinned resolver before trunk removal and rollback failed: %w (restore: %v)", err, restoreErr)
 			}
 		}
@@ -704,7 +711,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		resolverReloadErr := r.reloadResolver(ctx)
 		var pjsipRestoreErr error
 		if hasPrev {
-			pjsipRestoreErr = os.Rename(bakPath, targetPath)
+			pjsipRestoreErr = r.renamePJSIPFile(bakPath, targetPath)
 		}
 		rollbackErr := rollbackFailure("resolver restore=%v resolver reload=%v pjsip restore=%v", resolverRestoreErr, resolverReloadErr, pjsipRestoreErr)
 		return compoundRollback(fmt.Errorf("PRIMARY FAILURE: resolver reload failed during trunk removal: %w", err), rollbackErr)
@@ -715,7 +722,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		resolverRestoreErr := r.restoreResolver(resolverPrev)
 		resolverReloadErr := r.reloadResolver(ctx)
 		if hasPrev {
-			rbErr := os.Rename(bakPath, targetPath)
+			rbErr := r.renamePJSIPFile(bakPath, targetPath)
 			var secErr error
 			if rbErr == nil {
 				secErr = r.applySecureFilePermissions(targetPath)
@@ -734,7 +741,7 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 		resolverRestoreErr := r.restoreResolver(resolverPrev)
 		resolverReloadErr := r.reloadResolver(ctx)
 		if hasPrev {
-			rbErr := os.Rename(bakPath, targetPath)
+			rbErr := r.renamePJSIPFile(bakPath, targetPath)
 			var secErr error
 			if rbErr == nil {
 				secErr = r.applySecureFilePermissions(targetPath)

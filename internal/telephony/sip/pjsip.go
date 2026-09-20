@@ -56,9 +56,15 @@ aors=trunk-{{ .Name }}-aor
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
-server_uri=sip:{{ .RegistrarNetworkAddressOrHost }}:{{ .Port }}
+server_uri=sip:{{ .RegistrarOrHost }}:{{ .Port }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
 client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}:{{ .Port }}
 retry_interval=60
+{{ end }}
+; gru83-pin host={{ .Host }} address={{ .HostNetworkAddress }}
+{{ if .Registrar }}; gru83-pin host={{ .Registrar }} address={{ .RegistrarNetworkAddress }}
+{{ end }}
+{{ if .OutboundProxy }}; gru83-pin host={{ .OutboundProxy }} address={{ .OutboundProxyNetworkAddress }}
 {{ end }}
 `
 

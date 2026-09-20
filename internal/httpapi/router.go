@@ -50,7 +50,7 @@ func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
 	if err != nil {
 		return unavailableSIPConfigurator{}
 	}
-	configurator, err := NewCanonicalSIPConfigurator(manager)
+	configurator, err := newCanonicalSIPConfiguratorWithPolicy(manager, newSIPDestinationPolicy())
 	if err != nil {
 		return unavailableSIPConfigurator{}
 	}

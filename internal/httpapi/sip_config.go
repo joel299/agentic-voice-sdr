@@ -69,6 +69,7 @@ type CanonicalSIPConfigurator struct {
 	manager interface {
 		ApplyTrunk(context.Context, sip.TrunkConfig) (sip.StatusReport, error)
 	}
+	policy *sipDestinationPolicy
 }
 
 func NewCanonicalSIPConfigurator(manager interface {
@@ -80,10 +81,27 @@ func NewCanonicalSIPConfigurator(manager interface {
 	return &CanonicalSIPConfigurator{manager: manager}, nil
 }
 
+func newCanonicalSIPConfiguratorWithPolicy(manager interface {
+	ApplyTrunk(context.Context, sip.TrunkConfig) (sip.StatusReport, error)
+}, policy *sipDestinationPolicy) (*CanonicalSIPConfigurator, error) {
+	configurator, err := NewCanonicalSIPConfigurator(manager)
+	if err != nil {
+		return nil, err
+	}
+	configurator.policy = policy
+	return configurator, nil
+}
+
 func (c *CanonicalSIPConfigurator) Configure(ctx context.Context, request SIPConfigRequest) error {
 	canonical, err := request.ToCanonical()
 	if err != nil {
 		return fmt.Errorf("%w: %v", errSIPCanonicalValidation, err)
+	}
+	if c.policy != nil {
+		canonical, err = c.policy.PinConfig(ctx, canonical)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errSIPCanonicalValidation, err)
+		}
 	}
 	_, err = c.manager.ApplyTrunk(ctx, canonical)
 	return err

@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
 
 type sipHostResolver interface {
@@ -22,6 +24,57 @@ func (defaultSIPHostResolver) LookupHost(ctx context.Context, host string) ([]st
 type safeSIPNetworkDialer struct {
 	resolver sipHostResolver
 	dialer   net.Dialer
+}
+
+type sipDestinationPolicy struct {
+	dialer *safeSIPNetworkDialer
+}
+
+func newSIPDestinationPolicy() *sipDestinationPolicy {
+	return &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+}
+
+// PinConfig resolves every address that Asterisk may use and replaces hostnames
+// with the validated IP. This removes the Go-validation/Asterisk-resolution TOCTOU.
+func (p *sipDestinationPolicy) PinConfig(ctx context.Context, cfg sip.TrunkConfig) (sip.TrunkConfig, error) {
+	var err error
+	if cfg.Host, err = p.pinHost(ctx, cfg.Host); err != nil {
+		return sip.TrunkConfig{}, fmt.Errorf("host destination rejected: %w", err)
+	}
+	if cfg.Registrar != "" {
+		if cfg.Registrar, err = p.pinHost(ctx, cfg.Registrar); err != nil {
+			return sip.TrunkConfig{}, fmt.Errorf("registrar destination rejected: %w", err)
+		}
+	}
+	if cfg.OutboundProxy != "" {
+		if cfg.OutboundProxy, err = p.pinHostPort(ctx, cfg.OutboundProxy); err != nil {
+			return sip.TrunkConfig{}, fmt.Errorf("outbound proxy destination rejected: %w", err)
+		}
+	}
+	return cfg, nil
+}
+
+func (p *sipDestinationPolicy) pinHost(ctx context.Context, host string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil && forbiddenSIPDestination(ip) {
+		return "", fmt.Errorf("literal destination is forbidden")
+	}
+	addrs, err := p.dialer.LookupHost(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	return addrs[0], nil
+}
+
+func (p *sipDestinationPolicy) pinHostPort(ctx context.Context, value string) (string, error) {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return p.pinHost(ctx, value)
+	}
+	ip, err := p.pinHost(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(ip, port), nil
 }
 
 func newSafeSIPNetworkDialer() *safeSIPNetworkDialer {

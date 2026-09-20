@@ -1273,3 +1273,20 @@ func TestUnresolvedOwnershipFailClosed(t *testing.T) {
 		t.Fatalf("security violation: target config file %s exists on disk after unresolved ownership policy failure", targetPath)
 	}
 }
+
+func TestRemovePJSIPConfigPropagatesBackupCleanupFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "cleanup-test.conf")
+	if err := os.WriteFile(target, []byte("password=not-a-real-secret\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	reloader := sip.NewRealAsteriskReloader(tmpDir, &mockRunner{})
+	reloader.SetGroupLookupFunc(func(string) (*user.Group, error) { return &user.Group{Name: "asterisk", Gid: "1234"}, nil })
+	reloader.SetRemoveFunc(func(string) error { return errors.New("simulated backup cleanup failure") })
+	if err := reloader.RemovePJSIPConfig(context.Background(), "cleanup-test"); err == nil || !strings.Contains(err.Error(), "finalize trunk removal cleanup") {
+		t.Fatalf("expected explicit cleanup failure, got %v", err)
+	}
+	if _, err := os.Stat(target + ".bak"); err != nil {
+		t.Fatalf("backup should remain observable after cleanup failure: %v", err)
+	}
+}

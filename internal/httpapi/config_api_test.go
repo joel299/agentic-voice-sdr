@@ -208,3 +208,17 @@ func TestSIPCanonicalValidationIsClientError(t *testing.T) {
 		t.Fatalf("canonical validation should be 400 without manager call: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
 	}
 }
+
+func TestSIPDestinationPolicyBlocksBeforeManager(t *testing.T) {
+	manager := &canonicalManager{}
+	policy := &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+	policy.dialer.resolver = &sequenceSIPResolver{answers: [][]string{{"10.0.0.10"}}}
+	configurator, err := newCanonicalSIPConfiguratorWithPolicy(manager, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := requestJSON(t, NewRouterWithServices(testAPIService(), configurator), http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"unsafe","host":"unsafe.example","port":5060,"transport":"udp","auth":{"type":"none"},"enabled":true}`)
+	if res.Code != http.StatusBadRequest || manager.calls != 0 {
+		t.Fatalf("unsafe destination must be rejected before manager: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	}
+}

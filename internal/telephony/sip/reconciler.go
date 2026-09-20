@@ -78,6 +78,9 @@ type GroupLookupFunc func(name string) (*user.Group, error)
 // DirStatFunc abstracts directory stat querying for testability.
 type DirStatFunc func(path string) (os.FileInfo, error)
 
+// RemoveFunc abstracts file removal for deterministic cleanup failure tests.
+type RemoveFunc func(name string) error
+
 // RealAsteriskReloader is the operational concrete implementation for Asterisk PJSIP integration.
 type RealAsteriskReloader struct {
 	configDir     string
@@ -85,6 +88,7 @@ type RealAsteriskReloader struct {
 	chownFn       ChownFunc
 	groupLookupFn GroupLookupFunc
 	dirStatFn     DirStatFunc
+	removeFn      RemoveFunc
 }
 
 // NewRealAsteriskReloader creates an operational RealAsteriskReloader instance.
@@ -101,6 +105,7 @@ func NewRealAsteriskReloader(configDir string, runner CommandRunner) *RealAsteri
 		chownFn:       os.Chown,
 		groupLookupFn: user.LookupGroup,
 		dirStatFn:     os.Stat,
+		removeFn:      os.Remove,
 	}
 }
 
@@ -118,6 +123,14 @@ func (r *RealAsteriskReloader) SetDirStatFunc(fn DirStatFunc) {
 		fn = os.Stat
 	}
 	r.dirStatFn = fn
+}
+
+// SetRemoveFunc overrides file removal for deterministic cleanup tests.
+func (r *RealAsteriskReloader) SetRemoveFunc(fn RemoveFunc) {
+	if fn == nil {
+		fn = os.Remove
+	}
+	r.removeFn = fn
 }
 
 // SetChownFunc overrides the default os.Chown function for testing or custom security policy verification.
@@ -441,7 +454,9 @@ func (r *RealAsteriskReloader) RemovePJSIPConfig(ctx context.Context, trunkName 
 	}
 
 	if hasPrev {
-		_ = os.Remove(bakPath)
+		if err := r.removeFn(bakPath); err != nil {
+			return fmt.Errorf("failed to finalize trunk removal cleanup: %w", err)
+		}
 	}
 	return nil
 }

@@ -40,6 +40,6 @@ Fale Paco SIP -> Asterisk -> AudioSocket -> Go Voice Engine -> Gemini Live WSS
 PRD -> SDD/ADR -> Microtask -> TDD RED -> Implement -> GREEN -> Refactor -> Evidence -> Review
 ```
 
-Agents: Stark/Hermes, Neriel/OpenClaw, Arquimedes/Antigravity. Cursor is retired. Reviewer: Anorak.
+Agents: Stark/Hermes, Neriel/OpenClaw, Arquimedes/OpenCode. Cursor is retired. Reviewer: Anorak.
 
 Before any GRU, read `CLAUDE.md`, `AGENTS.md` and `docs/CONTEXT_INDEX.md`. See `docs/` for the canonical context pack.

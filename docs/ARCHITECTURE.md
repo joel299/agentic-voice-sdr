@@ -49,4 +49,6 @@ O MVP tem `concurrency = 1`. O objetivo documentado para conversational round-tr
 
 ## Deployment e ambiente
 
-GRU-104 é LOCAL para Stark/Hermes. Este documento não autoriza acesso à VPS, produção ou mudança de deploy. Qualquer definição de produção, custo, segredo, autenticação ou migração destrutiva exige HUMAN_GATE.
+GRU-104 foi executada em `LOCAL` por Stark/Hermes como bootstrap histórico. A partir de GRU-105, GRU-101 e das validações realtime/runtime seguintes, o ambiente operacional de Stark/Hermes é a `Stark VPS`; essa VPS não deve ser identificada pelo alias `vultur-vps`, por IP ou por credenciais. Arquimedes/OpenCode e Neriel/OpenClaw usam `vultur-vps` via alias SSH quando autorizados por suas GRUs.
+
+GRU-105 validou na Stark VPS Ubuntu 26.04, linux/amd64, Go nativo 1.27.1, CGO/GCC e PATH persistente, além de `go mod download`, testes, race detector, vet, build e `git diff --check`. Este documento não autoriza mudança de produção, deploy ou secrets; qualquer definição de produção, custo, segredo, autenticação ou migração destrutiva exige HUMAN_GATE.

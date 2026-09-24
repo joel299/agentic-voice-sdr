@@ -55,16 +55,16 @@ Parta da `origin/main`, confirme a branch da GRU antes de criá-la, faça commit
 
 ## Ambiente atual
 
-- Stark / Hermes: LOCAL para GRU-104 e GRU-101.
-- Arquimedes / OpenCode: alias SSH `vultur-vps` quando autorizado por uma GRU própria.
-- Neriel / OpenClaw: alias SSH `vultur-vps` quando autorizado por uma GRU própria.
-- O contexto antigo/inacessível da VPS não é fonte válida para esta task.
+- Stark / Hermes: GRU-104 foi executada em `LOCAL` como bootstrap histórico; GRU-105, GRU-101 e validações realtime/runtime seguintes usam a `Stark VPS`, salvo mudança explícita em uma GRU futura.
+- Arquimedes / OpenCode: `vultur-vps` via alias SSH quando autorizado por uma GRU própria.
+- Neriel / OpenClaw: `vultur-vps` via alias SSH quando autorizado por uma GRU própria.
+- `vultur-vps` não é alias da Stark VPS. Não registrar IP, credenciais ou segredos.
 
 ## Ownership
 
 - **Stark / Hermes:** Go runtime, APIs, realtime boundaries, Gemini Live boundary e serviços internos.
 - **Neriel / OpenClaw:** domínio, state machines, comportamento conversacional e contratos de orquestração.
-- **Arquimedes / Antigravity:** infraestrutura, providers, integrações externas, observabilidade e deploy/reprodutibilidade.
+- **Arquimedes / OpenCode:** infraestrutura, providers, integrações externas, observabilidade e deploy/reprodutibilidade.
 - **Anorak:** revisão final baseada no diff e nas evidências.
 
 Para detalhes, use os documentos especializados do índice canônico.

@@ -44,7 +44,11 @@ Os documentos distinguem explicitamente `IMPLEMENTED`, `IN_PROGRESS`, `PLANNED` 
 
 ## Ambiente
 
-GRU-104 e GRU-101 são executadas LOCALMENTE por Stark/Hermes. A matriz de outros agentes e seus aliases autorizados está em `CLAUDE.md` e na Issue #54.
+- Stark/Hermes: GRU-104 foi executada em `LOCAL` como bootstrap histórico; GRU-105, GRU-101 e validações realtime/runtime seguintes usam a `Stark VPS`, salvo mudança explícita em uma GRU futura.
+- Neriel/OpenClaw: `vultur-vps` via alias SSH.
+- Arquimedes/OpenCode: `vultur-vps` via alias SSH.
+
+A `Stark VPS` é um ambiente separado. Não assumir que ela usa o alias `vultur-vps`; não registrar IP, credenciais ou segredos. A matriz completa e as regras operacionais estão em `CLAUDE.md` e na Issue #54.
 
 ## Conflitos
 

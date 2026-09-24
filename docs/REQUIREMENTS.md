@@ -40,7 +40,7 @@ Estados: `IMPLEMENTED` = materializado e verificável no repositório; `IN_PROGR
 
 | ID | Requisito | Estado |
 |---|---|---|
-| REQ-SEC-001 | Nunca versionar secrets ou credenciais | IMPLEMENTED (política/CI) |
+| REQ-SEC-001 | Nunca versionar secrets ou credenciais | IMPLEMENTED (política) |
 | REQ-SEC-002 | Excluir PCM, secrets e PII não mascarada de logs/traces | IMPLEMENTED (contrato) |
 | REQ-SEC-003 | Definir retenção, base legal e direitos de transcript/memória | TBD / HUMAN_GATE |
 

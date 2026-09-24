@@ -1,18 +1,20 @@
 # Agentic Voice SDR — Agent Entrypoint
 
-## Read first
+## Entrypoint e leitura obrigatória
 
-Antes de qualquer GRU, leia nesta ordem:
+`CLAUDE.md` e `AGENTS.md` são o preâmbulo obrigatório para entender as regras do repositório. Depois de carregá-los, toda GRU deve seguir exatamente esta sequência de contexto específica da task:
 
-1. `CLAUDE.md`
-2. `AGENTS.md`
-3. `docs/CONTEXT_INDEX.md`
-4. `docs/PRD.md`
-5. `docs/REQUIREMENTS.md`
-6. `docs/ARCHITECTURE.md`
-7. `docs/LOOP_ENGINEERING.md`
-8. `docs/PROJECT.md`, `docs/ENGINEERING.md`, `docs/AGENT_PROTOCOL.md` e `docs/PROMPT_CACHE.md` quando forem relevantes
-9. GitHub Issue #54, a Linear GRU atual e o mirror GitHub da GRU
+1. Linear issue atribuída à task atual;
+2. GitHub mirror da GRU, quando existir;
+3. `docs/PROMPT_CACHE.md`;
+4. `docs/PRD.md`;
+5. `docs/SDD.md`;
+6. ADRs relevantes em `docs/ADR-*.md`;
+7. `docs/TDD.md`;
+8. `docs/LOOP_ENGINEERING.md`;
+9. Shared Memory context e GitHub Issue #54, que complementa a memória compartilhada sem substituir a Linear GRU.
+
+`docs/CONTEXT_INDEX.md`, `docs/REQUIREMENTS.md`, `docs/ARCHITECTURE.md` e demais documentos especializados devem ser consultados conforme o escopo, sem criar uma segunda ordem concorrente.
 
 ## O produto
 

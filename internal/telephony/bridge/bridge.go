@@ -63,9 +63,41 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 
 	inputDone := make(chan struct{})
-	turnCompleteSeen := make(chan struct{})
-	var turnCompleteOnce sync.Once
-	markTurnComplete := func() { turnCompleteOnce.Do(func() { close(turnCompleteSeen) }) }
+	type turnState struct {
+		mu        sync.Mutex
+		sent      uint64
+		completed uint64
+		progress  chan struct{}
+	}
+	turns := &turnState{progress: make(chan struct{})}
+	markAudioSent := func() {
+		turns.mu.Lock()
+		turns.sent++
+		turns.mu.Unlock()
+	}
+	markTurnComplete := func() {
+		turns.mu.Lock()
+		turns.completed = turns.sent
+		close(turns.progress)
+		turns.progress = make(chan struct{})
+		turns.mu.Unlock()
+	}
+	waitForCompletedInput := func(ctx context.Context) bool {
+		for {
+			turns.mu.Lock()
+			if turns.completed >= turns.sent {
+				turns.mu.Unlock()
+				return true
+			}
+			progress := turns.progress
+			turns.mu.Unlock()
+			select {
+			case <-progress:
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
 	type result struct {
 		err    error
 		egress bool
@@ -92,24 +124,22 @@ func (b *Bridge) Run(ctx context.Context) error {
 	go func() {
 		select {
 		case <-inputDone:
-			select {
-			case <-turnCompleteSeen:
+			if waitForCompletedInput(ctx) {
 				internalEnded.Store(true)
 				cancel()
-			case <-ctx.Done():
 			}
 		case <-ctx.Done():
 		}
 	}()
 
 	go func() {
-		err := b.runIngress(ctx)
+		err := b.runIngress(ctx, markAudioSent)
 		if err == nil {
 			close(inputDone)
 		}
 		results <- result{err: err}
 	}()
-	go func() { results <- result{err: b.runEgress(ctx, inputDone, markTurnComplete), egress: true} }()
+	go func() { results <- result{err: b.runEgress(ctx, markTurnComplete), egress: true} }()
 
 	var firstErr error
 	for i := 0; i < 2; i++ {
@@ -139,7 +169,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 	return nil
 }
 
-func (b *Bridge) runIngress(ctx context.Context) error {
+func (b *Bridge) runIngress(ctx context.Context, markAudioSent func()) error {
 	for {
 		frame, err := b.input.ReadFrame()
 		if err != nil {
@@ -156,6 +186,7 @@ func (b *Bridge) runIngress(ctx context.Context) error {
 			if len(frame.Payload) == 0 {
 				continue
 			}
+			markAudioSent()
 			if err := b.gemini.SendAudio(ctx, frame.Payload); err != nil {
 				return err
 			}
@@ -170,7 +201,7 @@ func (b *Bridge) runIngress(ctx context.Context) error {
 	}
 }
 
-func (b *Bridge) runEgress(ctx context.Context, inputDone <-chan struct{}, markTurnComplete func()) error {
+func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 	for {
 		event, err := b.gemini.Receive(ctx)
 		if err != nil {
@@ -200,13 +231,9 @@ func (b *Bridge) runEgress(ctx context.Context, inputDone <-chan struct{}, markT
 		}
 		if event.Kind == geminilive.EventTurnComplete {
 			markTurnComplete()
-			select {
-			case <-inputDone:
-				return nil
-			default:
-				// turnComplete closes only the current model turn. Keep
-				// receiving while the caller's AudioSocket remains open.
-			}
+			// TurnComplete closes only the current model turn. The input
+			// watcher ends the session only after the latest sent input is
+			// covered, so a stale completion can never stop Receive.
 		}
 	}
 }

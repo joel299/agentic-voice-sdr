@@ -89,13 +89,8 @@ func (f *fakeGemini) EndAudio(context.Context) error { return nil }
 func (f *fakeGemini) Close() error                   { f.closeOne.Do(func() { close(f.closed) }); return nil }
 
 func TestBridgeRoutesAudioBothDirections(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	audio := newFakeAudio([]audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1, 2}}}, io.EOF)
-	gemini := &fakeGemini{events: []geminilive.Event{
-		{Kind: geminilive.EventAudio, Audio: []byte{3, 4}, AudioMimeType: "audio/pcm;rate=24000"},
-		{Kind: geminilive.EventTurnComplete},
-	}, closed: make(chan struct{})}
+	audio := newOrderedAudio([]audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1, 2}}})
+	gemini := newOrderedGemini()
 	var got []geminilive.Event
 	var mu sync.Mutex
 	b := New(audio, audio, gemini, func(_ context.Context, event geminilive.Event) error {
@@ -104,17 +99,29 @@ func TestBridgeRoutesAudioBothDirections(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	if err := b.Run(ctx); err != nil {
-		t.Fatalf("Run() error = %v", err)
+	done := make(chan error, 1)
+	go func() { done <- b.Run(context.Background()) }()
+	select {
+	case sent := <-gemini.sentCh:
+		if string(sent) != string([]byte{1, 2}) {
+			t.Fatalf("Gemini audio = %#v", sent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("audio was not sent to Gemini")
 	}
-	if len(audio.written()) != 1 || string(audio.written()[0].Payload) != string([]byte{3, 4}) {
-		t.Fatalf("audio writes = %#v", audio.written())
+	audio.Close()
+	gemini.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{3, 4}, AudioMimeType: "audio/pcm;rate=24000"}
+	gemini.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not finish")
 	}
-	gemini.mu.Lock()
-	sent := append([][]byte(nil), gemini.sent...)
-	gemini.mu.Unlock()
-	if len(sent) != 1 || string(sent[0]) != string([]byte{1, 2}) {
-		t.Fatalf("Gemini audio = %#v", sent)
+	if writes := audio.written(); len(writes) != 1 || string(writes[0].Payload) != string([]byte{3, 4}) {
+		t.Fatalf("audio writes = %#v", writes)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -313,5 +320,218 @@ func TestBridgeHandlerErrorCancelsSession(t *testing.T) {
 	err := New(audio, audio, gemini, func(context.Context, geminilive.Event) error { return handlerErr }).Run(context.Background())
 	if !errors.Is(err, handlerErr) {
 		t.Fatalf("error = %v, want %v", err, handlerErr)
+	}
+}
+
+type orderedAudio struct {
+	mu           sync.Mutex
+	frames       []audiosocket.Frame
+	writes       []audiosocket.Frame
+	eof          chan struct{}
+	eofOnce      sync.Once
+	next         chan audiosocket.Frame
+	eofAfterNext bool
+	nextConsumed bool
+	closed       chan struct{}
+	closeOne     sync.Once
+}
+
+func newOrderedAudio(frames []audiosocket.Frame) *orderedAudio {
+	return &orderedAudio{frames: frames, eof: make(chan struct{}), next: make(chan audiosocket.Frame), closed: make(chan struct{})}
+}
+
+func (a *orderedAudio) ReadFrame() (audiosocket.Frame, error) {
+	a.mu.Lock()
+	if a.nextConsumed {
+		a.mu.Unlock()
+		return audiosocket.Frame{}, io.EOF
+	}
+	if len(a.frames) > 0 {
+		frame := a.frames[0]
+		a.frames = a.frames[1:]
+		a.mu.Unlock()
+		return frame, nil
+	}
+	a.mu.Unlock()
+	select {
+	case frame := <-a.next:
+		a.mu.Lock()
+		eofAfterNext := a.eofAfterNext
+		a.nextConsumed = true
+		a.mu.Unlock()
+		if eofAfterNext {
+			a.eofOnce.Do(func() { close(a.eof) })
+		}
+		return frame, nil
+	case <-a.closed:
+		return audiosocket.Frame{}, io.EOF
+	}
+}
+
+func (a *orderedAudio) appendFrame(frame audiosocket.Frame) {
+	a.mu.Lock()
+	a.eofAfterNext = true
+	a.mu.Unlock()
+	a.next <- frame
+}
+
+func (a *orderedAudio) WriteFrame(frame audiosocket.Frame) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.writes = append(a.writes, frame)
+	return nil
+}
+
+func (a *orderedAudio) Close() error {
+	a.closeOne.Do(func() { close(a.closed) })
+	return nil
+}
+
+func (a *orderedAudio) written() []audiosocket.Frame {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]audiosocket.Frame(nil), a.writes...)
+}
+
+type orderedGemini struct {
+	mu       sync.Mutex
+	sent     [][]byte
+	sentCh   chan []byte
+	events   chan geminilive.Event
+	closed   chan struct{}
+	closeOne sync.Once
+}
+
+func newOrderedGemini() *orderedGemini {
+	return &orderedGemini{sentCh: make(chan []byte, 4), events: make(chan geminilive.Event, 4), closed: make(chan struct{})}
+}
+
+func (g *orderedGemini) SendAudio(_ context.Context, audio []byte) error {
+	copyAudio := append([]byte(nil), audio...)
+	g.mu.Lock()
+	g.sent = append(g.sent, copyAudio)
+	g.mu.Unlock()
+	g.sentCh <- copyAudio
+	return nil
+}
+
+func (g *orderedGemini) EndAudio(context.Context) error { return nil }
+
+func (g *orderedGemini) Receive(ctx context.Context) (geminilive.Event, error) {
+	select {
+	case event := <-g.events:
+		return event, nil
+	case <-ctx.Done():
+		return geminilive.Event{}, ctx.Err()
+	}
+}
+
+func (g *orderedGemini) Close() error {
+	g.closeOne.Do(func() { close(g.closed) })
+	return nil
+}
+
+func TestBridgeStaleTurnCompleteCannotFinishNewerInput(t *testing.T) {
+	audio := newOrderedAudio([]audiosocket.Frame{
+		{Type: audiosocket.TypeSlin16, Payload: []byte{1}},
+	})
+	gemini := newOrderedGemini()
+	turnOneComplete := make(chan struct{}, 1)
+	b := New(audio, audio, gemini, func(_ context.Context, event geminilive.Event) error {
+		if event.Kind == geminilive.EventTurnComplete {
+			select {
+			case turnOneComplete <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- b.Run(context.Background()) }()
+
+	select {
+	case got := <-gemini.sentCh:
+		if string(got) != string([]byte{1}) {
+			t.Fatalf("first Gemini audio = %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first audio was not sent")
+	}
+	gemini.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{11}, AudioMimeType: "audio/pcm;rate=24000"}
+	gemini.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	select {
+	case <-turnOneComplete:
+	case <-time.After(time.Second):
+		t.Fatal("first TurnComplete was not processed")
+	}
+	audio.appendFrame(audiosocket.Frame{Type: audiosocket.TypeSlin16, Payload: []byte{2}})
+
+	select {
+	case got := <-gemini.sentCh:
+		if string(got) != string([]byte{2}) {
+			t.Fatalf("second Gemini audio = %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second audio was not sent")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("bridge ended on stale TurnComplete: %v", err)
+	case <-audio.eof:
+	}
+
+	gemini.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{22}, AudioMimeType: "audio/pcm;rate=24000"}
+	deadline := time.After(time.Second)
+	for {
+		if writes := audio.written(); len(writes) == 2 {
+			if string(writes[1].Payload) != string([]byte{22}) {
+				t.Fatalf("second response payload = %v", writes[1].Payload)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("second response audio was not delivered; writes = %#v", audio.written())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	gemini.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not finish after TurnComplete for second input")
+	}
+}
+
+func TestBridgeCompletedTurnAllowsInputCloseWithoutExtraTurn(t *testing.T) {
+	audio := newOrderedAudio([]audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1}}})
+	gemini := newOrderedGemini()
+	done := make(chan error, 1)
+	go func() { done <- New(audio, audio, gemini, nil).Run(context.Background()) }()
+	select {
+	case got := <-gemini.sentCh:
+		if string(got) != string([]byte{1}) {
+			t.Fatalf("Gemini audio = %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("audio was not sent")
+	}
+	audio.Close()
+	gemini.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{3}, AudioMimeType: "audio/pcm;rate=24000"}
+	gemini.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not finish after the latest TurnComplete")
+	}
+	if writes := audio.written(); len(writes) != 1 || string(writes[0].Payload) != string([]byte{3}) {
+		t.Fatalf("writes = %#v", writes)
 	}
 }

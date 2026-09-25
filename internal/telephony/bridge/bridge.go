@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
@@ -62,7 +63,15 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 
 	inputDone := make(chan struct{})
-	results := make(chan error, 2)
+	turnCompleteSeen := make(chan struct{})
+	var turnCompleteOnce sync.Once
+	markTurnComplete := func() { turnCompleteOnce.Do(func() { close(turnCompleteSeen) }) }
+	type result struct {
+		err    error
+		egress bool
+	}
+	results := make(chan result, 2)
+	var internalEnded atomic.Bool
 	var closeOnce sync.Once
 	closeSides := func() {
 		closeOnce.Do(func() {
@@ -80,19 +89,37 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 	}()
 	defer close(watchDone)
+	go func() {
+		select {
+		case <-inputDone:
+			select {
+			case <-turnCompleteSeen:
+				internalEnded.Store(true)
+				cancel()
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
 
 	go func() {
 		err := b.runIngress(ctx)
 		if err == nil {
 			close(inputDone)
 		}
-		results <- err
+		results <- result{err: err}
 	}()
-	go func() { results <- b.runEgress(ctx, inputDone) }()
+	go func() { results <- result{err: b.runEgress(ctx, inputDone, markTurnComplete), egress: true} }()
 
 	var firstErr error
 	for i := 0; i < 2; i++ {
-		err := <-results
+		res := <-results
+		err := res.err
+		if res.egress && err == nil {
+			internalEnded.Store(true)
+			cancel()
+			closeSides()
+		}
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			firstErr = err
 			cancel()
@@ -102,6 +129,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 	closeSides()
 	if firstErr != nil {
 		return firstErr
+	}
+	if internalEnded.Load() {
+		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -140,7 +170,7 @@ func (b *Bridge) runIngress(ctx context.Context) error {
 	}
 }
 
-func (b *Bridge) runEgress(ctx context.Context, inputDone <-chan struct{}) error {
+func (b *Bridge) runEgress(ctx context.Context, inputDone <-chan struct{}, markTurnComplete func()) error {
 	for {
 		event, err := b.gemini.Receive(ctx)
 		if err != nil {
@@ -169,11 +199,13 @@ func (b *Bridge) runEgress(ctx context.Context, inputDone <-chan struct{}) error
 			return nil
 		}
 		if event.Kind == geminilive.EventTurnComplete {
+			markTurnComplete()
 			select {
 			case <-inputDone:
 				return nil
-			case <-ctx.Done():
-				return ctx.Err()
+			default:
+				// turnComplete closes only the current model turn. Keep
+				// receiving while the caller's AudioSocket remains open.
 			}
 		}
 	}

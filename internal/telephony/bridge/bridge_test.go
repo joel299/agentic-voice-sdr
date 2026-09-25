@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -122,6 +123,84 @@ func TestBridgeRoutesAudioBothDirections(t *testing.T) {
 	}
 }
 
+type openAudio struct {
+	mu       sync.Mutex
+	frames   []audiosocket.Frame
+	closed   chan struct{}
+	closeOne sync.Once
+}
+
+func (a *openAudio) ReadFrame() (audiosocket.Frame, error) {
+	a.mu.Lock()
+	if len(a.frames) > 0 {
+		frame := a.frames[0]
+		a.frames = a.frames[1:]
+		a.mu.Unlock()
+		return frame, nil
+	}
+	a.mu.Unlock()
+	<-a.closed
+	return audiosocket.Frame{}, io.EOF
+}
+func (a *openAudio) WriteFrame(audiosocket.Frame) error { return nil }
+func (a *openAudio) Close() error                       { a.closeOne.Do(func() { close(a.closed) }); return nil }
+
+func TestBridgeKeepsReceivingAfterTurnCompleteForMultiTurnCall(t *testing.T) {
+	audio := &openAudio{
+		frames: []audiosocket.Frame{
+			{Type: audiosocket.TypeSlin16, Payload: []byte{1}},
+			{Type: audiosocket.TypeSlin16, Payload: []byte{2}},
+		},
+		closed: make(chan struct{}),
+	}
+	gemini := &fakeGemini{events: []geminilive.Event{
+		{Kind: geminilive.EventAudio, Audio: []byte{3}, AudioMimeType: "audio/pcm;rate=24000"},
+		{Kind: geminilive.EventTurnComplete},
+		{Kind: geminilive.EventAudio, Audio: []byte{4}, AudioMimeType: "audio/pcm;rate=24000"},
+		{Kind: geminilive.EventTurnComplete},
+	}, closed: make(chan struct{})}
+	turns := make(chan struct{}, 2)
+	b := New(audio, audio, gemini, func(_ context.Context, event geminilive.Event) error {
+		if event.Kind == geminilive.EventTurnComplete {
+			turns <- struct{}{}
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	select {
+	case <-turns:
+	case <-time.After(time.Second):
+		t.Fatal("first turnComplete was not delivered")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("bridge ended after first turnComplete: %v", err)
+	default:
+	}
+	select {
+	case <-turns:
+	case <-time.After(time.Second):
+		t.Fatal("second turnComplete was not delivered")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("multi-turn bridge did not stop after cancellation")
+	}
+	gemini.mu.Lock()
+	sent := append([][]byte(nil), gemini.sent...)
+	gemini.mu.Unlock()
+	if len(sent) != 2 || string(sent[0]) != string([]byte{1}) || string(sent[1]) != string([]byte{2}) {
+		t.Fatalf("Gemini audio = %#v", sent)
+	}
+}
+
 func TestBridgeCancellationClosesBothSides(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	audio := newFakeAudio(nil, nil)
@@ -206,6 +285,24 @@ func TestBridgeGeminiDisconnectClosesAudio(t *testing.T) {
 	case <-audio.closed:
 	default:
 		t.Fatal("audio side was not closed after Gemini disconnect")
+	}
+}
+
+func TestBridgeClosesProductionAudioSocketAndUnblocksRead(t *testing.T) {
+	peer, conn := net.Pipe()
+	defer peer.Close()
+	stream := audiosocket.NewStream(conn, conn)
+	disconnect := errors.New("gemini disconnected")
+	gemini := &fakeGemini{recvErr: disconnect, closed: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- New(stream, stream, gemini, nil).Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, disconnect) {
+			t.Fatalf("Run() error = %v, want %v", err, disconnect)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Bridge.Run remained blocked on production AudioSocket ReadFrame")
 	}
 }
 

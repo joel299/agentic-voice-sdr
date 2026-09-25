@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -99,13 +100,14 @@ func wrap(kind ErrorKind, err error) error {
 	return &Error{Kind: kind, Err: err}
 }
 
-// Event is a typed subset of Gemini's server message. Unknown fields are retained by the provider wire parser but ignored here.
+// Event is a typed subset of Gemini's server message. Unknown valid messages
+// are surfaced as EventUnknown rather than being mistaken for a closed socket.
 type Event struct {
 	Kind          EventKind
 	Audio         []byte
 	AudioMimeType string
 	Text          string
-	ToolCall      *ToolCall
+	ToolCalls     []ToolCall
 	Error         string
 }
 type EventKind string
@@ -119,6 +121,7 @@ const (
 	EventInterrupted         EventKind = "interrupted"
 	EventToolCall            EventKind = "tool_call"
 	EventAPIError            EventKind = "api_error"
+	EventUnknown             EventKind = "unknown"
 	EventClosed              EventKind = "closed"
 )
 
@@ -147,6 +150,9 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 	u, err := url.Parse(cfg.Endpoint)
 	if err != nil || u.Scheme != "wss" && u.Scheme != "ws" {
 		return nil, wrap(ErrorConnect, errors.New("invalid WebSocket endpoint"))
+	}
+	if err := validateEndpoint(u); err != nil {
+		return nil, wrap(ErrorConnect, err)
 	}
 	q := u.Query()
 	q.Set("key", cfg.APIKey)
@@ -185,6 +191,25 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, wrap(ErrorSetup, errors.New("setup acknowledgement missing"))
 	}
 	return s, nil
+}
+
+func validateEndpoint(u *url.URL) error {
+	if u == nil || u.Hostname() == "" {
+		return errors.New("invalid WebSocket endpoint")
+	}
+	if u.Scheme == "ws" && !isLoopbackHost(u.Hostname()) {
+		return errors.New("insecure WebSocket endpoint")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Session) sendJSON(ctx context.Context, message any) error {
@@ -302,7 +327,7 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 			FunctionCalls []ToolCall `json:"functionCalls"`
 		}
 		if json.Unmarshal(raw, &t) == nil && len(t.FunctionCalls) > 0 {
-			return Event{Kind: EventToolCall, ToolCall: &t.FunctionCalls[0]}
+			return Event{Kind: EventToolCall, ToolCalls: t.FunctionCalls}
 		}
 		return Event{Kind: EventToolCall}
 	}
@@ -358,7 +383,7 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 			}
 		}
 	}
-	return Event{Kind: EventClosed}
+	return Event{Kind: EventUnknown}
 }
 func (s *Session) Close() error {
 	if s == nil {

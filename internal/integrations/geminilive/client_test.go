@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -113,7 +114,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 		t.Fatalf("interrupt event: %+v %v", e, err)
 	}
 	e, err = s.Receive(context.Background())
-	if err != nil || e.Kind != EventToolCall || e.ToolCall == nil || e.ToolCall.Name != "schedule" {
+	if err != nil || e.Kind != EventToolCall || len(e.ToolCalls) != 1 || e.ToolCalls[0].Name != "schedule" {
 		t.Fatalf("tool event: %+v %v", e, err)
 	}
 }
@@ -150,7 +151,7 @@ func TestSessionErrorsCancellationAndSecretRedaction(t *testing.T) {
 }
 
 func TestParseUnknownAndMalformedServerMessages(t *testing.T) {
-	if got := parseEvent(map[string]json.RawMessage{"futureField": json.RawMessage(`{}`)}); got.Kind != EventClosed {
+	if got := parseEvent(map[string]json.RawMessage{"futureField": json.RawMessage(`{}`)}); got.Kind != EventUnknown {
 		t.Fatalf("unknown event: %+v", got)
 	}
 	if parseAPIError(map[string]json.RawMessage{"error": json.RawMessage(`{"message":"secret detail"}`)}) != "secret detail" {
@@ -176,5 +177,47 @@ func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
 	}
 	if _, ok := setup["responseModalities"]; ok {
 		t.Fatal("response modalities must be nested in generationConfig")
+	}
+}
+
+func TestEndpointTransportPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		wantErr bool
+	}{
+		{name: "remote wss", address: "wss://remote-host/live"},
+		{name: "localhost ws", address: "ws://localhost/live"},
+		{name: "ipv4 loopback ws", address: "ws://127.0.0.1/live"},
+		{name: "ipv6 loopback ws", address: "ws://[::1]/live"},
+		{name: "remote ws", address: "ws://remote-host/live?key=must-not-leak", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := url.Parse(tt.address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateEndpoint(u)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateEndpoint() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if tt.wantErr && (strings.Contains(err.Error(), "must-not-leak") || strings.Contains(err.Error(), "secret")) {
+				t.Fatalf("endpoint error leaked secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestParsePreservesAllToolCalls(t *testing.T) {
+	got := parseEvent(map[string]json.RawMessage{"toolCall": json.RawMessage(`{"functionCalls":[{"id":"1","name":"schedule","args":{"when":"tomorrow"}},{"id":"2","name":"send_message","args":{"text":"hello"}}]}`)})
+	if got.Kind != EventToolCall || len(got.ToolCalls) != 2 {
+		t.Fatalf("tool calls: %+v", got)
+	}
+	if got.ToolCalls[0].ID != "1" || got.ToolCalls[0].Name != "schedule" || got.ToolCalls[1].ID != "2" || got.ToolCalls[1].Name != "send_message" {
+		t.Fatalf("tool call order/identity: %+v", got.ToolCalls)
+	}
+	if !strings.Contains(string(got.ToolCalls[0].Args), "tomorrow") || !strings.Contains(string(got.ToolCalls[1].Args), "hello") {
+		t.Fatalf("tool call args: %+v", got.ToolCalls)
 	}
 }

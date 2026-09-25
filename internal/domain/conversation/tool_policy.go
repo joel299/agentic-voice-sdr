@@ -58,6 +58,10 @@ func (input ToolPolicyInput) Validate() error {
 	if strings.TrimSpace(input.RequestedTool) == "" {
 		return fmt.Errorf("%w: requested tool is empty", ErrInvalidToolPolicyInput)
 	}
+	expectedEffect := classifyToolEffect(input.RequestedTool)
+	if input.Effect != expectedEffect {
+		return fmt.Errorf("%w: effect %q does not match tool %q classification %q", ErrInvalidToolPolicyInput, input.Effect, input.RequestedTool, expectedEffect)
+	}
 	switch input.Effect {
 	case ToolEffectUnknown, ToolEffectRead, ToolEffectSideEffect:
 		return nil
@@ -108,6 +112,7 @@ const (
 	PolicyReasonMissingRequiredState    PolicyReason = "missing_required_state"
 	PolicyReasonSideEffectNotAuthorized PolicyReason = "side_effect_not_authorized"
 	PolicyReasonDeferUntilReady         PolicyReason = "defer_until_ready"
+	PolicyReasonContactOptedOut         PolicyReason = "contact_opted_out"
 )
 
 func validatePolicyReason(reason PolicyReason) error {
@@ -117,7 +122,8 @@ func validatePolicyReason(reason PolicyReason) error {
 		PolicyReasonIncompatibleAction,
 		PolicyReasonMissingRequiredState,
 		PolicyReasonSideEffectNotAuthorized,
-		PolicyReasonDeferUntilReady:
+		PolicyReasonDeferUntilReady,
+		PolicyReasonContactOptedOut:
 		return nil
 	default:
 		return fmt.Errorf("%w: %q", ErrInvalidPolicyReason, reason)
@@ -142,6 +148,9 @@ func EvaluateToolPolicy(input ToolPolicyInput) (ToolPolicyResult, error) {
 	}
 	if input.Effect == ToolEffectUnknown {
 		return ToolPolicyResult{Status: PolicyDeny, Reason: PolicyReasonUnknownTool}, nil
+	}
+	if input.DecisionInput.Signals.OptedOut && isContactTool(input.RequestedTool) {
+		return ToolPolicyResult{Status: PolicyDeny, Reason: PolicyReasonContactOptedOut}, nil
 	}
 	if input.DecisionInput.Stage == StageEnded {
 		return ToolPolicyResult{Status: PolicyDefer, Reason: PolicyReasonMissingRequiredState}, nil
@@ -175,5 +184,14 @@ func classifyToolEffect(name string) ToolEffect {
 		return ToolEffectSideEffect
 	default:
 		return ToolEffectUnknown
+	}
+}
+
+func isContactTool(name string) bool {
+	switch name {
+	case domainTools.ToolWhatsAppSendMessage, domainTools.ToolCallbackSchedule:
+		return true
+	default:
+		return false
 	}
 }

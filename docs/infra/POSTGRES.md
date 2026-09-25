@@ -1,6 +1,6 @@
 # PostgreSQL Dev Infrastructure & Transactional Outbox
 
-This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical Outbox schema is defined only by the ordered migrations `db/migrations/0001_create_outbox_events.sql`, `db/migrations/0002_outbox_integrity.sql`, and `db/migrations/0003_outbox_pending_index.sql`. These files are the source of truth for `outbox_events`; do not maintain a second DDL contract in documentation.
+This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical schemas are defined only by ordered migrations `db/migrations/*.sql`; these files are the source of truth, and documentation must not maintain a parallel DDL contract. `0001`–`0003` define the Transactional Outbox; `0004_agent_prompt_versions.sql` defines versioned editable business/conversational prompt content in `agent_prompt_versions`.
 
 ## Prerequisites and environment
 
@@ -45,6 +45,12 @@ docker compose -f deploy/dev/docker-compose.yml stop postgres
 
 The migration runner records each applied filename and SHA-256 checksum in `schema_migrations`, skips an unchanged applied migration, and fails if an applied migration file was edited. The canonical `outbox_events` contract uses `PENDING`, `PUBLISHED`, and `FAILED`, `published_at`, aggregate and routing fields, payload/headers, idempotency/correlation/trace metadata, retry count, last error, and creation time. Consult the migration files for exact types, nullability, defaults, constraints, and indexes.
 
+## Versioned editable Agent Prompt
+
+Migration `0004_agent_prompt_versions.sql` stores only owner-editable business/conversational prompt content. It is not the immutable system core and does not contain safety rules, Tool Policy, opt-out/ownership rules, canonical tools, credentials, or provider lifecycle instructions. The migration has no seed: zero active prompt versions is valid until the owner configures the first one. PostgreSQL enforces at most one active version. Existing versions are historical records whose name, prompt, creation time, and version cannot be edited; changes require inserting a new version. Future activation is intended for new sessions. The migration is the schema source of truth.
+
+Run `scripts/db/test-agent-prompt-versions.sh` against a PostgreSQL database via the standard `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and `PGDATABASE` variables to validate the contract. The PostgreSQL smoke orchestrates this harness on its isolated PostgreSQL 16 instance.
+
 ## Development-only reset
 
 `./scripts/db/reset.sh` drops and recreates the configured database before applying canonical migrations. It requires `APP_ENV=development` (default) or `dev`, a localhost host, and a safe database identifier ending in `_dev` or `_development`; it rejects remote hosts and production/staging environments. It never uses `docker compose down -v`.
@@ -57,7 +63,7 @@ Treat this command as destructive to the selected local development database. It
 
 ## Real PostgreSQL smoke
 
-The smoke starts only the PostgreSQL 16 service, waits for the healthcheck, applies the canonical migration, verifies `outbox_events`, inserts one event with all required canonical columns, confirms PostgreSQL rejects an invalid insert missing required values, and removes the test event. Optional `--down`/`--clean` stops only the PostgreSQL service and preserves its volume; Redis and RabbitMQ are not stopped or removed.
+The smoke starts only the PostgreSQL 16 service, waits for the healthcheck, applies all canonical migrations, runs the Outbox and Agent Prompt contract harnesses, verifies `outbox_events`, inserts one event with all required canonical columns, confirms PostgreSQL rejects an invalid insert missing required values, and removes the test event. Optional `--down`/`--clean` stops only the PostgreSQL service and preserves its volume; Redis and RabbitMQ are not stopped or removed.
 
 ```bash
 ./scripts/db/smoke-test.sh

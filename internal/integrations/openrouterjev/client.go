@@ -130,16 +130,16 @@ var canonicalDecisionChoices = map[string]conversation.Decision{
 
 var canonicalNextActionQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Choose exactly one canonical next action from the supplied conversation state. If opted_out is true, choose end_conversation. Use only the structured state; do not generate text, spoken copy, messages, or tool instructions.",
+	Instructions: "Choose exactly one canonical next action using only these supplied fields: stage, signals.lead_responded, signals.opted_out, turn_count, last_turn_role, and last_transcript_state. signals.lead_responded is cumulative historical state (the lead has responded at least once), not whether the lead responded to the most recent agent turn. For stage=active, last_turn_role and last_transcript_state describe the latest turn and take precedence over that cumulative signal: an agent last turn with turn_count>0 means the agent has just spoken and we are awaiting the next lead response; a lead last turn with final transcript means the lead just responded. Never infer lead intent, interest, readiness to schedule, or a need for clarification because no transcript text or such signal is provided. opted_out=true is a hard invariant: choose end_conversation, regardless of last turn. Choose end_conversation for stage=ended or stage=closing. For stage=opening choose continue_conversation. Use another choice only when its criterion is directly supported by the supplied structured state. Do not generate text, spoken copy, messages, or tool instructions.",
 	Criteria: map[string]string{
-		"continue_conversation":                 "Continue discovery when the active conversation should proceed without a specific clarification.",
-		"ask_question":                          "Ask a focused clarifying question when the state indicates clarification is needed.",
-		"propose_scheduling":                    "Propose scheduling when the lead is ready to schedule.",
-		"propose_scheduling_interest_confirmed": "Propose scheduling when interest is confirmed and scheduling is the appropriate next step.",
-		"request_capability":                    "Request a capability when the next step requires an external capability.",
-		"follow_up":                             "Choose follow-up when the conversation state calls for a later follow-up.",
-		"end_conversation":                      "End the conversation when complete or when the lead has opted out.",
-		"handoff":                               "Hand off when the state requires human assistance.",
+		"continue_conversation":                 "For stage=opening, begin the conversation flow. For stage=active with last_turn_role=lead and last_transcript_state=final and signals.opted_out=false, continue the active flow because the lead just responded. Use the latest turn, not cumulative signals.lead_responded, to determine whose turn it is; do not infer clarification or scheduling.",
+		"ask_question":                          "Ask a clarifying question only when an explicit supplied canonical signal establishes that clarification is needed; do not infer this from lead_responded or absent transcript text.",
+		"propose_scheduling":                    "Propose scheduling only when an explicit supplied canonical signal establishes readiness; this DecisionInput has no scheduling-readiness field, so do not infer it.",
+		"propose_scheduling_interest_confirmed": "Propose scheduling only when an explicit supplied canonical signal establishes confirmed interest and readiness; do not infer either from lead_responded.",
+		"request_capability":                    "Request a capability only when an explicit supplied canonical signal establishes that a capability is required.",
+		"follow_up":                             "For stage=active with last_turn_role=agent and turn_count>0 and signals.opted_out=false, select follow-up because the agent just spoke and the next lead response is awaited, regardless of signals.lead_responded (which is cumulative historical state and may be true). The latest turn takes precedence over the cumulative signal.",
+		"end_conversation":                      "Select end_conversation when signals.opted_out=true (hard invariant), or when stage=closing or stage=ended. Do not end an opening or active conversation solely because transcript text, intent, or completion details are absent.",
+		"handoff":                               "Hand off only when an explicit supplied canonical signal establishes that human assistance is required.",
 	},
 }
 

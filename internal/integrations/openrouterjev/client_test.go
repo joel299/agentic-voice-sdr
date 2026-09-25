@@ -52,6 +52,18 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 		if req.Model != "test/model" || !exists || question.Type != "choice" || question.Criteria["ask_question"] == "" || question.Criteria["end_conversation"] == "" || !strings.Contains(question.Instructions, "opted_out") {
 			t.Errorf("Jev request = %+v", req)
 		}
+		if !strings.Contains(question.Instructions, "stage") ||
+			!strings.Contains(question.Criteria["continue_conversation"], "active") ||
+			!strings.Contains(question.Criteria["continue_conversation"], "last_turn_role=lead") ||
+			!strings.Contains(question.Criteria["continue_conversation"], "last_transcript_state=final") ||
+			!strings.Contains(question.Criteria["follow_up"], "stage=active") ||
+			!strings.Contains(question.Criteria["follow_up"], "last_turn_role=agent") ||
+			!strings.Contains(question.Criteria["follow_up"], "turn_count>0") ||
+			!strings.Contains(question.Criteria["follow_up"], "regardless of signals.lead_responded") ||
+			!strings.Contains(question.Criteria["end_conversation"], "ended") ||
+			!strings.Contains(question.Criteria["end_conversation"], "opted_out") {
+			t.Errorf("Jev criteria do not prioritize latest turn over cumulative response signal: %+v", question)
+		}
 		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal {
 			t.Errorf("serialized state = %+v", req.State)
 		}

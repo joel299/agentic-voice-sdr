@@ -1,7 +1,7 @@
 ## Task Overview
 
 - **Linear Issue**: [e.g. GRU-56]
-- **Assigned Agent**: [e.g. Arquimedes / Antigravity]
+- **Assigned Agent**: [e.g. Arquimedes / OpenCode]
 
 ## Human Authorization Gate
 

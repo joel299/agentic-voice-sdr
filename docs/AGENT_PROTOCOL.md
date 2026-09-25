@@ -8,7 +8,7 @@ This protocol governs all autonomous AI agent interactions, development workflow
 | :--- | :--- | :--- |
 | **Stark** | Hermes | **Backend & Core Infrastructure**: Go runtime, API layer, HTTP/WebSocket endpoints, AudioSocket boundaries, and low-level internal services. |
 | **Neriel** | OpenClaw | **Domain & Business Logic**: State machines, call session transitions, business policies, and tool orchestration. |
-| **Arquimedes** | Antigravity | **Dev Infrastructure & Integrations**: Redis, RabbitMQ, PostgreSQL containers, Docker Compose, deployment scripts, and operational topology. |
+| **Arquimedes** | OpenCode | **Dev Infrastructure & Integrations**: Redis, RabbitMQ, PostgreSQL containers, Docker Compose, deployment scripts, and operational topology. |
 | **Anorak** | Reviewer | **Quality Assurance & Verification**: Code review, spec alignment, TDD verification, regression analysis, and final issue approval. *Does not execute feature code.* |
 
 > [!CAUTION]

@@ -24,7 +24,7 @@ SPEC -> TEST -> RED -> IMPLEMENT -> GREEN -> REFACTOR -> REGRESSION -> EVIDENCE 
 ## Official execution roster
 - Stark / Hermes: backend/core implementation — Go runtime, API, HTTP/WebSocket, telephony/AudioSocket boundaries and internal services.
 - Neriel / OpenClaw: domain/business logic — state machines, domain rules, agent behavior and tool orchestration.
-- Arquimedes / Antigravity: infrastructure/integrations — Redis, RabbitMQ, Docker/deploy, operational contracts and external integrations.
+- Arquimedes / OpenCode: infrastructure/integrations — Redis, RabbitMQ, Docker/deploy, operational contracts and external integrations.
 - Anorak / Reviewer: validates specs, actual diff, tests, regression, evidence and scope. Reviewer does not execute implementation microtasks.
 
 Cursor is retired from task execution and must not be assigned as owner of new microtasks.
@@ -71,7 +71,7 @@ Rules:
 
 ## Arquimedes execution mandate
 
-When a GRU is assigned to Arquimedes / Antigravity, Arquimedes MUST execute the task end-to-end.
+When a GRU is assigned to Arquimedes / OpenCode, Arquimedes MUST execute the task end-to-end.
 
 Analysis, diagnosis, planning, recommendations, command lists, or instructions-only output do not satisfy the task.
 

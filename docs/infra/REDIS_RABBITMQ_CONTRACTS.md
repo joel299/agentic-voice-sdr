@@ -2,7 +2,7 @@
 
 **Issue:** GRU-57 — Define Redis + RabbitMQ low-latency infrastructure
 **Architectural Baseline:** ADR-002, SDD v1.0, PRD v1.0
-**Owner:** Antigravity / Arquimedes
+**Owner:** Arquimedes / OpenCode (historical documents may refer to the former Antigravity persona)
 **Reviewer:** Anorak
 **Status:** In Review
 

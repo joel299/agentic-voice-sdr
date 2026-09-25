@@ -210,7 +210,7 @@ func (c *Client) CreateEvent(ctx context.Context, request CreateEventRequest) (C
 	if err != nil {
 		return CreatedEvent{}, err
 	}
-	result, err := parseCreatedEvent(data, request.Timezone, loc)
+	result, err := parseCreatedEvent(data, request.Timezone)
 	if err != nil {
 		return CreatedEvent{}, ErrCalendarInvalidResponse
 	}
@@ -436,7 +436,7 @@ type eventData struct {
 	End          providerEventTime `json:"end"`
 }
 
-func parseCreatedEvent(data json.RawMessage, requestedTimezone string, loc *time.Location) (CreatedEvent, error) {
+func parseCreatedEvent(data json.RawMessage, requestedTimezone string) (CreatedEvent, error) {
 	var wrapper eventData
 	if json.Unmarshal(data, &wrapper) != nil {
 		return CreatedEvent{}, ErrCalendarInvalidResponse
@@ -451,25 +451,31 @@ func parseCreatedEvent(data json.RawMessage, requestedTimezone string, loc *time
 	if event == nil || strings.TrimSpace(event.ID) == "" {
 		return CreatedEvent{}, ErrCalendarInvalidResponse
 	}
-	start, err := parseProviderTime(event.Start.DateTime, loc)
-	if err != nil {
-		return CreatedEvent{}, err
-	}
-	end, err := parseProviderTime(event.End.DateTime, loc)
-	if err != nil || !end.After(start) {
+	startTimezone := strings.TrimSpace(event.Start.Timezone)
+	endTimezone := strings.TrimSpace(event.End.Timezone)
+	if startTimezone != "" && endTimezone != "" && startTimezone != endTimezone {
 		return CreatedEvent{}, ErrCalendarInvalidResponse
 	}
-	start = start.In(loc)
-	end = end.In(loc)
-	timezone := strings.TrimSpace(event.Start.Timezone)
+	timezone := startTimezone
 	if timezone == "" {
-		timezone = strings.TrimSpace(event.End.Timezone)
+		timezone = endTimezone
 	}
 	if timezone == "" {
 		timezone = requestedTimezone
 	}
-	if _, err := time.LoadLocation(timezone); err != nil {
+	responseLoc, err := time.LoadLocation(timezone)
+	if err != nil {
 		return CreatedEvent{}, ErrCalendarInvalidResponse
 	}
+	start, err := parseProviderTime(event.Start.DateTime, responseLoc)
+	if err != nil {
+		return CreatedEvent{}, ErrCalendarInvalidResponse
+	}
+	end, err := parseProviderTime(event.End.DateTime, responseLoc)
+	if err != nil || !end.After(start) {
+		return CreatedEvent{}, ErrCalendarInvalidResponse
+	}
+	start = start.In(responseLoc)
+	end = end.In(responseLoc)
 	return CreatedEvent{Created: true, ID: event.ID, Summary: event.Summary, Start: start, End: end, Timezone: timezone}, nil
 }

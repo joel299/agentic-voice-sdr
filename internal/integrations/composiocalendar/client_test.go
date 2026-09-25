@@ -363,3 +363,141 @@ func TestAvailabilityRejectsMissingRequestedCalendar(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestCreateEventUsesProviderTimezoneConsistently(t *testing.T) {
+	tests := []struct {
+		name            string
+		requestTimezone string
+		startTimezone   string
+		endTimezone     string
+		start           string
+		end             string
+		wantTimezone    string
+		wantStart       string
+		wantEnd         string
+		wantError       error
+	}{
+		{
+			name:            "provider UTC differs from request timezone",
+			requestTimezone: "Europe/Paris",
+			startTimezone:   "UTC",
+			endTimezone:     "UTC",
+			start:           "2026-01-05T09:00:00Z",
+			end:             "2026-01-05T09:45:00Z",
+			wantTimezone:    "UTC",
+			wantStart:       "2026-01-05T09:00:00Z",
+			wantEnd:         "2026-01-05T09:45:00Z",
+		},
+		{
+			name:            "provider New York timezone differs from request",
+			requestTimezone: "America/Campo_Grande",
+			startTimezone:   "America/New_York",
+			endTimezone:     "America/New_York",
+			start:           "2026-01-05T09:00:00-05:00",
+			end:             "2026-01-05T09:45:00-05:00",
+			wantTimezone:    "America/New_York",
+			wantStart:       "2026-01-05T09:00:00-05:00",
+			wantEnd:         "2026-01-05T09:45:00-05:00",
+		},
+		{
+			name:            "end timezone is used when start timezone is absent",
+			requestTimezone: "America/Campo_Grande",
+			endTimezone:     "America/New_York",
+			start:           "2026-01-05T09:00:00",
+			end:             "2026-01-05T09:45:00",
+			wantTimezone:    "America/New_York",
+			wantStart:       "2026-01-05T09:00:00-05:00",
+			wantEnd:         "2026-01-05T09:45:00-05:00",
+		},
+		{
+			name:            "missing provider timezone falls back to request",
+			requestTimezone: "America/Campo_Grande",
+			start:           "2026-01-05T09:00:00",
+			end:             "2026-01-05T09:45:00",
+			wantTimezone:    "America/Campo_Grande",
+			wantStart:       "2026-01-05T09:00:00-04:00",
+			wantEnd:         "2026-01-05T09:45:00-04:00",
+		},
+		{
+			name:            "invalid provider timezone",
+			requestTimezone: "Europe/Paris",
+			startTimezone:   "Invalid/Timezone",
+			endTimezone:     "Invalid/Timezone",
+			start:           "2026-01-05T09:00:00Z",
+			end:             "2026-01-05T09:45:00Z",
+			wantError:       ErrCalendarInvalidResponse,
+		},
+		{
+			name:            "conflicting start and end timezones",
+			requestTimezone: "Europe/Paris",
+			startTimezone:   "UTC",
+			endTimezone:     "Europe/Paris",
+			start:           "2026-01-05T09:00:00Z",
+			end:             "2026-01-05T09:45:00+01:00",
+			wantError:       ErrCalendarInvalidResponse,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				event := map[string]any{
+					"id":      "event-timezone-test",
+					"summary": "Timezone test",
+					"start":   map[string]string{"dateTime": tc.start, "timeZone": tc.startTimezone},
+					"end":     map[string]string{"dateTime": tc.end, "timeZone": tc.endTimezone},
+				}
+				_, _ = io.WriteString(w, calendarEnvelope(map[string]any{"response_data": event}, true, ""))
+			}))
+			defer server.Close()
+			client, err := New(calendarTestConfig(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestLoc, err := time.LoadLocation(tc.requestTimezone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Date(2026, 1, 5, 9, 0, 0, 0, requestLoc)
+			got, err := client.CreateEvent(context.Background(), CreateEventRequest{
+				Start: start, End: start.Add(45 * time.Minute), Timezone: tc.requestTimezone,
+				CalendarID: "primary", Summary: "Timezone test",
+			})
+			if tc.wantError != nil {
+				if !errors.Is(err, tc.wantError) {
+					t.Fatalf("error = %v, want %v", err, tc.wantError)
+				}
+				if strings.Contains(err.Error(), "Invalid/Timezone") {
+					t.Fatalf("provider timezone leaked in error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotLoc, err := time.LoadLocation(tc.wantTimezone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Timezone != tc.wantTimezone {
+				t.Fatalf("timezone = %q, want %q", got.Timezone, tc.wantTimezone)
+			}
+			if got.Start.Location().String() != tc.wantTimezone || got.End.Location().String() != tc.wantTimezone {
+				t.Fatalf("locations = %q/%q, want %q", got.Start.Location(), got.End.Location(), tc.wantTimezone)
+			}
+			if got.Start.Format("2006-01-02T15:04:05Z07:00") != tc.wantStart || got.End.Format("2006-01-02T15:04:05Z07:00") != tc.wantEnd {
+				t.Fatalf("times = %s / %s, want %s / %s", got.Start.Format(time.RFC3339), got.End.Format(time.RFC3339), tc.wantStart, tc.wantEnd)
+			}
+			providerStart, err := parseProviderTime(tc.start, gotLoc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerEnd, err := parseProviderTime(tc.end, gotLoc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Start.Equal(providerStart) || !got.End.Equal(providerEnd) {
+				t.Fatalf("instants changed: got %s/%s, provider %s/%s", got.Start, got.End, providerStart, providerEnd)
+			}
+		})
+	}
+}

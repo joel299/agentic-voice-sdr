@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -179,6 +178,12 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	}
 	responseBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
+		if ctx.Err() != nil {
+			return conversation.Decision{}, ctx.Err()
+		}
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			return conversation.Decision{}, ErrTimeout
+		}
 		return conversation.Decision{}, ErrTransport
 	}
 	if len(responseBytes) == 0 || len(responseBytes) > maxResponseSize {
@@ -200,7 +205,7 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	}
 	decision, err := conversation.NewDecision(parsed.NextAction, parsed.Reason)
 	if err != nil {
-		return conversation.Decision{}, fmt.Errorf("%w: %w", ErrInvalidProviderResponse, err)
+		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
 	return decision, nil
 }

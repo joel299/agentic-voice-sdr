@@ -208,3 +208,119 @@ func TestConfigFromEnvRequiresExplicitModel(t *testing.T) {
 		t.Fatalf("config = %+v", config)
 	}
 }
+
+func stalledBodyServer(t *testing.T) (*httptest.Server, <-chan struct{}, chan struct{}) {
+	t.Helper()
+	headersSent := make(chan struct{})
+	releaseBody := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(headersSent)
+		<-releaseBody
+		_, _ = io.WriteString(w, `{"choices":[]}`)
+	}))
+	return server, headersSent, releaseBody
+}
+
+func TestBodyReadTimeoutAfterHeaders(t *testing.T) {
+	server, headersSent, releaseBody := stalledBodyServer(t)
+	defer server.Close()
+	defer close(releaseBody)
+	client, err := NewWithTimeout(testConfig(server.URL), 40*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := client.Decide(context.Background(), activeInput()); done <- err }()
+	<-headersSent
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("error = %v, want ErrTimeout", err)
+		}
+		if errors.Is(err, ErrTransport) {
+			t.Fatalf("body timeout misclassified as transport: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("body read did not honor timeout")
+	}
+}
+
+func TestCallerCancellationAfterHeadersDuringBodyRead(t *testing.T) {
+	server, headersSent, releaseBody := stalledBodyServer(t)
+	defer server.Close()
+	defer close(releaseBody)
+	client, err := NewWithTimeout(testConfig(server.URL), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := client.Decide(ctx, activeInput()); done <- err }()
+	<-headersSent
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want caller cancellation", err)
+		}
+		if errors.Is(err, ErrTransport) {
+			t.Fatalf("caller cancellation misclassified as transport: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("body read did not honor caller cancellation")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type failingBody struct{}
+
+func (failingBody) Read([]byte) (int, error) { return 0, errors.New("synthetic body read failure") }
+func (failingBody) Close() error             { return nil }
+
+func TestBodyReadTransportErrorWithoutContextError(t *testing.T) {
+	client, err := New(testConfig("https://openrouter.ai/api/v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: failingBody{}}, nil
+	})
+	_, err = client.Decide(context.Background(), activeInput())
+	if !errors.Is(err, ErrTransport) {
+		t.Fatalf("error = %v, want ErrTransport", err)
+	}
+}
+
+func TestInvalidProviderDecisionValuesAreSanitized(t *testing.T) {
+	for _, tc := range []struct{ name, action, reason string }{
+		{name: "malicious action", action: "ATTACKER-CONTROLLED\nVALUE", reason: "needs_clarification"},
+		{name: "malicious reason", action: "ask_question", reason: "ATTACKER-CONTROLLED\nVALUE"},
+		{name: "large action", action: "ATTACKER-CONTROLLED-" + strings.Repeat("x", 4096), reason: "needs_clarification"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content, err := json.Marshal(map[string]string{"next_action": tc.action, "reason": tc.reason})
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, providerBody(string(content))) }))
+			defer server.Close()
+			client, err := New(testConfig(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Decide(context.Background(), activeInput())
+			if !errors.Is(err, ErrInvalidProviderResponse) {
+				t.Fatalf("error = %v, want ErrInvalidProviderResponse", err)
+			}
+			if strings.Contains(err.Error(), "ATTACKER-CONTROLLED") || strings.Contains(err.Error(), tc.action) || strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("provider-controlled value exposed: %q", err.Error())
+			}
+		})
+	}
+}

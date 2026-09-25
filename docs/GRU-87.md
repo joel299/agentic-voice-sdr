@@ -2,15 +2,44 @@
 
 ## Execution evidence
 
-- Environment: `LOCAL`
-- Remote VPS/SSH: `NOT USED`
-- Official reference: Google AI for Developers, [raw WebSockets](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket), retrieved during implementation.
-- Endpoint contract: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=...`
-- Configurable model: `GEMINI_LIVE_MODEL`; documented default at implementation time: `gemini-3.8-live`.
+- Environment: `Stark VPS` (`vultr`), existing branch worktree `/root/work/gru81`.
+- Branch: `agent/hermes/gemini-live-session-boundary`.
+- Final head: `da340d032ab62247589fc33c19d70184ffeb6032`.
+- PR: #50.
+- Official reference: Google AI for Developers, [raw WebSockets](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket), retrieved during validation.
+- Endpoint class: Gemini Live BidiGenerateContent WSS; API key used only in process memory from the authorized runtime document and never logged.
+- Production model smoke: `gemini-3.8-live`.
+- Input transcription smoke: `gemini-3.5-transcribe-live` with `TEXT` response modality.
 - Input contract: raw PCM16 mono little-endian at 16 kHz, sent as `audio/pcm;rate=16000`.
-- Output contract: decoded raw PCM audio event, expected `audio/pcm;rate=24000`.
+- Output contract: decoded raw PCM audio event, observed `audio/pcm;rate=24000`.
 
-## Local TDD gate
+## Real Gemini Live smoke
+
+- WSS authentication/connection: PASS.
+- Setup acknowledgement: PASS (`setupComplete`).
+- Text input: PASS; real output transcription received.
+- PCM16/16 kHz input: PASS; real audio stream accepted by Live API.
+- PCM16/24 kHz output: PASS; real audio events received with `audio/pcm;rate=24000`.
+- Input transcription: PASS; real interim input transcription events received from the transcription model.
+- Output transcription: PASS; real output transcription events received.
+- Interruption: PASS; sending real input while model audio was streaming produced `interrupted`.
+- Turn complete: PASS; real `turnComplete` event observed in the text/audio smoke.
+- Tool-call parsing: PASS; real `toolCall` parsed as `schedule` with arguments; execution was intentionally not performed.
+- Raw PCM persisted: `NO`.
+- Secrets exposed: `NO`.
+
+## Boundary corrections made
+
+- Moved response modalities into the current `generationConfig` envelope required by the live endpoint.
+- Accepted JSON payloads delivered in binary WebSocket frames.
+- Added typed function declarations for real tool-call setup/parsing.
+- Added configurable response modalities for the transcription smoke.
+- Parsed interim and final input transcription event variants.
+- Added an activity-end message for client-side VAD boundaries.
+
+## Regression gates
+
+`go mod download`: PASS
 
 `go test -count=1 ./...`: PASS
 
@@ -22,12 +51,4 @@
 
 `git diff --check`: PASS
 
-The local fake WebSocket contract covers setup ordering/acknowledgement, text, PCM audio, output audio, transcription, interruption, tool-call parsing without execution, malformed/unknown protocol handling, cancellation, secret redaction, concurrent writer ownership, and graceful close.
-
-## Real gate
-
-`GEMINI_API_KEY` was checked for presence only and is absent in the LOCAL environment.
-
-`HUMAN_GATE: GEMINI_API_KEY absent in LOCAL environment`
-
-No remote lookup, SSH, VPS access, secret retrieval, or fabricated real PASS was performed. The real Gemini Live WSS smoke test remains blocked until the key is made available locally.
+The local fake WebSocket contract remains green and now also covers the current setup envelope, tool declaration, and interim input transcription parsing. No AudioSocket bridge, resampling, SIP/Asterisk, dispatcher, persistence, Redis, RabbitMQ, n8n, Composio, or WhatsApp work was added.

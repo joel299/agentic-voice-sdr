@@ -102,12 +102,16 @@ fi
 
 # Run the canonical constraint/transaction/index harness against the same
 # PostgreSQL instance and database through libpq environment variables.
-PGHOST=127.0.0.1 \
-PGPORT="${POSTGRES_PORT}" \
-PGUSER="${POSTGRES_USER}" \
-PGPASSWORD="${POSTGRES_PASSWORD}" \
-PGDATABASE="${POSTGRES_DB}" \
-  "${SCRIPT_DIR}/test-transactional-outbox.sh"
+(
+  # Ensure the canonical harness cannot be redirected by an inherited URL.
+  unset DATABASE_URL
+  PGHOST=127.0.0.1 \
+  PGPORT="${POSTGRES_PORT}" \
+  PGUSER="${POSTGRES_USER}" \
+  PGPASSWORD="${POSTGRES_PASSWORD}" \
+  PGDATABASE="${POSTGRES_DB}" \
+    "${SCRIPT_DIR}/test-transactional-outbox.sh"
+)
 echo "[+] Canonical transactional Outbox contract harness: PASS."
 
 SMOKE_EVENT_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \

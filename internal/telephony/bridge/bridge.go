@@ -21,6 +21,7 @@ var (
 	ErrProviderAPI         = errors.New("bridge: Gemini API error")
 	ErrReceiveFailed       = errors.New("bridge: Gemini receive failed")
 	ErrSessionClosed       = errors.New("bridge: Gemini session closed")
+	ErrAudioOutputFailed   = errors.New("bridge: Gemini audio output failed")
 )
 
 type AudioReader interface {
@@ -41,9 +42,13 @@ type GeminiSession interface {
 type EventHandler func(context.Context, geminilive.Event) error
 
 type ResponseLifecycle interface {
+	CaptureActive() ResponseTurnLease
+}
+
+type ResponseTurnLease interface {
 	ModelAudioAuthorized() bool
-	CompleteActive(context.Context) error
-	FailActive(context.Context, error) error
+	Complete(context.Context) error
+	Fail(context.Context, error) error
 }
 
 type Bridge struct {
@@ -216,43 +221,91 @@ func (b *Bridge) runIngress(ctx context.Context, markAudioSent func()) error {
 	}
 }
 
+type providerTurnDisposition uint8
+
+const (
+	providerTurnIdle providerTurnDisposition = iota
+	providerTurnDenied
+	providerTurnOwned
+)
+
 func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
+	disposition := providerTurnIdle
+	var lease ResponseTurnLease
+	beginProviderTurn := func() {
+		if disposition != providerTurnIdle {
+			return
+		}
+		if b.lifecycle == nil {
+			disposition = providerTurnDenied
+			return
+		}
+		lease = b.lifecycle.CaptureActive()
+		if lease == nil {
+			disposition = providerTurnDenied
+			return
+		}
+		disposition = providerTurnOwned
+	}
+	resetProviderTurn := func() {
+		disposition = providerTurnIdle
+		lease = nil
+	}
+	failProviderTurn := func(reason error) {
+		if disposition == providerTurnOwned {
+			_ = lease.Fail(ctx, reason)
+		}
+		resetProviderTurn()
+	}
+	completeProviderTurn := func() error {
+		if disposition != providerTurnOwned {
+			resetProviderTurn()
+			return nil
+		}
+		err := lease.Complete(ctx)
+		resetProviderTurn()
+		return err
+	}
+
 	for {
 		event, err := b.gemini.Receive(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			b.failActive(ctx, ErrReceiveFailed)
+			failProviderTurn(ErrReceiveFailed)
 			return err
 		}
 		if event.Kind == geminilive.EventAudio {
 			if event.AudioMimeType != "audio/pcm;rate=24000" {
 				return fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType)
 			}
-			if len(event.Audio) == 0 || b.lifecycle == nil || !b.lifecycle.ModelAudioAuthorized() {
+			beginProviderTurn()
+			if len(event.Audio) == 0 || disposition != providerTurnOwned || !lease.ModelAudioAuthorized() {
 				continue
 			}
 			if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+				failProviderTurn(ErrAudioOutputFailed)
 				return err
 			}
 			continue
 		}
+		if event.Kind == geminilive.EventOutputTranscription || event.Kind == geminilive.EventToolCall {
+			beginProviderTurn()
+		}
 		if event.Kind == geminilive.EventTurnComplete {
-			if b.lifecycle != nil {
-				if err := b.lifecycle.CompleteActive(ctx); err != nil {
-					return err
-				}
+			if err := completeProviderTurn(); err != nil {
+				return err
 			}
 		}
 		if event.Kind == geminilive.EventInterrupted {
-			b.failActive(ctx, ErrResponseInterrupted)
+			failProviderTurn(ErrResponseInterrupted)
 		}
 		if event.Kind == geminilive.EventAPIError {
-			b.failActive(ctx, ErrProviderAPI)
+			failProviderTurn(ErrProviderAPI)
 		}
 		if event.Kind == geminilive.EventClosed {
-			b.failActive(ctx, ErrSessionClosed)
+			failProviderTurn(ErrSessionClosed)
 		}
 		if b.handler != nil {
 			if err := b.handler(ctx, event); err != nil {
@@ -268,12 +321,6 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			// watcher ends the session only after the latest sent input is
 			// covered, so a stale completion can never stop Receive.
 		}
-	}
-}
-
-func (b *Bridge) failActive(ctx context.Context, reason error) {
-	if b.lifecycle != nil {
-		_ = b.lifecycle.FailActive(ctx, reason)
 	}
 }
 

@@ -143,4 +143,25 @@ func TestParseUnknownAndMalformedServerMessages(t *testing.T) {
 	if parseAPIError(map[string]json.RawMessage{"error": json.RawMessage(`{"message":"secret detail"}`)}) != "secret detail" {
 		t.Fatal("API error parser")
 	}
+	if got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"interimInputTranscription":{"text":"hello"}}`)}); got.Kind != EventInputTranscription || got.Text != "hello" {
+		t.Fatalf("interim input transcription: %+v", got)
+	}
+}
+
+func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
+	msg := setupMessage(Config{Model: "test-model", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}})
+	setup, ok := msg["setup"].(map[string]any)
+	if !ok {
+		t.Fatal("setup envelope missing")
+	}
+	generation, ok := setup["generationConfig"].(map[string]any)
+	if !ok || generation["responseModalities"] == nil {
+		t.Fatalf("generation config missing: %#v", setup)
+	}
+	if _, ok := setup["tools"]; !ok {
+		t.Fatal("tools missing from setup")
+	}
+	if _, ok := setup["responseModalities"]; ok {
+		t.Fatal("response modalities must be nested in generationConfig")
+	}
 }

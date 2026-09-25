@@ -24,10 +24,22 @@ const (
 var ErrNotReady = errors.New("geminilive: session is not ready")
 
 type Config struct {
-	APIKey            string
-	Model             string
-	Endpoint          string
-	SystemInstruction string
+	APIKey             string
+	Model              string
+	Endpoint           string
+	SystemInstruction  string
+	Tools              []ToolDefinition
+	ResponseModalities []string
+}
+
+type ToolDefinition struct {
+	FunctionDeclarations []FunctionDeclaration `json:"functionDeclarations"`
+}
+
+type FunctionDeclaration struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
 func ConfigFromEnv() Config {
@@ -40,6 +52,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Endpoint == "" {
 		c.Endpoint = DefaultEndpoint
+	}
+	if len(c.ResponseModalities) == 0 {
+		c.ResponseModalities = []string{"AUDIO"}
 	}
 	return c
 }
@@ -177,7 +192,19 @@ func (s *Session) sendJSON(ctx context.Context, message any) error {
 }
 
 func setupMessage(cfg Config) map[string]any {
-	setup := map[string]any{"model": "models/" + cfg.Model, "responseModalities": []string{"AUDIO"}, "inputAudioTranscription": map[string]any{}, "outputAudioTranscription": map[string]any{}}
+	// Gemini Live expects generationConfig, rather than responseModalities and
+	// transcription settings directly under setup.
+	setup := map[string]any{
+		"model": "models/" + cfg.Model,
+		"generationConfig": map[string]any{
+			"responseModalities": cfg.ResponseModalities,
+		},
+		"inputAudioTranscription":  map[string]any{},
+		"outputAudioTranscription": map[string]any{},
+	}
+	if len(cfg.Tools) > 0 {
+		setup["tools"] = cfg.Tools
+	}
 	if strings.TrimSpace(cfg.SystemInstruction) != "" {
 		setup["systemInstruction"] = map[string]any{"parts": []map[string]string{{"text": cfg.SystemInstruction}}}
 	}
@@ -195,6 +222,12 @@ func (s *Session) SendAudio(ctx context.Context, pcm16k []byte) error {
 		return errors.New("geminilive: audio is empty")
 	}
 	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"audio": map[string]any{"data": base64.StdEncoding.EncodeToString(pcm16k), "mimeType": "audio/pcm;rate=16000"}}})
+}
+
+// EndAudio signals the end of a realtime audio activity when client-side
+// voice activity detection is used by the provider.
+func (s *Session) EndAudio(ctx context.Context) error {
+	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"activityEnd": map[string]any{}}})
 }
 func (s *Session) send(ctx context.Context, message any) error {
 	if s == nil || s.conn == nil {
@@ -225,8 +258,8 @@ func (s *Session) readJSON(ctx context.Context) (map[string]json.RawMessage, err
 		}
 		return nil, wrap(ErrorReceive, errors.New("WebSocket read failed"))
 	}
-	if typ != websocket.MessageText {
-		return nil, wrap(ErrorProtocol, errors.New("unexpected binary server frame"))
+	if typ != websocket.MessageText && typ != websocket.MessageBinary {
+		return nil, wrap(ErrorProtocol, errors.New("unexpected WebSocket frame type"))
 	}
 	var msg map[string]json.RawMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -286,6 +319,12 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 			InputTranscription struct {
 				Text string `json:"text"`
 			} `json:"inputTranscription"`
+			InterimInputTranscription struct {
+				Text string `json:"text"`
+			} `json:"interimInputTranscription"`
+			FinalInputTranscription struct {
+				Text string `json:"text"`
+			} `json:"finalInputTranscription"`
 			OutputTranscription struct {
 				Text string `json:"text"`
 			} `json:"outputTranscription"`
@@ -298,6 +337,12 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 			}
 			if c.InputTranscription.Text != "" {
 				return Event{Kind: EventInputTranscription, Text: c.InputTranscription.Text}
+			}
+			if c.InterimInputTranscription.Text != "" {
+				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text}
+			}
+			if c.FinalInputTranscription.Text != "" {
+				return Event{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text}
 			}
 			if c.OutputTranscription.Text != "" {
 				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text}

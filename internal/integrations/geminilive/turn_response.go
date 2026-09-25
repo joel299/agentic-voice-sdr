@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/tools"
 )
 
 const MaxTurnInstructionBytes = 2048
@@ -14,6 +15,7 @@ const MaxTurnInstructionBytes = 2048
 var (
 	ErrTurnInstructionTooLarge = errors.New("geminilive: turn instruction exceeds limit")
 	ErrInvalidTurnResponse     = errors.New("geminilive: invalid turn response")
+	ErrNilTurnContext          = errors.New("geminilive: turn context is nil")
 )
 
 type turnInstruction struct {
@@ -43,6 +45,10 @@ func RenderTurnDirective(directive conversation.TurnDirective) (string, error) {
 		ExecutionState: "not_applicable",
 	}
 	if directive.Capability != "" {
+		if len([]byte(directive.Capability)) > MaxTurnInstructionBytes {
+			return "", ErrTurnInstructionTooLarge
+		}
+		outcome.Capability = canonicalCapabilityOrUnknown(directive.Capability)
 		switch directive.CapabilityStatus {
 		case conversation.PolicyAllow:
 			outcome.ExecutionState = "pending"
@@ -65,10 +71,19 @@ func RenderTurnDirective(directive conversation.TurnDirective) (string, error) {
 	return instruction, nil
 }
 
+func canonicalCapabilityOrUnknown(capability string) string {
+	for _, canonical := range tools.InitialToolNames() {
+		if capability == canonical {
+			return canonical
+		}
+	}
+	return "unknown"
+}
+
 // SendTurnDirective renders and sends exactly one discrete Gemini response turn.
 func (s *Session) SendTurnDirective(ctx context.Context, directive conversation.TurnDirective) error {
 	if ctx == nil {
-		ctx = context.Background()
+		return fmt.Errorf("%w: %w", ErrInvalidTurnResponse, ErrNilTurnContext)
 	}
 	if err := ctx.Err(); err != nil {
 		return err

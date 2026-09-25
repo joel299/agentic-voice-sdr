@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"testing"
+	"time"
 )
 
 type oneByteReader struct {
@@ -131,6 +133,31 @@ func TestStreamPropagatesWriterError(t *testing.T) {
 	stream := NewStream(bytes.NewReader(nil), failWriter{})
 	if err := stream.WriteFrame(Frame{Type: TypeHangup}); err == nil || err.Error() != "writer failed" {
 		t.Fatalf("err=%v want writer failed", err)
+	}
+}
+
+func TestStreamCloseUnblocksBlockedReadAndIsIdempotent(t *testing.T) {
+	peer, conn := net.Pipe()
+	defer peer.Close()
+	stream := NewStream(conn, conn)
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := stream.ReadFrame()
+		readDone <- err
+	}()
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("blocked ReadFrame returned nil after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock ReadFrame")
 	}
 }
 

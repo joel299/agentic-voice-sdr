@@ -236,6 +236,23 @@ func setupMessage(cfg Config) map[string]any {
 	return map[string]any{"setup": setup}
 }
 
+// SendClientContent sends one discrete user turn and marks it complete. It is
+// intentionally separate from realtimeInput, which is reserved for streaming.
+func (s *Session) SendClientContent(ctx context.Context, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("geminilive: client content is empty")
+	}
+	return s.send(ctx, map[string]any{
+		"clientContent": map[string]any{
+			"turns": []map[string]any{{
+				"role":  "user",
+				"parts": []map[string]string{{"text": text}},
+			}},
+			"turnComplete": true,
+		},
+	})
+}
+
 func (s *Session) SendText(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("geminilive: text is empty")

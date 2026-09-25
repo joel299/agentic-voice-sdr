@@ -83,20 +83,26 @@ func (r *Recorder) Record(metric Metric, start, end time.Time) bool {
 	}
 }
 
-// Drain removes and returns all currently queued observations without waiting.
+// Drain removes at most the observations queued at entry without waiting.
 func (r *Recorder) Drain() []Observation {
 	if r == nil {
 		return nil
 	}
-	observations := make([]Observation, 0, len(r.queue))
-	for {
+	initialDepth := len(r.queue)
+	return drainQueue(r.queue, initialDepth)
+}
+
+func drainQueue(queue <-chan Observation, limit int) []Observation {
+	observations := make([]Observation, 0, limit)
+	for i := 0; i < limit; i++ {
 		select {
-		case observation := <-r.queue:
+		case observation := <-queue:
 			observations = append(observations, observation)
 		default:
 			return observations
 		}
 	}
+	return observations
 }
 
 // Dropped returns the number of observations discarded because the queue was

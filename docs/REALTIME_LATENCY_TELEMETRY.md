@@ -36,8 +36,11 @@ for a consumer and performs no filesystem, database, broker, or network I/O. A
 full queue drops the observation rather than applying backpressure; consumers
 must inspect `Dropped()` to understand data loss. `Drain()` is intended for a
 non-realtime consumer and may allocate, so it must not run in the PCM loop.
-Queue capacity is caller-configured and in-memory only; no worker or external
-exporter is started here.
+Each `Drain()` captures the queue depth at entry and consumes at most that
+snapshot; observations arriving during the call remain queued for a later drain,
+so active producers cannot extend it indefinitely. Queue capacity is
+caller-configured and in-memory only; no worker or external exporter is started
+here.
 
 Consumers may later aggregate samples into P50, P95, and P99, provided they
 preserve the metric definitions and account for dropped samples. No aggregation,

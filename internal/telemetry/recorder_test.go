@@ -138,3 +138,35 @@ func TestTimerConcurrentFinishRecordsOnce(t *testing.T) {
 		t.Fatalf("recorded samples = %d, want 1", got)
 	}
 }
+
+func TestDrainIsBoundedToInitialQueueDepth(t *testing.T) {
+	r := NewRecorder(3)
+	start := time.Now()
+	for _, duration := range []time.Duration{time.Millisecond, 2 * time.Millisecond} {
+		if !r.Record(MetricTurnLatency, start, start.Add(duration)) {
+			t.Fatal("failed to queue initial observation")
+		}
+	}
+
+	initialDepth := len(r.queue)
+	if initialDepth != 2 {
+		t.Fatalf("initial queue depth = %d, want 2", initialDepth)
+	}
+	if !r.Record(MetricFirstAudio, start, start.Add(3*time.Millisecond)) {
+		t.Fatal("failed to queue observation added after the snapshot")
+	}
+
+	got := drainQueue(r.queue, initialDepth)
+	if len(got) > initialDepth {
+		t.Fatalf("drain returned %d observations; initial queue depth was %d", len(got), initialDepth)
+	}
+	if len(got) != initialDepth {
+		t.Fatalf("drain returned %d initial observations, want %d", len(got), initialDepth)
+	}
+	if remaining := len(r.queue); remaining != 1 {
+		t.Fatalf("queue has %d observations after drain, want the post-snapshot observation to remain", remaining)
+	}
+	if next := r.Drain(); len(next) != 1 || next[0].Metric != MetricFirstAudio {
+		t.Fatalf("next drain = %#v, want the post-snapshot observation", next)
+	}
+}

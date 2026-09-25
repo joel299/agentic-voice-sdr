@@ -15,8 +15,12 @@ import (
 )
 
 var (
-	ErrNilDependency      = errors.New("bridge: nil dependency")
-	ErrFormatIncompatible = errors.New("bridge: incompatible audio format")
+	ErrNilDependency       = errors.New("bridge: nil dependency")
+	ErrFormatIncompatible  = errors.New("bridge: incompatible audio format")
+	ErrResponseInterrupted = errors.New("bridge: Gemini response interrupted")
+	ErrProviderAPI         = errors.New("bridge: Gemini API error")
+	ErrReceiveFailed       = errors.New("bridge: Gemini receive failed")
+	ErrSessionClosed       = errors.New("bridge: Gemini session closed")
 )
 
 type AudioReader interface {
@@ -36,15 +40,26 @@ type GeminiSession interface {
 
 type EventHandler func(context.Context, geminilive.Event) error
 
-type Bridge struct {
-	input   AudioReader
-	output  AudioWriter
-	gemini  GeminiSession
-	handler EventHandler
+type ResponseLifecycle interface {
+	ModelAudioAuthorized() bool
+	CompleteActive(context.Context) error
+	FailActive(context.Context, error) error
 }
 
-func New(input AudioReader, output AudioWriter, gemini GeminiSession, handler EventHandler) *Bridge {
-	return &Bridge{input: input, output: output, gemini: gemini, handler: handler}
+type Bridge struct {
+	input     AudioReader
+	output    AudioWriter
+	gemini    GeminiSession
+	handler   EventHandler
+	lifecycle ResponseLifecycle
+}
+
+func New(input AudioReader, output AudioWriter, gemini GeminiSession, handler EventHandler, lifecycle ...ResponseLifecycle) *Bridge {
+	var responseLifecycle ResponseLifecycle
+	if len(lifecycle) > 0 {
+		responseLifecycle = lifecycle[0]
+	}
+	return &Bridge{input: input, output: output, gemini: gemini, handler: handler, lifecycle: responseLifecycle}
 }
 
 // Run connects both realtime directions until the session completes, one side
@@ -208,18 +223,36 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			b.failActive(ctx, ErrReceiveFailed)
 			return err
 		}
 		if event.Kind == geminilive.EventAudio {
 			if event.AudioMimeType != "audio/pcm;rate=24000" {
 				return fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType)
 			}
-			if len(event.Audio) > 0 {
-				if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+			if len(event.Audio) == 0 || b.lifecycle == nil || !b.lifecycle.ModelAudioAuthorized() {
+				continue
+			}
+			if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+				return err
+			}
+			continue
+		}
+		if event.Kind == geminilive.EventTurnComplete {
+			if b.lifecycle != nil {
+				if err := b.lifecycle.CompleteActive(ctx); err != nil {
 					return err
 				}
 			}
-			continue
+		}
+		if event.Kind == geminilive.EventInterrupted {
+			b.failActive(ctx, ErrResponseInterrupted)
+		}
+		if event.Kind == geminilive.EventAPIError {
+			b.failActive(ctx, ErrProviderAPI)
+		}
+		if event.Kind == geminilive.EventClosed {
+			b.failActive(ctx, ErrSessionClosed)
 		}
 		if b.handler != nil {
 			if err := b.handler(ctx, event); err != nil {
@@ -235,6 +268,12 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			// watcher ends the session only after the latest sent input is
 			// covered, so a stale completion can never stop Receive.
 		}
+	}
+}
+
+func (b *Bridge) failActive(ctx context.Context, reason error) {
+	if b.lifecycle != nil {
+		_ = b.lifecycle.FailActive(ctx, reason)
 	}
 }
 

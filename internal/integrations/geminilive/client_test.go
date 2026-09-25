@@ -209,10 +209,66 @@ func TestEndpointTransportPolicy(t *testing.T) {
 	}
 }
 
+func TestParseInputTranscriptFinality(t *testing.T) {
+	tests := []struct {
+		name  string
+		raw   string
+		state InputTranscriptState
+		text  string
+	}{
+		{name: "interim", raw: `{"interimInputTranscription":{"text":"draft"}}`, state: TranscriptInterim, text: "draft"},
+		{name: "final", raw: `{"inputTranscription":{"text":"committed"}}`, state: TranscriptFinal, text: "committed"},
+		{name: "defensive final", raw: `{"finalInputTranscription":{"text":"committed"}}`, state: TranscriptFinal, text: "committed"},
+		{name: "final wins", raw: `{"interimInputTranscription":{"text":"draft"},"inputTranscription":{"text":"committed"}}`, state: TranscriptFinal, text: "committed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(tt.raw)})
+			if got.Kind != EventInputTranscription || got.InputTranscriptState != tt.state || got.Text != tt.text {
+				t.Fatalf("event = %+v, want state %q text %q", got, tt.state, tt.text)
+			}
+		})
+	}
+}
+
+func TestParseInputTranscriptEmptyDoesNotBecomeFinal(t *testing.T) {
+	for _, raw := range []string{
+		`{"interimInputTranscription":{"text":""}}`,
+		`{"inputTranscription":{"text":""}}`,
+		`{"finalInputTranscription":{"text":""}}`,
+	} {
+		got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(raw)})
+		if got.Kind == EventInputTranscription && got.InputTranscriptState == TranscriptFinal {
+			t.Fatalf("empty transcription became final: %+v", got)
+		}
+	}
+}
+
+func TestOutputTurnCompleteAndOtherEventsDoNotSetInputTranscriptState(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		kind EventKind
+	}{
+		{name: "output", raw: `{"outputTranscription":{"text":"response"}}`, kind: EventOutputTranscription},
+		{name: "turn complete", raw: `{"turnComplete":true}`, kind: EventTurnComplete},
+		{name: "audio", raw: `{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm","data":"AQID"}}]}}`, kind: EventAudio},
+		{name: "interrupted", raw: `{"interrupted":true}`, kind: EventInterrupted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(tt.raw)})
+			if got.Kind != tt.kind || got.InputTranscriptState != TranscriptNone {
+				t.Fatalf("event = %+v, want kind %q and no input state", got, tt.kind)
+			}
+		})
+	}
+}
+
 func TestParsePreservesAllToolCalls(t *testing.T) {
 	got := parseEvent(map[string]json.RawMessage{"toolCall": json.RawMessage(`{"functionCalls":[{"id":"1","name":"schedule","args":{"when":"tomorrow"}},{"id":"2","name":"send_message","args":{"text":"hello"}}]}`)})
-	if got.Kind != EventToolCall || len(got.ToolCalls) != 2 {
-		t.Fatalf("tool calls: %+v", got)
+	if got.Kind != EventToolCall || len(got.ToolCalls) != 2 || got.InputTranscriptState != TranscriptNone {
+		t.Fatalf("event = %+v", got)
 	}
 	if got.ToolCalls[0].ID != "1" || got.ToolCalls[0].Name != "schedule" || got.ToolCalls[1].ID != "2" || got.ToolCalls[1].Name != "send_message" {
 		t.Fatalf("tool call order/identity: %+v", got.ToolCalls)

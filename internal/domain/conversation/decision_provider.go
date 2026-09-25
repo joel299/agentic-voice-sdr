@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	ErrInvalidDecisionScript   = errors.New("invalid decision script")
-	ErrDecisionScriptExhausted = errors.New("decision script exhausted")
+	ErrInvalidDecisionScript          = errors.New("invalid decision script")
+	ErrDecisionScriptExhausted        = errors.New("decision script exhausted")
+	ErrInvalidDecisionProviderContext = errors.New("decision provider context must not be nil")
 )
 
 // DecisionProvider supplies a canonical domain decision for a canonical input.
@@ -17,7 +18,7 @@ var (
 // The caller constructs and validates DecisionInput through the domain boundary
 // before calling Decide. Providers decide only the next action and reason; they
 // do not construct conversation state, generate spoken copy, or execute tools.
-// Implementations must respect caller cancellation.
+// The context must be non-nil; implementations must respect caller cancellation.
 type DecisionProvider interface {
 	Decide(ctx context.Context, input DecisionInput) (Decision, error)
 }
@@ -44,7 +45,7 @@ func NewScriptedDecisionProvider(script []Decision) (*ScriptedDecisionProvider, 
 
 func (p *ScriptedDecisionProvider) Decide(ctx context.Context, input DecisionInput) (Decision, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return Decision{}, ErrInvalidDecisionProviderContext
 	}
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err

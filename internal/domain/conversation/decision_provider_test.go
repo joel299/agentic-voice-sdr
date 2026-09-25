@@ -203,3 +203,21 @@ func TestScriptedDecisionProviderAcceptsCanonicalInputFromConversationState(t *t
 		t.Fatalf("decision = %+v, want first scripted decision", decision)
 	}
 }
+
+func TestScriptedDecisionProviderRejectsNilContextWithoutConsumingDecision(t *testing.T) {
+	provider, err := NewScriptedDecisionProvider(scriptedTestDecisions(t))
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+
+	if _, err := provider.Decide(nil, scriptedTestInput()); !errors.Is(err, ErrInvalidDecisionProviderContext) {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidDecisionProviderContext)
+	}
+	decision, err := provider.Decide(context.Background(), scriptedTestInput())
+	if err != nil {
+		t.Fatalf("decision after nil context: %v", err)
+	}
+	if decision.NextAction != ActionAskQuestion || decision.Reason != ReasonNeedsClarification {
+		t.Fatalf("decision = %+v, nil context consumed the first scripted decision", decision)
+	}
+}

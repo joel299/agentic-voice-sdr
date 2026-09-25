@@ -195,6 +195,17 @@ func TestBridgeFailureEventsFailActiveResponse(t *testing.T) {
 	}
 }
 
+func TestBridgeClosedFailsActiveResponse(t *testing.T) {
+	lifecycle := &fakeLifecycle{}
+	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventClosed}}, closed: make(chan struct{})}
+	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {}); err != nil {
+		t.Fatalf("runEgress() error = %v", err)
+	}
+	if len(lifecycle.failures) != 1 || !errors.Is(lifecycle.failures[0], ErrSessionClosed) {
+		t.Fatalf("FailActive calls = %#v, want ErrSessionClosed", lifecycle.failures)
+	}
+}
+
 func TestBridgeReceiveFailureFailsActiveBeforeReturning(t *testing.T) {
 	disconnect := errors.New("provider payload must not escape")
 	lifecycle := &fakeLifecycle{}

@@ -100,6 +100,16 @@ if [[ "${table_exists}" != t ]]; then
   exit 1
 fi
 
+# Run the canonical constraint/transaction/index harness against the same
+# PostgreSQL instance and database through libpq environment variables.
+PGHOST=127.0.0.1 \
+PGPORT="${POSTGRES_PORT}" \
+PGUSER="${POSTGRES_USER}" \
+PGPASSWORD="${POSTGRES_PASSWORD}" \
+PGDATABASE="${POSTGRES_DB}" \
+  "${SCRIPT_DIR}/test-transactional-outbox.sh"
+echo "[+] Canonical transactional Outbox contract harness: PASS."
+
 SMOKE_EVENT_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
   psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'SELECT gen_random_uuid();' | tr -d '[:space:]')"
 SMOKE_CORRELATION_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \

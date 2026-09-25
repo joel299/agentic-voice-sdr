@@ -192,6 +192,17 @@ jobs:
         if: steps.infra.outputs.present == 'true'
         run: docker compose -f deploy/dev/docker-compose.yml config --quiet
 
+      - name: Ensure PostgreSQL client
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y postgresql-client
+          fi
+          psql --version
+
       - name: Redis + RabbitMQ smoke test
         if: steps.infra.outputs.present == 'true'
         shell: bash

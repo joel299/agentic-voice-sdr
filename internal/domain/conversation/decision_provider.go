@@ -12,10 +12,19 @@ var (
 	ErrDecisionScriptExhausted = errors.New("decision script exhausted")
 )
 
+// DecisionProvider supplies a canonical domain decision for a canonical input.
+//
+// The caller constructs and validates DecisionInput through the domain boundary
+// before calling Decide. Providers decide only the next action and reason; they
+// do not construct conversation state, generate spoken copy, or execute tools.
+// Implementations must respect caller cancellation.
 type DecisionProvider interface {
 	Decide(ctx context.Context, input DecisionInput) (Decision, error)
 }
 
+// ScriptedDecisionProvider is an explicit deterministic FIFO provider for tests
+// and development. It does not infer or add validation semantics to the
+// caller-provided DecisionInput.
 type ScriptedDecisionProvider struct {
 	mu        sync.Mutex
 	decisions []Decision
@@ -38,9 +47,6 @@ func (p *ScriptedDecisionProvider) Decide(ctx context.Context, input DecisionInp
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return Decision{}, err
-	}
-	if err := input.validate(); err != nil {
 		return Decision{}, err
 	}
 

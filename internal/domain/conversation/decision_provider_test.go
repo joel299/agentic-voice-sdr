@@ -154,3 +154,52 @@ func TestScriptedDecisionProviderSupportsConcurrentCalls(t *testing.T) {
 }
 
 var _ DecisionProvider = (*ScriptedDecisionProvider)(nil)
+
+func TestScriptedDecisionProviderTreatsInputAsCanonicalPrecondition(t *testing.T) {
+	provider, err := NewScriptedDecisionProvider(scriptedTestDecisions(t))
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	nonCanonicalForTest := DecisionInput{TurnCount: -1}
+
+	decision, err := provider.Decide(context.Background(), nonCanonicalForTest)
+	if err != nil {
+		t.Fatalf("provider added input validation semantics: %v", err)
+	}
+	if decision.NextAction != ActionAskQuestion {
+		t.Fatalf("decision = %+v, want first scripted decision", decision)
+	}
+}
+
+func TestScriptedDecisionProviderAcceptsCanonicalInputFromConversationState(t *testing.T) {
+	state, err := NewConversationState("conversation-115")
+	if err != nil {
+		t.Fatalf("create state: %v", err)
+	}
+	if _, err := state.Transition(StageActive); err != nil {
+		t.Fatalf("activate state: %v", err)
+	}
+	turn, err := NewTurn("turn-115", RoleLead, "tenho interesse", TranscriptFinal)
+	if err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	if _, err := state.RecordTurn(turn); err != nil {
+		t.Fatalf("record turn: %v", err)
+	}
+	input, err := NewDecisionInput(state)
+	if err != nil {
+		t.Fatalf("build canonical input: %v", err)
+	}
+	provider, err := NewScriptedDecisionProvider(scriptedTestDecisions(t))
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+
+	decision, err := provider.Decide(context.Background(), input)
+	if err != nil {
+		t.Fatalf("decide from canonical input: %v", err)
+	}
+	if decision.NextAction != ActionAskQuestion || decision.Reason != ReasonNeedsClarification {
+		t.Fatalf("decision = %+v, want first scripted decision", decision)
+	}
+}

@@ -232,3 +232,119 @@ func TestResponseGateAuthorizeIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("successes=%d duplicates=%d, want 1 each", successes, duplicates)
 	}
 }
+
+func TestResponseGateRejectsSecondAuthorizedCycleForConversation(t *testing.T) {
+	first := responseGateTurn(t, "lead-1", RoleLead, TranscriptFinal)
+	second := responseGateTurn(t, "lead-2", RoleLead, TranscriptFinal)
+	state := responseGateState(t, "conversation-1", first)
+	gate := NewResponseGate()
+
+	if _, err := gate.Authorize(state, first.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("first Authorize: %v", err)
+	}
+	if _, err := state.RecordTurn(second); err != nil {
+		t.Fatalf("RecordTurn second: %v", err)
+	}
+	_, err := gate.Authorize(state, second.ID, responseGateDirective(t))
+	if !errors.Is(err, ErrResponseCycleActive) {
+		t.Fatalf("second authorization = %v, want ErrResponseCycleActive", err)
+	}
+}
+
+func TestResponseGateRejectsSecondStartedCycleForConversation(t *testing.T) {
+	first := responseGateTurn(t, "lead-1", RoleLead, TranscriptFinal)
+	second := responseGateTurn(t, "lead-2", RoleLead, TranscriptFinal)
+	state := responseGateState(t, "conversation-1", first)
+	gate := NewResponseGate()
+
+	if _, err := gate.Authorize(state, first.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("first Authorize: %v", err)
+	}
+	firstKey := ResponseKey{ConversationID: state.ID(), SourceTurnID: first.ID}
+	if err := gate.Start(firstKey); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if _, err := state.RecordTurn(second); err != nil {
+		t.Fatalf("RecordTurn second: %v", err)
+	}
+	_, err := gate.Authorize(state, second.ID, responseGateDirective(t))
+	if !errors.Is(err, ErrResponseCycleActive) {
+		t.Fatalf("second authorization = %v, want ErrResponseCycleActive", err)
+	}
+}
+
+func TestResponseGateAllowsNextCycleOnlyAfterCompletion(t *testing.T) {
+	first := responseGateTurn(t, "lead-1", RoleLead, TranscriptFinal)
+	second := responseGateTurn(t, "lead-2", RoleLead, TranscriptFinal)
+	state := responseGateState(t, "conversation-1", first)
+	gate := NewResponseGate()
+
+	if _, err := gate.Authorize(state, first.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("first Authorize: %v", err)
+	}
+	firstKey := ResponseKey{ConversationID: state.ID(), SourceTurnID: first.ID}
+	if err := gate.Start(firstKey); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := gate.Complete(firstKey); err != nil {
+		t.Fatalf("first Complete: %v", err)
+	}
+	if _, err := state.RecordTurn(second); err != nil {
+		t.Fatalf("RecordTurn second: %v", err)
+	}
+	if _, err := gate.Authorize(state, second.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("second Authorize: %v", err)
+	}
+}
+
+func TestResponseGateAllowsDifferentConversationsConcurrently(t *testing.T) {
+	first := responseGateTurn(t, "lead-a", RoleLead, TranscriptFinal)
+	second := responseGateTurn(t, "lead-b", RoleLead, TranscriptFinal)
+	gate := NewResponseGate()
+
+	if _, err := gate.Authorize(responseGateState(t, "conversation-a", first), first.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("conversation A Authorize: %v", err)
+	}
+	if _, err := gate.Authorize(responseGateState(t, "conversation-b", second), second.ID, responseGateDirective(t)); err != nil {
+		t.Fatalf("conversation B Authorize: %v", err)
+	}
+}
+
+func TestResponseGateConcurrentDistinctKeysSameConversationHasOneActiveCycle(t *testing.T) {
+	first := responseGateTurn(t, "lead-a", RoleLead, TranscriptFinal)
+	second := responseGateTurn(t, "lead-b", RoleLead, TranscriptFinal)
+	stateA := responseGateState(t, "conversation-1", first)
+	stateB := responseGateState(t, "conversation-1", second)
+	gate := NewResponseGate()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successes := 0
+	cycleErrors := 0
+	for _, input := range []struct {
+		state *ConversationState
+		id    string
+	}{
+		{stateA, first.ID},
+		{stateB, second.ID},
+	} {
+		wg.Add(1)
+		go func(state *ConversationState, id string) {
+			defer wg.Done()
+			_, err := gate.Authorize(state, id, responseGateDirective(t))
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successes++
+			} else if errors.Is(err, ErrResponseCycleActive) {
+				cycleErrors++
+			} else {
+				t.Errorf("Authorize: %v", err)
+			}
+		}(input.state, input.id)
+	}
+	wg.Wait()
+	if successes != 1 || cycleErrors != 1 {
+		t.Fatalf("successes=%d cycleErrors=%d, want 1 each", successes, cycleErrors)
+	}
+}

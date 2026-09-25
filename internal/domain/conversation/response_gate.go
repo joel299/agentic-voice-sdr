@@ -12,6 +12,7 @@ var (
 	ErrInvalidResponseDirective  = errors.New("invalid response directive")
 	ErrInvalidResponseKey        = errors.New("invalid response key")
 	ErrResponseAlreadyAuthorized = errors.New("response already authorized")
+	ErrResponseCycleActive       = errors.New("response cycle active")
 	ErrResponseNotAuthorized     = errors.New("response not authorized")
 	ErrResponseAlreadyStarted    = errors.New("response already started")
 	ErrResponseNotStarted        = errors.New("response not started")
@@ -89,6 +90,14 @@ func (g *ResponseGate) Authorize(state *ConversationState, sourceTurnID string, 
 	}
 	if _, exists := g.cycles[key]; exists {
 		return ResponseAuthorization{}, ErrResponseAlreadyAuthorized
+	}
+	for existingKey, responseState := range g.cycles {
+		if existingKey.ConversationID != key.ConversationID || existingKey == key {
+			continue
+		}
+		if responseState == ResponseAuthorized || responseState == ResponseStarted {
+			return ResponseAuthorization{}, ErrResponseCycleActive
+		}
 	}
 	g.cycles[key] = ResponseAuthorized
 	return ResponseAuthorization{Key: key, State: ResponseAuthorized}, nil

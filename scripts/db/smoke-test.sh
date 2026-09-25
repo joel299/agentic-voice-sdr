@@ -113,6 +113,24 @@ fi
     "${SCRIPT_DIR}/test-transactional-outbox.sh"
 )
 echo "[+] Canonical transactional Outbox contract harness: PASS."
+(
+  unset DATABASE_URL
+  PGHOST=127.0.0.1 \
+  PGPORT="${POSTGRES_PORT}" \
+  PGUSER="${POSTGRES_USER}" \
+  PGPASSWORD="${POSTGRES_PASSWORD}" \
+  PGDATABASE="${POSTGRES_DB}" \
+    "${SCRIPT_DIR}/test-agent-prompt-versions.sh"
+)
+echo "[+] Canonical Agent Prompt versions harness: PASS."
+prompt_schema_state="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
+  "SELECT (EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'agent_prompt_versions'))::text || ':' || (SELECT count(*) FROM schema_migrations WHERE version = '0004_agent_prompt_versions.sql')::text;")"
+if [[ "${prompt_schema_state}" != "true:1" ]]; then
+  echo "[-] Agent Prompt table must exist and migration 0004 must be recorded exactly once (observed ${prompt_schema_state})." >&2
+  exit 1
+fi
+echo "[+] Agent Prompt table exists and migration 0004 is recorded exactly once: PASS."
 
 SMOKE_EVENT_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
   psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'SELECT gen_random_uuid();' | tr -d '[:space:]')"

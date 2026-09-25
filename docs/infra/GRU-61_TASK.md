@@ -2,7 +2,7 @@
 
 Linear: https://linear.app/grupoalcate-ia/issue/GRU-61/microtaskantigravity-bootstrap-redis-rabbitmq-dev-infrastructure
 
-Executor: Arquimedes (Antigravity)
+Executor: Arquimedes (Antigravity), historical record from the former agent persona; current Arquimedes execution identity is OpenCode.
 Reviewer: Anorak
 
 Bootstrap only the Redis + RabbitMQ development infrastructure described in GRU-61.

@@ -1,6 +1,6 @@
 // Package openrouterjev adapts the provider-neutral conversation decision
-// contract to OpenRouter structured chat completions. It returns decisions only;
-// it never generates spoken copy or executes tools.
+// contract to OpenRouter's typed Decisions API. It returns canonical decisions
+// only; it never generates spoken copy or executes tools.
 package openrouterjev
 
 import (
@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	defaultBaseURL  = "https://openrouter.ai/api/v1"
+	defaultBaseURL  = "https://openrouter.ai/api"
 	defaultTimeout  = 400 * time.Millisecond
 	maxResponseSize = 1 << 20
 )
@@ -96,40 +96,62 @@ type requestInput struct {
 	LastTranscriptState conversation.TranscriptState `json:"last_transcript_state,omitempty"`
 }
 
-type chatRequest struct {
-	Model          string         `json:"model"`
-	Messages       []chatMessage  `json:"messages"`
-	ResponseFormat responseFormat `json:"response_format"`
-	Stream         bool           `json:"stream"`
-}
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-type responseFormat struct {
-	Type       string           `json:"type"`
-	JSONSchema schemaDefinition `json:"json_schema"`
-}
-type schemaDefinition struct {
-	Name   string          `json:"name"`
-	Strict bool            `json:"strict"`
-	Schema json.RawMessage `json:"schema"`
-}
-type completionResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-type decisionResponse struct {
-	NextAction conversation.NextAction `json:"next_action"`
-	Reason     conversation.ReasonCode `json:"reason"`
+type decisionsRequest struct {
+	Model     string                      `json:"model"`
+	State     requestInput                `json:"state"`
+	Questions map[string]decisionQuestion `json:"questions"`
 }
 
-var decisionSchema = json.RawMessage(`{"type":"object","properties":{"next_action":{"type":"string","enum":["continue_conversation","ask_question","propose_scheduling","request_capability","follow_up","end_conversation","handoff"]},"reason":{"type":"string","enum":["needs_clarification","continue_discovery","interest_confirmed","ready_to_schedule","conversation_complete","follow_up_required","capability_required","handoff_required"]}},"required":["next_action","reason"],"additionalProperties":false}`)
+type decisionQuestion struct {
+	Type         string            `json:"type"`
+	Instructions string            `json:"instructions"`
+	Criteria     map[string]string `json:"criteria"`
+}
 
-const systemInstruction = "Choose one canonical next_action and reason for the conversation state. Return only the structured decision object. Do not produce spoken copy, sales scripts, messages, tool instructions, or execute actions. The provider output is untrusted and will be validated by the application."
+type decisionsResponse struct {
+	Answers map[string]typedDecisionAnswer `json:"answers"`
+}
+
+type typedDecisionAnswer struct {
+	Type   string `json:"type"`
+	Choice string `json:"choice"`
+}
+
+var canonicalDecisionChoices = map[string]conversation.Decision{
+	"continue_conversation":                 {NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery},
+	"ask_question":                          {NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification},
+	"propose_scheduling":                    {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule},
+	"propose_scheduling_interest_confirmed": {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonInterestConfirmed},
+	"request_capability":                    {NextAction: conversation.ActionRequestCapability, Reason: conversation.ReasonCapabilityRequired},
+	"follow_up":                             {NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired},
+	"end_conversation":                      {NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete},
+	"handoff":                               {NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired},
+}
+
+var canonicalNextActionQuestion = decisionQuestion{
+	Type:         "choice",
+	Instructions: "Choose exactly one canonical next action from the supplied conversation state. If opted_out is true, choose end_conversation. Use only the structured state; do not generate text, spoken copy, messages, or tool instructions.",
+	Criteria: map[string]string{
+		"continue_conversation":                 "Continue discovery when the active conversation should proceed without a specific clarification.",
+		"ask_question":                          "Ask a focused clarifying question when the state indicates clarification is needed.",
+		"propose_scheduling":                    "Propose scheduling when the lead is ready to schedule.",
+		"propose_scheduling_interest_confirmed": "Propose scheduling when interest is confirmed and scheduling is the appropriate next step.",
+		"request_capability":                    "Request a capability when the next step requires an external capability.",
+		"follow_up":                             "Choose follow-up when the conversation state calls for a later follow-up.",
+		"end_conversation":                      "End the conversation when complete or when the lead has opted out.",
+		"handoff":                               "Hand off when the state requires human assistance.",
+	},
+}
+
+func decisionsEndpoint(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	// OPENROUTER_BASE_URL was historically configured with the /api/v1
+	// REST base. The Decisions API is hosted at /api/alpha/decisions.
+	if strings.HasSuffix(baseURL, "/api/v1") {
+		baseURL = strings.TrimSuffix(baseURL, "/v1")
+	}
+	return baseURL + "/alpha/decisions"
+}
 
 // Decide sends only the typed decision snapshot and validates the provider result
 // using the domain's canonical NewDecision constructor.
@@ -144,18 +166,18 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	mapped.TurnCount = input.TurnCount
 	mapped.LastTurnRole = input.LastTurnRole
 	mapped.LastTranscriptState = input.LastTranscriptState
-	inputJSON, err := json.Marshal(mapped)
-	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+	payload := decisionsRequest{
+		Model:     c.config.Model,
+		State:     mapped,
+		Questions: map[string]decisionQuestion{"next_action": canonicalNextActionQuestion},
 	}
-	payload := chatRequest{Model: c.config.Model, Messages: []chatMessage{{Role: "system", Content: systemInstruction}, {Role: "user", Content: string(inputJSON)}}, ResponseFormat: responseFormat{Type: "json_schema", JSONSchema: schemaDefinition{Name: "jev_decision", Strict: true, Schema: decisionSchema}}}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, decisionsEndpoint(c.config.BaseURL), bytes.NewReader(body))
 	if err != nil {
 		return conversation.Decision{}, ErrConfiguration
 	}
@@ -189,23 +211,21 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	if len(responseBytes) == 0 || len(responseBytes) > maxResponseSize {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	var completion completionResponse
-	if err := json.Unmarshal(responseBytes, &completion); err != nil || len(completion.Choices) == 0 || strings.TrimSpace(completion.Choices[0].Message.Content) == "" {
+	var providerResponse decisionsResponse
+	if err := json.Unmarshal(responseBytes, &providerResponse); err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	var parsed decisionResponse
-	decoder := json.NewDecoder(strings.NewReader(completion.Choices[0].Message.Content))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&parsed); err != nil {
+	answer, ok := providerResponse.Answers["next_action"]
+	if !ok || answer.Type != "choice" {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	decision, ok := canonicalDecisionChoices[answer.Choice]
+	if !ok {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	decision, err := conversation.NewDecision(parsed.NextAction, parsed.Reason)
+	validated, err := conversation.NewDecision(decision.NextAction, decision.Reason)
 	if err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	return decision, nil
+	return validated, nil
 }

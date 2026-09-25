@@ -103,13 +103,23 @@ func wrap(kind ErrorKind, err error) error {
 // Event is a typed subset of Gemini's server message. Unknown valid messages
 // are surfaced as EventUnknown rather than being mistaken for a closed socket.
 type Event struct {
-	Kind          EventKind
-	Audio         []byte
-	AudioMimeType string
-	Text          string
-	ToolCalls     []ToolCall
-	Error         string
+	Kind                 EventKind
+	Audio                []byte
+	AudioMimeType        string
+	Text                 string
+	InputTranscriptState InputTranscriptState
+	ToolCalls            []ToolCall
+	Error                string
 }
+
+type InputTranscriptState string
+
+const (
+	TranscriptNone    InputTranscriptState = ""
+	TranscriptInterim InputTranscriptState = "interim"
+	TranscriptFinal   InputTranscriptState = "final"
+)
+
 type EventKind string
 
 const (
@@ -378,13 +388,13 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 				return Event{Kind: EventInterrupted}
 			}
 			if c.InputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InputTranscription.Text}
-			}
-			if c.InterimInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text}
+				return Event{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}
 			}
 			if c.FinalInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text}
+				return Event{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}
+			}
+			if c.InterimInputTranscription.Text != "" {
+				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}
 			}
 			if c.OutputTranscription.Text != "" {
 				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text}

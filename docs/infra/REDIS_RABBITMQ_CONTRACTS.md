@@ -397,35 +397,11 @@ To guarantee **deterministic, non-blocking backoff**, the platform strictly proh
 
 ## 6. PostgreSQL & Transactional Outbox Contract
 
-### 6.1 Logical DDL Schema
+### 6.1 Canonical Outbox Schema
 
-Critical events originating from domain actions must be written to an `outbox_events` table in PostgreSQL in the **same ACID transaction** as the entity mutation.
+The PostgreSQL Outbox DDL is maintained only in the canonical ordered migrations `db/migrations/0001_create_outbox_events.sql`, `db/migrations/0002_outbox_integrity.sql`, and `db/migrations/0003_outbox_pending_index.sql`. These migrations are the source of truth for column types, constraints, defaults, status values, retry metadata, timestamps, and indexes; apply them with `scripts/db/migrate.sh`. Do not copy or independently evolve the DDL in this guide.
 
-```sql
-CREATE TABLE IF NOT EXISTS outbox_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    aggregate_type VARCHAR(64) NOT NULL,
-    aggregate_id VARCHAR(64) NOT NULL,
-    event_type VARCHAR(128) NOT NULL,
-    exchange VARCHAR(64) NOT NULL,
-    routing_key VARCHAR(128) NOT NULL,
-    payload JSONB NOT NULL,
-    headers JSONB NOT NULL DEFAULT '{}'::jsonb,
-    idempotency_key VARCHAR(128) UNIQUE NOT NULL,
-    correlation_id UUID NOT NULL,
-    trace_id VARCHAR(64),
-    status VARCHAR(24) NOT NULL DEFAULT 'PENDING', -- PENDING, PUBLISHED, FAILED
-    retry_count INT NOT NULL DEFAULT 0,
-    published_at TIMESTAMPTZ,
-    last_error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Partial index for zero-latency polling of pending records
-CREATE INDEX IF NOT EXISTS idx_outbox_events_pending
-ON outbox_events (created_at ASC)
-WHERE status = 'PENDING';
-```
+The contract includes aggregate identity, event type, exchange/routing key, JSON payload and headers, idempotency key, correlation/trace identifiers, `PENDING`/`PUBLISHED`/`FAILED` state, retry count, `published_at`, last error, and creation timestamp. Exact nullability and constraints are defined by the migrations.
 
 ### 6.2 Atomicity Invariant (No Dual-Write)
 

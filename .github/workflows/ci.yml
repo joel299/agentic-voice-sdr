@@ -161,6 +161,9 @@ jobs:
       RABBITMQ_DEFAULT_USER: ci-agentic
       RABBITMQ_DEFAULT_PASS: ci-rabbitmq-password
       RABBITMQ_DEFAULT_VHOST: /
+      POSTGRES_DB: agentic_voice_sdr_dev
+      POSTGRES_USER: ci-postgres
+      POSTGRES_PASSWORD: ci-postgres-password
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,14 +183,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in scripts/infra/*.sh; do
+          for script in scripts/infra/*.sh scripts/db/*.sh; do
             [[ -e "$script" ]] || continue
             bash -n "$script"
           done
 
       - name: Validate Docker Compose
         if: steps.infra.outputs.present == 'true'
-        run: docker compose -f deploy/dev/docker-compose.yml config
+        run: docker compose -f deploy/dev/docker-compose.yml config --quiet
+
+      - name: Ensure PostgreSQL client
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y postgresql-client
+          fi
+          psql --version
 
       - name: Redis + RabbitMQ smoke test
         if: steps.infra.outputs.present == 'true'
@@ -196,3 +210,10 @@ jobs:
           set -euo pipefail
           chmod +x scripts/infra/smoke-test.sh
           ./scripts/infra/smoke-test.sh --down
+
+      - name: PostgreSQL 16 canonical Outbox smoke test
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/db/smoke-test.sh --down

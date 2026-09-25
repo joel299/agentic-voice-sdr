@@ -1,6 +1,38 @@
 name: agentic-voice-sdr-dev
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ${POSTGRES_CONTAINER_NAME:-agentic-postgres-dev}
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-agentic_voice_sdr_dev}
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$POSTGRES_USER" ] || [ -z "$$POSTGRES_PASSWORD" ]; then
+          echo "[-] ERROR: POSTGRES_USER and POSTGRES_PASSWORD are required in environment" >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh postgres
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER:-postgres}" -d "$${POSTGRES_DB:-agentic_voice_sdr_dev}"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - voice-dev-net
+
   redis:
     image: redis:7.4-alpine
     container_name: agentic-redis-dev
@@ -74,7 +106,10 @@ services:
     networks:
       - voice-dev-net
 
+volumes:
+  postgres_data:
+
 networks:
   voice-dev-net:
-    name: voice-dev-net
+    name: ${DEV_NETWORK_NAME:-voice-dev-net}
     driver: bridge

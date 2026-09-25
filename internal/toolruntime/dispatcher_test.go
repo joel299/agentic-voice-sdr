@@ -77,6 +77,26 @@ func TestDispatcherAllowedExecutableRunsExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestDispatcherRejectsCompletedDirectiveWithoutResolvingOrExecuting(t *testing.T) {
+	const name = tools.ToolCalendarCreateEvent
+	for _, status := range []conversation.ToolResultStatus{conversation.ToolResultSucceeded, conversation.ToolResultFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			executor := &countingExecutor{result: conversation.ToolResult{Tool: name, Status: conversation.ToolResultSucceeded}}
+			dispatcher := NewDispatcher(sampleToolRegistry(t, name), NewExecutorRegistry(map[string]ToolExecutor{name: executor}))
+			req := request(t, name)
+			req.Directive.ToolResult = &conversation.ToolResult{Tool: name, Status: status}
+
+			_, err := dispatcher.Dispatch(context.Background(), req)
+			if !errors.Is(err, ErrToolNotExecutable) {
+				t.Fatalf("error=%v, want %v", err, ErrToolNotExecutable)
+			}
+			if executor.Calls() != 0 {
+				t.Fatalf("calls=%d want 0", executor.Calls())
+			}
+		})
+	}
+}
+
 func TestDispatcherRejectsDeniedDeferredAndNonExecutableWithoutCallingExecutor(t *testing.T) {
 	const name = tools.ToolCalendarCheckAvailability
 	for _, tc := range []struct {

@@ -46,6 +46,9 @@ func (request ToolExecutionRequest) Validate() error {
 	if request.Directive.CapabilityStatus != conversation.PolicyAllow || !request.Directive.Executable {
 		return ErrToolNotExecutable
 	}
+	if request.Directive.ToolResult != nil {
+		return ErrToolNotExecutable
+	}
 	if request.Arguments == nil {
 		return fmt.Errorf("%w: arguments are nil", ErrInvalidToolExecutionRequest)
 	}

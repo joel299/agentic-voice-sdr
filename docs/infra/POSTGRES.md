@@ -1,6 +1,6 @@
 # PostgreSQL Dev Infrastructure & Transactional Outbox
 
-This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical Outbox schema is defined only by the ordered SQL migrations in `db/migrations/`; in particular, `db/migrations/001_outbox_events.sql` is the source of truth for `outbox_events`. Do not maintain a second DDL contract in documentation.
+This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical Outbox schema is defined only by the ordered migrations `db/migrations/0001_create_outbox_events.sql`, `db/migrations/0002_outbox_integrity.sql`, and `db/migrations/0003_outbox_pending_index.sql`. These files are the source of truth for `outbox_events`; do not maintain a second DDL contract in documentation.
 
 ## Prerequisites and environment
 
@@ -43,7 +43,7 @@ docker compose -f deploy/dev/docker-compose.yml stop postgres
 ./scripts/db/migrate.sh
 ```
 
-The migration is safe to re-run. Its canonical `outbox_events` contract uses `PENDING`, `PUBLISHED`, and `FAILED`, `published_at`, aggregate and routing fields, payload/headers, idempotency/correlation/trace metadata, retry count, last error, and creation time. Consult the migration itself for exact types, nullability, defaults, uniqueness, and indexes.
+The migration runner records each applied filename and SHA-256 checksum in `schema_migrations`, skips an unchanged applied migration, and fails if an applied migration file was edited. The canonical `outbox_events` contract uses `PENDING`, `PUBLISHED`, and `FAILED`, `published_at`, aggregate and routing fields, payload/headers, idempotency/correlation/trace metadata, retry count, last error, and creation time. Consult the migration files for exact types, nullability, defaults, constraints, and indexes.
 
 ## Development-only reset
 

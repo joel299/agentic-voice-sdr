@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Apply the canonical PostgreSQL development migrations; stop on any SQL error.
+# Apply canonical PostgreSQL development migrations and fail on every SQL error.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -51,6 +50,10 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1 && [[ "$(docker inspect --
     docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
       psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "$1"
   }
+  run_scalar() {
+    docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+      psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tA -c "$1"
+  }
 else
   run_sql_file() {
     PGPASSWORD="${POSTGRES_PASSWORD}" psql -X -v ON_ERROR_STOP=1 -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
@@ -60,12 +63,29 @@ else
     PGPASSWORD="${POSTGRES_PASSWORD}" psql -X -v ON_ERROR_STOP=1 -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
       -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "$1"
   }
+  run_scalar() {
+    PGPASSWORD="${POSTGRES_PASSWORD}" psql -X -v ON_ERROR_STOP=1 -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
+      -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tA -c "$1"
+  }
 fi
 
-printf '[+] Applying %d canonical migration(s) from db/migrations.\n' "${#sql_files[@]}"
+printf '[+] Checking %d canonical migration(s) from db/migrations.\n' "${#sql_files[@]}"
 run_query 'SELECT 1;' >/dev/null
+run_query 'CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());' >/dev/null
 for migration in "${sql_files[@]}"; do
-  printf '    Applying %s\n' "$(basename "${migration}")"
+  version="$(basename "${migration}")"
+  checksum="$(sha256sum "${migration}" | awk '{print $1}')"
+  applied_checksum="$(run_scalar "SELECT checksum FROM schema_migrations WHERE version = '${version}';")"
+  if [[ -n "${applied_checksum}" ]]; then
+    if [[ "${applied_checksum}" != "${checksum}" ]]; then
+      echo "[-] ERROR: Applied migration ${version} has changed; refusing to continue." >&2
+      exit 1
+    fi
+    printf '    Already applied %s\n' "${version}"
+    continue
+  fi
+  printf '    Applying %s\n' "${version}"
   run_sql_file "${migration}"
+  run_query "INSERT INTO schema_migrations (version, checksum) VALUES ('${version}', '${checksum}');" >/dev/null
 done
-printf '[+] All canonical PostgreSQL migrations applied successfully.\n'
+printf '[+] All canonical PostgreSQL migrations are applied and verified.\n'

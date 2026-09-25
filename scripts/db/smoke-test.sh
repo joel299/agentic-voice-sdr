@@ -89,6 +89,8 @@ fi
 echo "[+] PostgreSQL major version 16: PASS."
 
 "${SCRIPT_DIR}/migrate.sh"
+# Verify an unchanged migration set is safely recognized on a subsequent run.
+"${SCRIPT_DIR}/migrate.sh"
 
 table_exists="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
   psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \

@@ -190,7 +190,7 @@ jobs:
 
       - name: Validate Docker Compose
         if: steps.infra.outputs.present == 'true'
-        run: docker compose -f deploy/dev/docker-compose.yml config
+        run: docker compose -f deploy/dev/docker-compose.yml config --quiet
 
       - name: Redis + RabbitMQ smoke test
         if: steps.infra.outputs.present == 'true'

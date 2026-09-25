@@ -399,9 +399,9 @@ To guarantee **deterministic, non-blocking backoff**, the platform strictly proh
 
 ### 6.1 Canonical Outbox Schema
 
-The PostgreSQL Outbox DDL is maintained only in the canonical ordered migration `db/migrations/001_outbox_events.sql`. That migration is the source of truth for column types, constraints, defaults, status values, retry metadata, timestamps, and indexes; apply it with `scripts/db/migrate.sh`. Do not copy or independently evolve the DDL in this guide.
+The PostgreSQL Outbox DDL is maintained only in the canonical ordered migrations `db/migrations/0001_create_outbox_events.sql`, `db/migrations/0002_outbox_integrity.sql`, and `db/migrations/0003_outbox_pending_index.sql`. These migrations are the source of truth for column types, constraints, defaults, status values, retry metadata, timestamps, and indexes; apply them with `scripts/db/migrate.sh`. Do not copy or independently evolve the DDL in this guide.
 
-The contract includes aggregate identity, event type, exchange/routing key, JSON payload and headers, idempotency key, correlation/trace identifiers, `PENDING`/`PUBLISHED`/`FAILED` state, retry count, `published_at`, last error, and creation timestamp. Exact nullability and constraints are defined by the migration.
+The contract includes aggregate identity, event type, exchange/routing key, JSON payload and headers, idempotency key, correlation/trace identifiers, `PENDING`/`PUBLISHED`/`FAILED` state, retry count, `published_at`, last error, and creation timestamp. Exact nullability and constraints are defined by the migrations.
 
 ### 6.2 Atomicity Invariant (No Dual-Write)
 

@@ -65,6 +65,9 @@ func (input OrchestratorInput) Validate() error {
 		if input.Policy == nil {
 			return fmt.Errorf("%w: capability request requires a policy result", ErrInvalidOrchestratorInput)
 		}
+		if err := input.validatePolicyBinding(); err != nil {
+			return err
+		}
 	} else if input.RequestedTool != "" || input.ToolResult != nil {
 		return fmt.Errorf("%w: non-capability decision cannot carry tool context", ErrInvalidOrchestratorInput)
 	}
@@ -79,6 +82,23 @@ func (input OrchestratorInput) Validate() error {
 		if input.Policy.Status != PolicyAllow {
 			return fmt.Errorf("%w: tool result requires an allowed policy", ErrInvalidOrchestratorInput)
 		}
+	}
+	return nil
+}
+
+func (input OrchestratorInput) validatePolicyBinding() error {
+	canonicalInput := ToolPolicyInput{
+		DecisionInput: input.DecisionInput,
+		Decision:      input.Decision,
+		RequestedTool: input.RequestedTool,
+		Effect:        classifyToolEffect(input.RequestedTool),
+	}
+	canonical, err := EvaluateToolPolicy(canonicalInput)
+	if err != nil {
+		return fmt.Errorf("%w: canonical policy: %v", ErrInvalidOrchestratorInput, err)
+	}
+	if *input.Policy != canonical {
+		return fmt.Errorf("%w: policy result does not match canonical decision", ErrInvalidOrchestratorInput)
 	}
 	return nil
 }
@@ -109,6 +129,17 @@ func (directive TurnDirective) Validate() error {
 		}
 		if directive.Executable != (directive.CapabilityStatus == PolicyAllow) {
 			return fmt.Errorf("%w: executable flag does not match policy status", ErrInvalidTurnDirective)
+		}
+		if directive.ToolResult != nil {
+			if err := directive.ToolResult.Validate(); err != nil {
+				return fmt.Errorf("%w: tool result: %v", ErrInvalidTurnDirective, err)
+			}
+			if directive.ToolResult.Tool != directive.Capability {
+				return fmt.Errorf("%w: tool result does not match capability", ErrInvalidTurnDirective)
+			}
+			if directive.CapabilityStatus != PolicyAllow || !directive.Executable {
+				return fmt.Errorf("%w: tool result requires an executable allowed capability", ErrInvalidTurnDirective)
+			}
 		}
 	} else if directive.Capability != "" || directive.CapabilityStatus != "" || directive.Executable || directive.ToolResult != nil {
 		return fmt.Errorf("%w: non-capability directive carries capability context", ErrInvalidTurnDirective)

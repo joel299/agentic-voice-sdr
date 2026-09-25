@@ -51,8 +51,9 @@ func TestOrchestratorRequiresPolicyForCapabilityRequest(t *testing.T) {
 
 func TestDeniedCapabilityCannotBecomeExecutableDirective(t *testing.T) {
 	input := validOrchestratorInput(ActionRequestCapability, ReasonCapabilityRequired)
-	input.RequestedTool = "calendar.create_event"
-	input.Policy = &ToolPolicyResult{Status: PolicyDeny, Reason: PolicyReasonSideEffectNotAuthorized}
+	input.DecisionInput.Signals.OptedOut = true
+	input.RequestedTool = "whatsapp.send_message"
+	input.Policy = &ToolPolicyResult{Status: PolicyDeny, Reason: PolicyReasonContactOptedOut}
 
 	directive, err := BuildTurnDirective(input)
 	if err != nil {
@@ -65,8 +66,9 @@ func TestDeniedCapabilityCannotBecomeExecutableDirective(t *testing.T) {
 
 func TestDeferredCapabilityCannotBecomeExecutableDirective(t *testing.T) {
 	input := validOrchestratorInput(ActionRequestCapability, ReasonCapabilityRequired)
+	input.DecisionInput.Stage = StageOpening
 	input.RequestedTool = "calendar.create_event"
-	input.Policy = &ToolPolicyResult{Status: PolicyDefer, Reason: PolicyReasonDeferUntilReady}
+	input.Policy = &ToolPolicyResult{Status: PolicyDefer, Reason: PolicyReasonMissingRequiredState}
 
 	directive, err := BuildTurnDirective(input)
 	if err != nil {
@@ -162,5 +164,147 @@ func TestToolResultValidationRejectsMissingTool(t *testing.T) {
 	result := ToolResult{Status: ToolResultSucceeded}
 	if !errors.Is(result.Validate(), ErrInvalidToolResult) {
 		t.Fatalf("error = %v, want %v", result.Validate(), ErrInvalidToolResult)
+	}
+}
+
+func TestOrchestratorRejectsPolicyReplayedForDifferentTool(t *testing.T) {
+	decision, err := NewDecision(ActionRequestCapability, ReasonCapabilityRequired)
+	if err != nil {
+		t.Fatalf("create decision: %v", err)
+	}
+	decisionInput := DecisionInput{
+		Stage:               StageActive,
+		Signals:             Signals{OptedOut: true},
+		TurnCount:           1,
+		LastTurnRole:        RoleLead,
+		LastTranscriptState: TranscriptFinal,
+	}
+	original, err := EvaluateToolPolicy(ToolPolicyInput{
+		DecisionInput: decisionInput,
+		Decision:      decision,
+		RequestedTool: "conversation.add_note",
+		Effect:        ToolEffectSideEffect,
+	})
+	if err != nil {
+		t.Fatalf("evaluate original policy: %v", err)
+	}
+	if original.Status != PolicyAllow {
+		t.Fatalf("original policy = %+v, want allow", original)
+	}
+
+	_, err = BuildTurnDirective(OrchestratorInput{
+		DecisionInput: decisionInput,
+		Decision:      decision,
+		RequestedTool: "whatsapp.send_message",
+		Policy:        &original,
+	})
+	if !errors.Is(err, ErrInvalidOrchestratorInput) {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidOrchestratorInput)
+	}
+}
+
+func TestOrchestratorRejectsForgedAllowForOptedOutContact(t *testing.T) {
+	input := validOrchestratorInput(ActionRequestCapability, ReasonCapabilityRequired)
+	input.DecisionInput.Signals.OptedOut = true
+	input.RequestedTool = "whatsapp.send_message"
+	input.Policy = &ToolPolicyResult{Status: PolicyAllow, Reason: PolicyReasonAllowedByDecision}
+
+	if _, err := BuildTurnDirective(input); !errors.Is(err, ErrInvalidOrchestratorInput) {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidOrchestratorInput)
+	}
+}
+
+func TestOrchestratorAcceptsMatchingCanonicalPolicy(t *testing.T) {
+	input := validOrchestratorInput(ActionRequestCapability, ReasonCapabilityRequired)
+	input.RequestedTool = "calendar.check_availability"
+	policy, err := EvaluateToolPolicy(ToolPolicyInput{
+		DecisionInput: input.DecisionInput,
+		Decision:      input.Decision,
+		RequestedTool: input.RequestedTool,
+		Effect:        ToolEffectRead,
+	})
+	if err != nil {
+		t.Fatalf("evaluate policy: %v", err)
+	}
+	input.Policy = &policy
+
+	directive, err := BuildTurnDirective(input)
+	if err != nil {
+		t.Fatalf("build directive: %v", err)
+	}
+	if !directive.Executable {
+		t.Fatalf("directive = %+v, want executable allowed capability", directive)
+	}
+}
+
+func TestTurnDirectiveValidatesNestedToolResult(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     PolicyStatus
+		executable bool
+		result     *ToolResult
+		wantError  bool
+	}{
+		{
+			name:       "empty tool",
+			status:     PolicyAllow,
+			executable: true,
+			result:     &ToolResult{Status: ToolResultSucceeded},
+			wantError:  true,
+		},
+		{
+			name:       "invalid result status",
+			status:     PolicyAllow,
+			executable: true,
+			result:     &ToolResult{Tool: "calendar.check_availability", Status: ToolResultStatus("unknown")},
+			wantError:  true,
+		},
+		{
+			name:       "mismatched tool",
+			status:     PolicyAllow,
+			executable: true,
+			result:     &ToolResult{Tool: "calendar.create_event", Status: ToolResultSucceeded},
+			wantError:  true,
+		},
+		{
+			name:       "denied with result",
+			status:     PolicyDeny,
+			executable: false,
+			result:     &ToolResult{Tool: "calendar.check_availability", Status: ToolResultSucceeded},
+			wantError:  true,
+		},
+		{
+			name:       "deferred with result",
+			status:     PolicyDefer,
+			executable: false,
+			result:     &ToolResult{Tool: "calendar.check_availability", Status: ToolResultSucceeded},
+			wantError:  true,
+		},
+		{
+			name:       "allowed matching result",
+			status:     PolicyAllow,
+			executable: true,
+			result:     &ToolResult{Tool: "calendar.check_availability", Status: ToolResultSucceeded},
+			wantError:  false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directive := TurnDirective{
+				Kind:             ActionRequestCapability,
+				Reason:           ReasonCapabilityRequired,
+				Capability:       "calendar.check_availability",
+				CapabilityStatus: test.status,
+				Executable:       test.executable,
+				ToolResult:       test.result,
+			}
+			err := directive.Validate()
+			if test.wantError && !errors.Is(err, ErrInvalidTurnDirective) {
+				t.Fatalf("error = %v, want %v", err, ErrInvalidTurnDirective)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+		})
 	}
 }

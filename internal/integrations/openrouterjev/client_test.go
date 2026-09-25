@@ -17,71 +17,50 @@ import (
 const testAPIKey = "test-secret-key"
 
 func testConfig(endpoint string) Config {
-	return Config{APIKey: testAPIKey, BaseURL: endpoint + "/api/v1", Model: "test/model"}
+	return Config{APIKey: testAPIKey, BaseURL: endpoint + "/api", Model: "test/model"}
 }
-func providerBody(content string) string {
-	b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+func providerBody(choice string) string {
+	b, _ := json.Marshal(map[string]any{"answers": map[string]any{"next_action": map[string]string{"type": "choice", "choice": choice}}})
 	return string(b)
 }
 func activeInput() conversation.DecisionInput {
 	return conversation.DecisionInput{Stage: conversation.StageActive, Signals: conversation.Signals{LeadResponded: true}, TurnCount: 3, LastTurnRole: conversation.RoleLead, LastTranscriptState: conversation.TranscriptFinal}
 }
 
-func TestDecideSendsMinimalInputAndStructuredOutput(t *testing.T) {
+func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/chat/completions" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/alpha/decisions" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer "+testAPIKey {
 			t.Errorf("Authorization = %q", got)
 		}
 		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-			ResponseFormat struct {
-				Type       string `json:"type"`
-				JSONSchema struct {
-					Name   string `json:"name"`
-					Strict bool   `json:"strict"`
-				} `json:"json_schema"`
-			} `json:"response_format"`
+			Model     string       `json:"model"`
+			State     requestInput `json:"state"`
+			Questions map[string]struct {
+				Type         string            `json:"type"`
+				Instructions string            `json:"instructions"`
+				Criteria     map[string]string `json:"criteria"`
+			} `json:"questions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
 			return
 		}
-		if req.Model != "test/model" || req.ResponseFormat.Type != "json_schema" || req.ResponseFormat.JSONSchema.Name != "jev_decision" || !req.ResponseFormat.JSONSchema.Strict {
-			t.Errorf("request config = %+v", req)
+		question, exists := req.Questions["next_action"]
+		if req.Model != "test/model" || !exists || question.Type != "choice" || question.Criteria["ask_question"] == "" || question.Criteria["end_conversation"] == "" || !strings.Contains(question.Instructions, "opted_out") {
+			t.Errorf("Jev request = %+v", req)
 		}
-		if len(req.Messages) != 2 || req.Messages[1].Role != "user" {
-			t.Errorf("messages = %+v", req.Messages)
-			return
+		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal {
+			t.Errorf("serialized state = %+v", req.State)
 		}
-		var input struct {
-			Stage   string `json:"stage"`
-			Signals struct {
-				LeadResponded bool `json:"lead_responded"`
-				OptedOut      bool `json:"opted_out"`
-			} `json:"signals"`
-			TurnCount           int    `json:"turn_count"`
-			LastTurnRole        string `json:"last_turn_role"`
-			LastTranscriptState string `json:"last_transcript_state"`
+		encoded, _ := json.Marshal(req.State)
+		if strings.Contains(string(encoded), "tenho interesse") || strings.Contains(string(encoded), `"text"`) || strings.Contains(string(encoded), "transcript text") {
+			t.Errorf("request included transcript content: %s", encoded)
 		}
-		if err := json.Unmarshal([]byte(req.Messages[1].Content), &input); err != nil {
-			t.Errorf("input JSON: %v", err)
-		}
-		if input.Stage != "active" || !input.Signals.LeadResponded || input.Signals.OptedOut || input.TurnCount != 3 || input.LastTurnRole != "lead" || input.LastTranscriptState != "final" {
-			t.Errorf("serialized input = %+v", input)
-		}
-		if strings.Contains(req.Messages[1].Content, "tenho interesse") || strings.Contains(req.Messages[1].Content, `"text"`) {
-			t.Errorf("request included transcript: %s", req.Messages[1].Content)
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, providerBody(`{"next_action":"ask_question","reason":"needs_clarification"}`))
+		io.WriteString(w, providerBody("ask_question"))
 	}))
 	defer server.Close()
 	client, err := New(testConfig(server.URL))
@@ -98,10 +77,56 @@ func TestDecideSendsMinimalInputAndStructuredOutput(t *testing.T) {
 	}
 }
 
-func TestDecideRejectsInvalidProviderDecisions(t *testing.T) {
-	for _, tc := range []struct{ name, content string }{{"unknown action", `{"next_action":"launch_offer","reason":"needs_clarification"}`}, {"unknown reason", `{"next_action":"ask_question","reason":"unknown_reason"}`}, {"incompatible pair", `{"next_action":"ask_question","reason":"conversation_complete"}`}, {"malformed JSON", `{`}, {"empty", ``}} {
+func TestDecideMapsJevChoiceToCanonicalDecision(t *testing.T) {
+	cases := []struct {
+		choice string
+		want   conversation.Decision
+	}{
+		{"continue_conversation", conversation.Decision{NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery}},
+		{"ask_question", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
+		{"propose_scheduling", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule}},
+		{"propose_scheduling_interest_confirmed", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonInterestConfirmed}},
+		{"request_capability", conversation.Decision{NextAction: conversation.ActionRequestCapability, Reason: conversation.ReasonCapabilityRequired}},
+		{"follow_up", conversation.Decision{NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired}},
+		{"end_conversation", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
+		{"handoff", conversation.Decision{NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.choice, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, providerBody(tc.choice)) }))
+			defer server.Close()
+			client, err := New(testConfig(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := client.Decide(context.Background(), activeInput())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("decision = %+v, want %+v", got, tc.want)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("canonical validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecideRejectsMalformedJevAnswers(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unknown choice", providerBody("launch_offer")},
+		{"wrong answer primitive", `{"answers":{"next_action":{"type":"noul","noul":0.9}}}`},
+		{"missing answer", `{"answers":{}}`},
+		{"malformed JSON", `{`},
+		{"empty response", ``},
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, providerBody(tc.content)) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, tc.body) }))
 			defer server.Close()
 			client, err := New(testConfig(server.URL))
 			if err != nil {
@@ -111,6 +136,43 @@ func TestDecideRejectsInvalidProviderDecisions(t *testing.T) {
 				t.Fatalf("error = %v, want invalid provider response", err)
 			}
 		})
+	}
+}
+
+func TestDecideMapsOptedOutInputToCanonicalEndDecision(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req decisionsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if !req.State.Signals.OptedOut || req.Questions["next_action"].Criteria["end_conversation"] == "" {
+			t.Errorf("opt-out signal or end option missing from request state: %+v", req)
+		}
+		_, _ = io.WriteString(w, providerBody("end_conversation"))
+	}))
+	defer server.Close()
+	client, err := New(testConfig(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := activeInput()
+	input.Signals.OptedOut = true
+	got, err := client.Decide(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NextAction != conversation.ActionEndConversation || got.Reason != conversation.ReasonConversationComplete {
+		t.Fatalf("decision = %+v, want canonical end_conversation", got)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("canonical validation: %v", err)
+	}
+}
+
+func TestDecisionsEndpointSupportsLegacyV1BaseURL(t *testing.T) {
+	if got, want := decisionsEndpoint("https://openrouter.ai/api/v1"), "https://openrouter.ai/api/alpha/decisions"; got != want {
+		t.Fatalf("endpoint = %q, want %q", got, want)
 	}
 }
 
@@ -141,7 +203,7 @@ func TestDecideTimeout(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-release
-		io.WriteString(w, providerBody(`{"next_action":"ask_question","reason":"needs_clarification"}`))
+		io.WriteString(w, providerBody("ask_question"))
 	}))
 	defer server.Close()
 	client, err := NewWithTimeout(testConfig(server.URL), 20*time.Millisecond)
@@ -298,17 +360,13 @@ func TestBodyReadTransportErrorWithoutContextError(t *testing.T) {
 }
 
 func TestInvalidProviderDecisionValuesAreSanitized(t *testing.T) {
-	for _, tc := range []struct{ name, action, reason string }{
-		{name: "malicious action", action: "ATTACKER-CONTROLLED\nVALUE", reason: "needs_clarification"},
-		{name: "malicious reason", action: "ask_question", reason: "ATTACKER-CONTROLLED\nVALUE"},
-		{name: "large action", action: "ATTACKER-CONTROLLED-" + strings.Repeat("x", 4096), reason: "needs_clarification"},
+	for _, tc := range []struct{ name, choice string }{
+		{name: "provider-controlled choice", choice: "ATTACKER-CONTROLLED\nVALUE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			content, err := json.Marshal(map[string]string{"next_action": tc.action, "reason": tc.reason})
-			if err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, providerBody(string(content))) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, providerBody(tc.choice))
+			}))
 			defer server.Close()
 			client, err := New(testConfig(server.URL))
 			if err != nil {
@@ -318,7 +376,7 @@ func TestInvalidProviderDecisionValuesAreSanitized(t *testing.T) {
 			if !errors.Is(err, ErrInvalidProviderResponse) {
 				t.Fatalf("error = %v, want ErrInvalidProviderResponse", err)
 			}
-			if strings.Contains(err.Error(), "ATTACKER-CONTROLLED") || strings.Contains(err.Error(), tc.action) || strings.Contains(err.Error(), tc.reason) {
+			if strings.Contains(err.Error(), "ATTACKER-CONTROLLED") || strings.Contains(err.Error(), tc.choice) {
 				t.Fatalf("provider-controlled value exposed: %q", err.Error())
 			}
 		})

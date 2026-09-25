@@ -1,0 +1,153 @@
+openapi: 3.1.0
+info:
+  title: Agentic Voice SDR Configuration API
+  version: 1.0.0
+  description: Provider-agnostic WhatsApp and SIP configuration boundaries.
+servers:
+  - url: /
+paths:
+  /v1/config/whatsapp:
+    put:
+      operationId: configureWhatsApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WhatsAppConfigRequest' }
+      responses:
+        '200': { description: Safe configuration, content: { application/json: { schema: { $ref: '#/components/schemas/WhatsAppConfig' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/ProviderFailure' }
+    get:
+      operationId: getWhatsApp
+      responses:
+        '200': { description: Safe configuration, content: { application/json: { schema: { $ref: '#/components/schemas/WhatsAppConfig' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /v1/config/whatsapp/instances:
+    get:
+      operationId: listWhatsAppInstances
+      responses:
+        '200': { description: Provider instances, content: { application/json: { schema: { type: object, required: [instances], properties: { instances: { type: array, items: { $ref: '#/components/schemas/WhatsAppInstance' } } } } } } }
+        '502': { $ref: '#/components/responses/ProviderFailure' }
+  /v1/config/whatsapp/instance:
+    put:
+      operationId: selectWhatsAppInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [instance_id], properties: { instance_id: { type: string, minLength: 1 } } }
+      responses:
+        '200': { description: Selected safe configuration, content: { application/json: { schema: { $ref: '#/components/schemas/WhatsAppConfig' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /v1/config/whatsapp/test:
+    post:
+      operationId: testWhatsApp
+      description: Validates the configured provider and active instance; sends no message. Body is intentionally empty.
+      responses:
+        '200': { description: Test result }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/ProviderFailure' }
+  /v1/config/sip-trunk:
+    put:
+      operationId: configureSIPTrunk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SIPConfigRequest' }
+      responses:
+        '200': { description: Safe SIP configuration, content: { application/json: { schema: { $ref: '#/components/schemas/SIPSafeResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '501': { description: Operational SIP boundary unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '502': { $ref: '#/components/responses/RuntimeFailure' }
+    get:
+      operationId: getSIPTrunk
+      responses:
+        '200': { description: Safe SIP configuration, content: { application/json: { schema: { $ref: '#/components/schemas/SIPSafeResponse' } } } }
+        '404': { description: SIP configuration not found }
+components:
+  responses:
+    BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ProviderFailure: { description: Safe provider failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    RuntimeFailure: { description: Safe SIP/Asterisk runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error: { type: object, required: [error], properties: { error: { type: string } } }
+    WhatsAppConfigRequest:
+      type: object
+      required: [provider, base_url, credential]
+      properties:
+        provider: { type: string }
+        base_url: { type: string, format: uri }
+        credential: { type: string, writeOnly: true }
+    WhatsAppConfig:
+      type: object
+      required: [provider, base_url, credential_configured, sdr_status]
+      properties:
+        provider: { type: string }
+        base_url: { type: string, format: uri }
+        credential_configured: { type: boolean }
+        active_instance_id: { type: string }
+        active_instance_phone: { type: string }
+        provider_status: { type: string }
+        sdr_status: { type: string }
+        last_verified_at: { type: string, format: date-time }
+    WhatsAppInstance:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        phone: { type: string }
+        status: { type: string, enum: [CONNECTED, READY, DISCONNECTED] }
+    SIPConfigRequest:
+      type: object
+      required: [provider, name, host, port, transport, auth]
+      properties:
+        provider: { type: string }
+        name: { type: string }
+        host: { type: string, description: Public SIP destination; production runtime resolves and pins the operational IP }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        transport: { type: string, enum: [udp, tcp, tls] }
+        registrar: { type: string, description: Optional SIP registrar destination; resolved and pinned by the production runtime }
+        outbound_proxy: { type: string, description: Optional SIP outbound proxy destination; resolved and pinned by the production runtime }
+        auth: { $ref: '#/components/schemas/SIPAuth' }
+        from_user: { type: string }
+        from_domain: { type: string }
+        caller_id: { type: string }
+        codecs: { type: array, items: { type: string } }
+        registration_required: { type: boolean }
+        enabled: { type: boolean }
+    SIPAuth:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [userpass, ip, none] }
+        username: { type: string }
+        secret: { type: string, writeOnly: true }
+        realm: { type: string }
+    SIPSafeResponse:
+      type: object
+      required: [provider, name, host, port, transport, auth]
+      description: Safe response; auth.secret is intentionally omitted.
+      properties:
+        provider: { type: string }
+        name: { type: string }
+        host: { type: string }
+        port: { type: integer }
+        transport: { type: string, enum: [udp, tcp, tls] }
+        registrar: { type: string }
+        outbound_proxy: { type: string }
+        auth:
+          type: object
+          required: [type]
+          properties:
+            type: { type: string, enum: [userpass, ip, none] }
+            username: { type: string }
+            realm: { type: string }
+        from_user: { type: string }
+        from_domain: { type: string }
+        caller_id: { type: string }
+        codecs: { type: array, items: { type: string } }
+        registration_required: { type: boolean }
+        enabled: { type: boolean }

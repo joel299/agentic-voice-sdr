@@ -161,6 +161,9 @@ jobs:
       RABBITMQ_DEFAULT_USER: ci-agentic
       RABBITMQ_DEFAULT_PASS: ci-rabbitmq-password
       RABBITMQ_DEFAULT_VHOST: /
+      POSTGRES_DB: agentic_voice_sdr_dev
+      POSTGRES_USER: ci-postgres
+      POSTGRES_PASSWORD: ci-postgres-password
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,7 +183,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for script in scripts/infra/*.sh; do
+          for script in scripts/infra/*.sh scripts/db/*.sh; do
             [[ -e "$script" ]] || continue
             bash -n "$script"
           done
@@ -196,3 +199,10 @@ jobs:
           set -euo pipefail
           chmod +x scripts/infra/smoke-test.sh
           ./scripts/infra/smoke-test.sh --down
+
+      - name: PostgreSQL 16 canonical Outbox smoke test
+        if: steps.infra.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/db/smoke-test.sh --down

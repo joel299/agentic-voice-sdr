@@ -3,7 +3,7 @@ name: agentic-voice-sdr-dev
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: agentic-postgres-dev
+    container_name: ${POSTGRES_CONTAINER_NAME:-agentic-postgres-dev}
     restart: unless-stopped
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -111,5 +111,5 @@ volumes:
 
 networks:
   voice-dev-net:
-    name: voice-dev-net
+    name: ${DEV_NETWORK_NAME:-voice-dev-net}
     driver: bridge

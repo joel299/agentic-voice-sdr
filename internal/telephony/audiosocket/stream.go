@@ -3,6 +3,7 @@ package audiosocket
 import (
 	"bytes"
 	"io"
+	"sync"
 )
 
 // Stream provides sequential AudioSocket frame transport over an io.Reader and
@@ -10,6 +11,9 @@ import (
 type Stream struct {
 	reader io.Reader
 	writer io.Writer
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewStream creates a stream boundary over reader and writer. Either side may
@@ -62,4 +66,24 @@ func (s *Stream) WriteFrame(frame Frame) error {
 		}
 	}
 	return nil
+}
+
+// Close closes the underlying reader when it is closable, which is the
+// production net.Conn path used by AudioSocket. It is idempotent and unblocks
+// a ReadFrame waiting on that connection. For write-only streams it closes the
+// underlying writer instead.
+func (s *Stream) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if closer, ok := s.reader.(io.Closer); ok {
+			s.closeErr = closer.Close()
+			return
+		}
+		if closer, ok := s.writer.(io.Closer); ok {
+			s.closeErr = closer.Close()
+		}
+	})
+	return s.closeErr
 }

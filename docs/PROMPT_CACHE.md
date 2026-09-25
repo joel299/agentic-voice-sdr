@@ -17,11 +17,11 @@ SPEC -> TEST -> RED -> IMPLEMENT -> GREEN -> REFACTOR -> REGRESSION -> EVIDENCE 
 OFFICIAL EXECUTION ROSTER:
 - Stark / Hermes: precise backend/core implementation and reliable handoff. Primary areas: Go runtime, API, HTTP/WebSocket, telephony/AudioSocket boundaries and internal services.
 - Neriel / OpenClaw: isolated domain/business-logic implementation with collision detection for parallel work. Primary areas: state machines, domain rules, agent behavior and tool orchestration.
-- Arquimedes / Antigravity: infrastructure/integration correctness and reproducible evidence. Primary areas: Redis, RabbitMQ, Docker/deploy, operational contracts and external integrations.
+- Arquimedes / OpenCode: infrastructure/integration correctness and reproducible evidence. Primary areas: Redis, RabbitMQ, Docker/deploy, operational contracts and external integrations.
 - Reviewer / Anorak: validate approved specs, actual diff, tests, regressions and scope; executor narrative alone is not evidence.
 
 ROSTER RULE:
-Only Stark/Hermes, Neriel/OpenClaw and Arquimedes/Antigravity receive implementation microtasks. Cursor is retired from task execution and must not be assigned as owner.
+Only Stark/Hermes, Neriel/OpenClaw and Arquimedes/OpenCode receive implementation microtasks. Cursor is retired from task execution and must not be assigned as owner.
 
 TASK_SUFFIX:
 ISSUE={{linear_issue}}
@@ -60,7 +60,7 @@ CI is the primary reproducible execution evidence. Manual logs may supplement CI
 
 ## ARQUIMEDES_EXECUTION_MANDATE
 
-Arquimedes / Antigravity is an execution agent.
+Arquimedes / OpenCode is an execution agent.
 
 For every assigned GRU:
 - execute the actual task end-to-end;

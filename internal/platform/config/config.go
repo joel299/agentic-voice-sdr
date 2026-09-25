@@ -7,20 +7,24 @@ import (
 )
 
 type Config struct {
-	HTTPAddr      string
-	ReadTimeout   time.Duration
-	WriteTimeout  time.Duration
-	IdleTimeout   time.Duration
-	ShutdownGrace time.Duration
+	HTTPAddr           string
+	WhatsAppConfigPath string
+	SIPConfigDir       string
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	IdleTimeout        time.Duration
+	ShutdownGrace      time.Duration
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:      envOrDefault("HTTP_ADDR", ":8080"),
-		ReadTimeout:   10 * time.Second,
-		WriteTimeout:  10 * time.Second,
-		IdleTimeout:   60 * time.Second,
-		ShutdownGrace: 10 * time.Second,
+		HTTPAddr:           envOrDefault("HTTP_ADDR", ":8080"),
+		WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""),
+		SIPConfigDir:       envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""),
+		ReadTimeout:        10 * time.Second,
+		WriteTimeout:       10 * time.Second,
+		IdleTimeout:        60 * time.Second,
+		ShutdownGrace:      10 * time.Second,
 	}
 	for _, item := range []struct {
 		name   string

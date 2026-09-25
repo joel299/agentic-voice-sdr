@@ -1,136 +1,149 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Agentic Voice SDR - PostgreSQL Dev Infrastructure & Outbox Smoke Test
-# Scope: Validates PostgreSQL container lifecycle, healthcheck, migration execution,
-# outbox schema constraints, pending index, idempotency, and transaction rollback.
-# ==============================================================================
+# PostgreSQL 16 development service + canonical Transactional Outbox smoke.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
+COMPOSE_FILE="${ROOT_DIR}/deploy/dev/docker-compose.yml"
 CLEANUP_DOWN=false
 if [[ "${1:-}" == "--down" || "${1:-}" == "--clean" ]]; then
   CLEANUP_DOWN=true
+elif [[ $# -gt 0 ]]; then
+  echo "Usage: $0 [--down|--clean]" >&2
+  exit 2
 fi
 
-# Load .env file if present
 if [[ -f "${ROOT_DIR}/.env" ]]; then
-  # shellcheck disable=SC1091
   set -a
+  # shellcheck disable=SC1091
   source "${ROOT_DIR}/.env"
   set +a
 fi
-
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_DB="${POSTGRES_DB:-agentic_voice_sdr_dev}"
-POSTGRES_USER="${POSTGRES_USER:-postgres}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-dev_postgres_secret_pass}"
+APP_ENV="${APP_ENV:-development}"
+POSTGRES_USER="${POSTGRES_USER:-}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-agentic-postgres-dev}"
+if [[ "${APP_ENV}" != "development" && "${APP_ENV}" != "dev" ]]; then
+  echo "[-] FATAL: smoke test is allowed only when APP_ENV=development or dev." >&2
+  exit 1
+fi
+if [[ ! "${POSTGRES_DB}" =~ ^[a-zA-Z0-9_]+$ || ( "${POSTGRES_DB}" != *_dev && "${POSTGRES_DB}" != *_development ) ]]; then
+  echo "[-] FATAL: smoke database name must be a safe identifier ending in _dev or _development." >&2
+  exit 1
+fi
+if [[ -z "${POSTGRES_USER}" || -z "${POSTGRES_PASSWORD}" ]]; then
+  echo "[-] ERROR: POSTGRES_USER and POSTGRES_PASSWORD are required in .env/environment." >&2
+  exit 1
+fi
+case "${POSTGRES_USER}" in
+  replace_with_*) echo "[-] ERROR: Replace the PostgreSQL username placeholder in .env." >&2; exit 1 ;;
+esac
+case "${POSTGRES_PASSWORD}" in
+  replace_with_*) echo "[-] ERROR: Replace the PostgreSQL password placeholder in .env." >&2; exit 1 ;;
+esac
+export POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD
 
-echo "===================================================================="
-echo "[+] Agentic Voice SDR - PostgreSQL Foundation & Outbox Smoke Test"
-echo "===================================================================="
+cleanup() {
+  local status=$?
+  if [[ -n "${SMOKE_EVENT_ID:-}" ]]; then
+    docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+      psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+      -c "DELETE FROM outbox_events WHERE id = '${SMOKE_EVENT_ID}';" >/dev/null 2>&1 || status=1
+  fi
+  if [[ "${CLEANUP_DOWN}" == true ]]; then
+    # Stop only the PostgreSQL service; do not remove volumes or affect Redis/RabbitMQ.
+    docker compose -f "${COMPOSE_FILE}" stop postgres >/dev/null || status=1
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
 
-export POSTGRES_PORT
-export POSTGRES_DB
-export POSTGRES_USER
-export POSTGRES_PASSWORD
+echo "[+] Starting PostgreSQL 16 development service."
+docker compose -f "${COMPOSE_FILE}" up -d postgres
 
-# Step 1: Start Docker Compose stack if not running
-echo "[+] Step 1: Starting PostgreSQL container (${CONTAINER_NAME})..."
-docker compose -f "${ROOT_DIR}/deploy/dev/docker-compose.yml" up -d postgres
-
-# Step 2: Wait for Healthcheck
-echo "[+] Step 2: Waiting for PostgreSQL healthcheck..."
-MAX_ATTEMPTS=30
-ATTEMPT=0
-HEALTHY=false
-
-while [[ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]]; do
-  ATTEMPT=$((ATTEMPT + 1))
-  STATUS="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo unknown)"
-
-  if [[ "${STATUS}" == "healthy" ]]; then
-    HEALTHY=true
-    echo "[+] PostgreSQL container is HEALTHY! (attempt ${ATTEMPT}/${MAX_ATTEMPTS})"
+healthy=false
+for attempt in $(seq 1 30); do
+  status="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if [[ "${status}" == healthy ]]; then
+    healthy=true
     break
   fi
-
-  echo "    Attempt ${ATTEMPT}/${MAX_ATTEMPTS}: status=${STATUS}... waiting 2s"
   sleep 2
 done
-
-if [[ "${HEALTHY}" != "true" ]]; then
-  echo "[-] ERROR: PostgreSQL container failed to become healthy within timeout." >&2
+if [[ "${healthy}" != true ]]; then
+  echo "[-] PostgreSQL did not become healthy." >&2
   docker logs "${CONTAINER_NAME}" --tail 50 >&2
   exit 1
 fi
+echo "[+] PostgreSQL healthcheck passed."
 
-# Step 3: Test database connectivity
-echo "[+] Step 3: Validating PostgreSQL database connectivity..."
-if docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "SELECT 1;" >/dev/null 2>&1; then
-  echo "[+] Connection to database '${POSTGRES_DB}' verified successfully."
-else
-  echo "[-] ERROR: Failed to execute query on '${POSTGRES_DB}'." >&2
+major_version="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
+  "SELECT current_setting('server_version_num')::integer / 10000;")"
+if [[ "${major_version}" != 16 ]]; then
+  echo "[-] Expected PostgreSQL 16; server major version was ${major_version}." >&2
+  exit 1
+fi
+echo "[+] PostgreSQL major version 16: PASS."
+
+"${SCRIPT_DIR}/migrate.sh"
+
+table_exists="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
+  "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'outbox_events');")"
+if [[ "${table_exists}" != t ]]; then
+  echo "[-] Canonical outbox_events table is missing after migrations." >&2
   exit 1
 fi
 
-# Step 4: Execute Dev Migrations Script
-echo "[+] Step 4: Running dev migration script (scripts/db/migrate.sh)..."
-"${ROOT_DIR}/scripts/db/migrate.sh"
-
-# Step 5: Test Outbox Schema & Transactions if table exists
-echo "[+] Step 5: Testing Transactional Outbox schema and semantics..."
-TABLE_EXISTS="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'outbox_events');")"
-
-if [[ "${TABLE_EXISTS}" == "t" || "${TABLE_EXISTS}" == "true" ]]; then
-  echo "[+] Table outbox_events found! Validating constraints and transaction semantics..."
-
-  # Test Transaction & Rollback
-  echo "    - Testing transaction rollback..."
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "
-    BEGIN;
-    INSERT INTO outbox_events (id, event_type, payload, status) VALUES ('00000000-0000-0000-0000-000000000001', 'test_event', '{}', 'PENDING');
-    ROLLBACK;
-  " >/dev/null
-  ROLLBACK_CHECK="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "SELECT COUNT(*) FROM outbox_events WHERE id = '00000000-0000-0000-0000-000000000001';")"
-  if [[ "${ROLLBACK_CHECK}" -eq 0 ]]; then
-    echo "      [PASS] Rollback left zero partial state."
-  else
-    echo "      [FAIL] Rollback leaked data into database!" >&2
-    exit 1
-  fi
-
-  # Test Idempotent Insert & Commit
-  echo "    - Testing transaction commit & idempotency constraint..."
-  TEST_UUID="11111111-1111-1111-1111-111111111111"
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "
-    INSERT INTO outbox_events (id, event_type, payload, status) VALUES ('${TEST_UUID}', 'smoke_test_event', '{\"key\":\"value\"}', 'PENDING')
-    ON CONFLICT (id) DO NOTHING;
-  " >/dev/null
-
-  COMMIT_CHECK="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "SELECT COUNT(*) FROM outbox_events WHERE id = '${TEST_UUID}';")"
-  if [[ "${COMMIT_CHECK}" -eq 1 ]]; then
-    echo "      [PASS] Transaction committed test event successfully."
-  else
-    echo "      [FAIL] Event insertion failed." >&2
-    exit 1
-  fi
-
-  # Clean up test event
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "DELETE FROM outbox_events WHERE id = '${TEST_UUID}';" >/dev/null
-else
-  echo "[!] Table outbox_events is not created yet (awaiting Stark S1-S5 migrations GRU-69/70/71)."
-  echo "[!] PostgreSQL dev service infrastructure is fully verified and healthy."
+SMOKE_EVENT_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'SELECT gen_random_uuid();' | tr -d '[:space:]')"
+SMOKE_CORRELATION_ID="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'SELECT gen_random_uuid();' | tr -d '[:space:]')"
+if [[ ! "${SMOKE_EVENT_ID}" =~ ^[0-9a-fA-F-]{36}$ || ! "${SMOKE_CORRELATION_ID}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "[-] Could not generate smoke UUIDs." >&2
+  exit 1
 fi
 
-# Cleanup if requested
-if [[ "${CLEANUP_DOWN}" == "true" ]]; then
-  echo "[+] Cleaning up: Stopping container stack..."
-  docker compose -f "${ROOT_DIR}/deploy/dev/docker-compose.yml" down -v
+# Valid event explicitly supplies every canonical NOT NULL field, including
+# aggregate, routing, idempotency, correlation, payload, and status.
+docker exec -i -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" <<SQL >/dev/null
+INSERT INTO outbox_events (
+  id, aggregate_type, aggregate_id, event_type, exchange, routing_key,
+  payload, headers, idempotency_key, correlation_id, status, retry_count
+) VALUES (
+  '${SMOKE_EVENT_ID}', 'SmokeTest', '${SMOKE_EVENT_ID}', 'postgres.smoke_test',
+  'voice.commands', 'call.dispatch', '{"smoke":true}'::jsonb, '{}'::jsonb,
+  'postgres-smoke-${SMOKE_EVENT_ID}', '${SMOKE_CORRELATION_ID}', 'PENDING', 0
+);
+SQL
+count="$(docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
+  "SELECT count(*) FROM outbox_events WHERE id = '${SMOKE_EVENT_ID}' AND status = 'PENDING';")"
+if [[ "${count}" != 1 ]]; then
+  echo "[-] Valid canonical event insert was not found." >&2
+  exit 1
 fi
+echo "[+] Valid canonical Outbox event insert: PASS."
 
-echo "===================================================================="
-echo "[+] PostgreSQL Dev Infrastructure Smoke Test: SUCCESS!"
-echo "===================================================================="
+# Missing required canonical fields must be rejected by PostgreSQL NOT NULL.
+if docker exec -i -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" <<SQL >/dev/null 2>&1
+INSERT INTO outbox_events (event_type, payload) VALUES ('postgres.invalid_smoke', '{}'::jsonb);
+SQL
+then
+  echo "[-] Invalid canonical event unexpectedly succeeded." >&2
+  exit 1
+fi
+echo "[+] Invalid canonical event rejected: PASS."
+
+# Explicit cleanup now, then disarm the EXIT cleanup's second delete.
+docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER_NAME}" \
+  psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+  -c "DELETE FROM outbox_events WHERE id = '${SMOKE_EVENT_ID}';" >/dev/null
+SMOKE_EVENT_ID=""
+echo "[+] Smoke event cleanup: PASS."
+echo "[+] PostgreSQL canonical Outbox smoke: SUCCESS."

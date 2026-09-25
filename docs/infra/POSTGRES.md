@@ -1,105 +1,67 @@
-# PostgreSQL Dev Infrastructure & Transactional Outbox Operations Guide
+# PostgreSQL Dev Infrastructure & Transactional Outbox
 
-## Overview
+This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical Outbox schema is defined only by the ordered SQL migrations in `db/migrations/`; in particular, `db/migrations/001_outbox_events.sql` is the source of truth for `outbox_events`. Do not maintain a second DDL contract in documentation.
 
-This document details the PostgreSQL local development service, environment contract, migration/reset tooling, smoke testing, and Transactional Outbox schema foundation for the **Agentic Voice SDR** platform (`GRU-65`).
+## Prerequisites and environment
 
----
+Docker Engine with the Compose plugin is required. Copy `.env.example` to `.env` and replace the PostgreSQL, Redis, and RabbitMQ placeholders with local development credentials. Never commit `.env` or real credentials. `POSTGRES_USER` and `POSTGRES_PASSWORD` must be set; scripts reject the untouched password placeholder.
 
-## 1. Quick Start & Operations
+PostgreSQL variables: `POSTGRES_PORT` (default `5432`), `POSTGRES_DB` (default `agentic_voice_sdr_dev`), `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_HOST` (default `localhost`), `POSTGRES_CONTAINER_NAME` (default `agentic-postgres-dev`), and `DEV_NETWORK_NAME` (default `voice-dev-net`). The container and network names can be overridden to run an isolated local smoke without changing the normal development stack. Redis and RabbitMQ variables remain documented in `.env.example` and `docs/infra/REDIS_RABBITMQ_DEV.md`.
 
-### Start PostgreSQL Dev Service
+## PostgreSQL 16 service
+
+Validate Compose configuration without printing resolved environment values:
+
+```bash
+docker compose -f deploy/dev/docker-compose.yml config --quiet
+```
+
+Start only PostgreSQL, preserving Redis and RabbitMQ services:
+
 ```bash
 docker compose -f deploy/dev/docker-compose.yml up -d postgres
 ```
 
-### Stop PostgreSQL Dev Service
-```bash
-docker compose -f deploy/dev/docker-compose.yml stop postgres
-```
+Check health and logs:
 
-### Inspect Service Health & Logs
 ```bash
 docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' agentic-postgres-dev
 docker logs agentic-postgres-dev --tail 50
 ```
 
----
+Stop only PostgreSQL (the named volume is retained):
 
-## 2. Environment Variables & Contracts
+```bash
+docker compose -f deploy/dev/docker-compose.yml stop postgres
+```
 
-All configuration options are defined in `.env.example`. Local overrides are provided via `.env`:
+## Canonical migrations
 
-| Variable Name | Default / Example Value | Description |
-|---|---|---|
-| `POSTGRES_PORT` | `5432` | Exposed host port for local PostgreSQL |
-| `POSTGRES_DB` | `agentic_voice_sdr_dev` | Dev database name |
-| `POSTGRES_USER` | `replace_with_dev_postgres_username` | Database user |
-| `POSTGRES_PASSWORD` | `replace_with_secure_dev_postgres_password` | Database password (required) |
-| `SUPABASE_URL` | `replace_with_dev_supabase_url` | Supabase endpoint URL |
-| `SUPABASE_ANON_KEY` | `replace_with_dev_supabase_anon_key` | Supabase anonymous public key |
-| `SUPABASE_SERVICE_ROLE_KEY` | `replace_with_dev_supabase_service_role_key` | Supabase service role key |
+`./scripts/db/migrate.sh` applies sorted `db/migrations/*.sql` using `psql` with `ON_ERROR_STOP`; missing migrations, connection failures, and SQL errors fail the command. It does not fall back to a second migrations directory and does not silently report success without applying schema.
 
----
-
-## 3. Database Management Scripts
-
-### Safe Dev Migrations
-Applies SQL files from `migrations/*.sql` in alphabetical sequence:
 ```bash
 ./scripts/db/migrate.sh
 ```
 
-### Safe Dev Database Reset
-Recreates the development database from scratch and re-runs migrations:
+The migration is safe to re-run. Its canonical `outbox_events` contract uses `PENDING`, `PUBLISHED`, and `FAILED`, `published_at`, aggregate and routing fields, payload/headers, idempotency/correlation/trace metadata, retry count, last error, and creation time. Consult the migration itself for exact types, nullability, defaults, uniqueness, and indexes.
+
+## Development-only reset
+
+`./scripts/db/reset.sh` drops and recreates the configured database before applying canonical migrations. It requires `APP_ENV=development` (default) or `dev`, a localhost host, and a safe database identifier ending in `_dev` or `_development`; it rejects remote hosts and production/staging environments. It never uses `docker compose down -v`.
+
 ```bash
 ./scripts/db/reset.sh
 ```
 
-> **Safety Warning:** `reset.sh` enforces strict safety guards:
-> 1. Blocks execution if `APP_ENV` is set to `production`, `prod`, or `staging`.
-> 2. Rejects execution against remote database hosts unless `--force-dev-reset` is passed.
+Treat this command as destructive to the selected local development database. It is not a production migration or reset tool.
 
-### Automated Infrastructure Smoke Test
-Validates container startup, healthcheck readiness, database connectivity, migration execution, transaction rollback, and outbox schema constraints:
+## Real PostgreSQL smoke
+
+The smoke starts only the PostgreSQL 16 service, waits for the healthcheck, applies the canonical migration, verifies `outbox_events`, inserts one event with all required canonical columns, confirms PostgreSQL rejects an invalid insert missing required values, and removes the test event. Optional `--down`/`--clean` stops only the PostgreSQL service and preserves its volume; Redis and RabbitMQ are not stopped or removed.
+
 ```bash
 ./scripts/db/smoke-test.sh
+./scripts/db/smoke-test.sh --down
 ```
 
----
-
-## 4. Transactional Outbox Pattern Foundation
-
-### Architectural Role
-The **Transactional Outbox Pattern** ensures atomic state persistence alongside event emission. Business state changes and outbox event records are saved within the same local database transaction.
-
-### Schema Contract (outbox_events)
-When Stark S1–S5 migrations (`GRU-69/70/71`) are applied, the `outbox_events` table guarantees:
-- **`id`**: `UUID PRIMARY KEY`
-- **`event_type`**: `VARCHAR(255) NOT NULL`
-- **`payload`**: `JSONB NOT NULL`
-- **`status`**: `VARCHAR(50) NOT NULL DEFAULT 'PENDING'` (`PENDING`, `PROCESSED`, `FAILED`)
-- **`created_at`**: `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`
-- **`processed_at`**: `TIMESTAMPTZ NULL`
-- **`retry_count`**: `INT DEFAULT 0`
-- **Partial Index**: `idx_outbox_events_pending` on `(created_at) WHERE status = 'PENDING'`
-
-### Scope Notice
-> **Important:** *The Go Outbox Relay processor (background worker, polling daemon, RabbitMQ publisher) is NOT implemented in GRU-65.* GRU-65 provides the PostgreSQL infrastructure, environment contract, dev container, healthchecks, scripts, and CI validation. The Go Outbox Relay worker implementation is assigned to subsequent tasks (`GRU-69/70/71`).
-
----
-
-## 5. Maintenance & Troubleshooting
-
-- **Container Reset & Volume Purge:**
-  ```bash
-  docker compose -f deploy/dev/docker-compose.yml down -v
-  docker compose -f deploy/dev/docker-compose.yml up -d postgres
-  ```
-- **Direct psql Access:**
-  ```bash
-  docker exec -it agentic-postgres-dev psql -U postgres -d agentic_voice_sdr_dev
-  ```
-
----
-*Signed: — Arquimedes*
+The smoke does not print credentials or provider response data. No Outbox relay worker or application persistence layer is implemented by this infrastructure foundation.

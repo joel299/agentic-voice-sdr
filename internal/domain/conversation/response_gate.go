@@ -17,6 +17,7 @@ var (
 	ErrResponseAlreadyStarted    = errors.New("response already started")
 	ErrResponseNotStarted        = errors.New("response not started")
 	ErrResponseAlreadyCompleted  = errors.New("response already completed")
+	ErrResponseAlreadyFailed     = errors.New("response already failed")
 )
 
 // ResponseKey identifies one response opportunity by its conversation and the
@@ -34,6 +35,7 @@ const (
 	ResponseAuthorized ResponseState = "authorized"
 	ResponseStarted    ResponseState = "started"
 	ResponseCompleted  ResponseState = "completed"
+	ResponseFailed     ResponseState = "failed"
 )
 
 // ResponseAuthorization is the minimal result of a successful authorization.
@@ -117,6 +119,8 @@ func (g *ResponseGate) Start(key ResponseKey) error {
 		return ErrResponseAlreadyStarted
 	case ResponseCompleted:
 		return ErrResponseAlreadyCompleted
+	case ResponseFailed:
+		return ErrResponseAlreadyFailed
 	default:
 		return ErrResponseNotAuthorized
 	}
@@ -134,6 +138,27 @@ func (g *ResponseGate) Complete(key ResponseKey) error {
 		return nil
 	case ResponseAuthorized:
 		return ErrResponseNotStarted
+	case ResponseCompleted:
+		return ErrResponseAlreadyCompleted
+	case ResponseFailed:
+		return ErrResponseAlreadyFailed
+	default:
+		return ErrResponseNotAuthorized
+	}
+}
+
+func (g *ResponseGate) Fail(key ResponseKey) error {
+	if err := key.validate(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch g.cycles[key] {
+	case ResponseAuthorized, ResponseStarted:
+		g.cycles[key] = ResponseFailed
+		return nil
+	case ResponseFailed:
+		return ErrResponseAlreadyFailed
 	case ResponseCompleted:
 		return ErrResponseAlreadyCompleted
 	default:

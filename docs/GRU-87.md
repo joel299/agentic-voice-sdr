@@ -4,7 +4,6 @@
 
 - Environment: `Stark VPS` (`vultr`), existing branch worktree `/root/work/gru81`.
 - Branch: `agent/hermes/gemini-live-session-boundary`.
-- Final head: `da340d032ab62247589fc33c19d70184ffeb6032`.
 - PR: #50.
 - Official reference: Google AI for Developers, [raw WebSockets](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket), retrieved during validation.
 - Endpoint class: Gemini Live BidiGenerateContent WSS; API key used only in process memory from the authorized runtime document and never logged.
@@ -35,7 +34,7 @@
 - Added typed function declarations for real tool-call setup/parsing.
 - Added configurable response modalities for the transcription smoke.
 - Parsed interim and final input transcription event variants.
-- Added an activity-end message for client-side VAD boundaries.
+- Uses `realtimeInput.audioStreamEnd=true` with automatic VAD; `activityEnd` is not sent.
 
 ## Regression gates
 

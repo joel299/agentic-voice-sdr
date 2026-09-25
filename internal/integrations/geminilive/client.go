@@ -224,10 +224,10 @@ func (s *Session) SendAudio(ctx context.Context, pcm16k []byte) error {
 	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"audio": map[string]any{"data": base64.StdEncoding.EncodeToString(pcm16k), "mimeType": "audio/pcm;rate=16000"}}})
 }
 
-// EndAudio signals the end of a realtime audio activity when client-side
-// voice activity detection is used by the provider.
+// EndAudio signals the end of the realtime audio stream while automatic
+// voice activity detection remains enabled by the provider.
 func (s *Session) EndAudio(ctx context.Context) error {
-	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"activityEnd": map[string]any{}}})
+	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"audioStreamEnd": true}})
 }
 func (s *Session) send(ctx context.Context, message any) error {
 	if s == nil || s.conn == nil {

@@ -16,8 +16,8 @@ import (
 
 func TestSessionContractAndEvents(t *testing.T) {
 	type observed struct {
-		setup, text, audio bool
-		key                string
+		setup, text, audio, audioStreamEnd, activityEnd bool
+		key                                             string
 	}
 	got := make(chan observed, 1)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +48,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 		var o observed
 		o.setup = true
 		o.key = r.URL.Query().Get("key")
-		for i := 0; i < 2; i++ {
+		for i := 0; i < 3; i++ {
 			_, raw, err = c.Read(ctx)
 			if err != nil {
 				t.Error(err)
@@ -63,6 +63,16 @@ func TestSessionContractAndEvents(t *testing.T) {
 			if strings.Contains(string(b), `audio/pcm;rate=16000`) {
 				o.audio = true
 			}
+			var realtime struct {
+				AudioStreamEnd bool            `json:"audioStreamEnd"`
+				ActivityEnd    json.RawMessage `json:"activityEnd"`
+			}
+			if realtimeRaw, ok := msg["realtimeInput"].(map[string]any); ok {
+				rawRealtime, _ := json.Marshal(realtimeRaw)
+				_ = json.Unmarshal(rawRealtime, &realtime)
+			}
+			o.audioStreamEnd = realtime.AudioStreamEnd
+			o.activityEnd = len(realtime.ActivityEnd) > 0
 		}
 		got <- o
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"outputTranscription":{"text":"hello back"}}}`))
@@ -84,7 +94,10 @@ func TestSessionContractAndEvents(t *testing.T) {
 	if err = s.SendAudio(context.Background(), []byte{1, 2, 3}); err != nil {
 		t.Fatal(err)
 	}
-	if o := <-got; !o.setup || !o.text || !o.audio {
+	if err = s.EndAudio(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if o := <-got; !o.setup || !o.text || !o.audio || !o.audioStreamEnd || o.activityEnd {
 		t.Fatalf("server observations: %+v", o)
 	}
 	e, err := s.Receive(context.Background())

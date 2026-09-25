@@ -116,6 +116,9 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 	if !preExecution.Executable {
 		return preExecution, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return conversation.TurnDirective{}, err
+	}
 
 	result, err := runtime.dispatcher.Dispatch(ctx, toolruntime.ToolExecutionRequest{
 		Tool:          input.Capability.RequestedTool,

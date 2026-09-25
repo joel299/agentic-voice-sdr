@@ -25,6 +25,17 @@ func (p *countingProvider) Decide(ctx context.Context, input conversation.Decisi
 }
 func (p *countingProvider) Calls() int { p.mu.Lock(); defer p.mu.Unlock(); return p.calls }
 
+type cancelingProvider struct {
+	provider conversation.DecisionProvider
+	cancel   context.CancelFunc
+}
+
+func (p *cancelingProvider) Decide(ctx context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
+	decision, err := p.provider.Decide(ctx, input)
+	p.cancel()
+	return decision, err
+}
+
 type fakeDispatcher struct {
 	mu     sync.Mutex
 	calls  int
@@ -240,6 +251,28 @@ func TestRuntimePreservesCancellationBeforeProviderAndDuringDispatch(t *testing.
 	_, err = runtime.ProcessTurn(context.Background(), TurnInput{State: runtimeState(t, conversation.StageActive, false), Capability: &CapabilityContext{RequestedTool: tools.ToolCalendarCheckAvailability, Arguments: map[string]any{}}})
 	if !errors.Is(err, context.Canceled) || provider.Calls() != 1 || dispatcher.Calls() != 1 {
 		t.Fatalf("error=%v provider=%d dispatcher=%d", err, provider.Calls(), dispatcher.Calls())
+	}
+}
+
+func TestRuntimeRechecksCancellationBeforeDispatch(t *testing.T) {
+	base := scriptedProvider(t, conversation.ActionRequestCapability, conversation.ReasonCapabilityRequired)
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &cancelingProvider{provider: base, cancel: cancel}
+	dispatcher := &fakeDispatcher{result: conversation.ToolResult{Tool: "calendar.check_availability", Status: conversation.ToolResultSucceeded}}
+	runtime, err := New(provider, dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runtime.ProcessTurn(ctx, TurnInput{
+		State: runtimeState(t, conversation.StageOpening, false),
+		Capability: &CapabilityContext{
+			RequestedTool: "calendar.check_availability",
+			Arguments:     map[string]any{"date": "2026-09-25"},
+		},
+	})
+	if !errors.Is(err, context.Canceled) || dispatcher.Calls() != 0 {
+		t.Fatalf("err=%v dispatcher=%d", err, dispatcher.Calls())
 	}
 }
 

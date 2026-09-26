@@ -106,6 +106,46 @@ func TestFinalTranscriptCreatesSequentialLeadTurnsIncludingDuplicates(t *testing
 	}
 }
 
+func TestFinalTranscriptIsConsumedAndNormalized(t *testing.T) {
+	h, state, processor := newTestHandler(t, nil)
+	downstreamCalls := 0
+	h.downstream = func(context.Context, geminilive.Event) error {
+		downstreamCalls++
+		return nil
+	}
+	if err := h.HandleEvent(context.Background(), finalEvent("   hello world   ")); err != nil {
+		t.Fatal(err)
+	}
+	turns := state.Turns()
+	if len(turns) != 1 || turns[0].Text != "hello world" {
+		t.Fatalf("turns=%#v, want normalized text", turns)
+	}
+	if processor.calls != 1 || downstreamCalls != 0 {
+		t.Fatalf("processor calls=%d downstream calls=%d", processor.calls, downstreamCalls)
+	}
+	if err := h.HandleEvent(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); err != nil {
+		t.Fatal(err)
+	}
+	if downstreamCalls != 1 {
+		t.Fatalf("downstream calls=%d, want 1 for non-final event", downstreamCalls)
+	}
+}
+
+func TestBlankFinalIsConsumedWithoutDownstream(t *testing.T) {
+	h, _, processor := newTestHandler(t, nil)
+	downstreamCalls := 0
+	h.downstream = func(context.Context, geminilive.Event) error {
+		downstreamCalls++
+		return nil
+	}
+	if err := h.HandleEvent(context.Background(), finalEvent(" 	\n ")); err != nil {
+		t.Fatal(err)
+	}
+	if processor.calls != 0 || downstreamCalls != 0 {
+		t.Fatalf("processor calls=%d downstream calls=%d", processor.calls, downstreamCalls)
+	}
+}
+
 func TestBeginErrorLeavesNoActiveLifecycle(t *testing.T) {
 	beginErr := errors.New("processor failed")
 	h, state, processor := newTestHandler(t, beginErr)
@@ -176,8 +216,8 @@ func TestStaleLeaseCannotCompleteOrFailNewKey(t *testing.T) {
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	if len(coordinator.calls) != 2 || coordinator.calls[0] != "complete:a" || coordinator.calls[1] != "fail:a" {
-		t.Fatalf("calls=%v", coordinator.calls)
+	if len(coordinator.calls) != 0 {
+		t.Fatalf("stale lease called coordinator: %v", coordinator.calls)
 	}
 }
 
@@ -191,5 +231,71 @@ func TestFailActiveSnapshotsAndClearsCurrentKey(t *testing.T) {
 	}
 	if adapter.CaptureActive() != nil {
 		t.Fatal("FailActive did not clear current key")
+	}
+}
+
+func TestCurrentLeaseOperationsUseExactCurrentKey(t *testing.T) {
+	coordinator := &lifecycleCoordinator{}
+	adapter := NewResponseLifecycleAdapter(coordinator)
+	keyA := conversation.ResponseKey{ConversationID: "c", SourceTurnID: "a"}
+	keyB := conversation.ResponseKey{ConversationID: "c", SourceTurnID: "b"}
+	adapter.Bind(keyA)
+	leaseA := adapter.CaptureActive()
+	if err := leaseA.Complete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter.Bind(keyB)
+	if err := adapter.FailActive(context.Background(), errors.New("provider reason")); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if len(coordinator.calls) != 2 || coordinator.calls[0] != "complete:a" || coordinator.calls[1] != "fail:b" {
+		t.Fatalf("calls=%v", coordinator.calls)
+	}
+}
+
+func TestResponseLifecycleAdapterConcurrentOperations(t *testing.T) {
+	coordinator := &lifecycleCoordinator{}
+	adapter := NewResponseLifecycleAdapter(coordinator)
+	keys := []conversation.ResponseKey{
+		{ConversationID: "c", SourceTurnID: "a"},
+		{ConversationID: "c", SourceTurnID: "b"},
+		{ConversationID: "c", SourceTurnID: "c"},
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := keys[i%len(keys)]
+			adapter.Bind(key)
+			lease := adapter.CaptureActive()
+			if lease != nil {
+				_ = lease.ModelAudioAuthorized()
+				if i%2 == 0 {
+					_ = lease.Complete(context.Background())
+				} else {
+					_ = lease.Fail(context.Background(), errors.New("provider detail"))
+				}
+			}
+			_ = adapter.FailActive(context.Background(), errors.New("session detail"))
+		}(i)
+	}
+	wg.Wait()
+	coordinator.mu.Lock()
+	coordinator.calls = nil
+	coordinator.mu.Unlock()
+	adapter.Bind(keys[0])
+	lease := adapter.CaptureActive()
+	if lease == nil || !lease.ModelAudioAuthorized() {
+		t.Fatal("final active key is not authorized")
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	for _, call := range coordinator.calls {
+		if call == "complete:"+keys[0].SourceTurnID || call == "fail:"+keys[0].SourceTurnID {
+			t.Fatalf("concurrent stale operation touched final key: %s", call)
+		}
 	}
 }

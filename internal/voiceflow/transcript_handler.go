@@ -72,13 +72,16 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if event.Kind != geminilive.EventInputTranscription || event.InputTranscriptState != geminilive.TranscriptFinal {
 		return h.forward(ctx, event)
 	}
-	if strings.TrimSpace(event.Text) == "" {
-		return h.forward(ctx, event)
+	text := strings.TrimSpace(event.Text)
+	if text == "" {
+		// A final transcript is consumed by this handler even when it is blank;
+		// downstream must not turn invalid input into a response.
+		return nil
 	}
 
 	h.nextLead++
 	turnID := fmt.Sprintf("lead-%06d", h.nextLead)
-	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, event.Text, conversation.TranscriptFinal)
+	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, text, conversation.TranscriptFinal)
 	if err != nil {
 		return err
 	}
@@ -92,7 +95,7 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	// Begin is synchronous; bind before returning to the receive owner so the
 	// bridge can authorize the very first model audio chunk.
 	h.lifecycle.Bind(key)
-	return h.forward(ctx, event)
+	return nil
 }
 
 func (h *FinalTranscriptHandler) forward(ctx context.Context, event geminilive.Event) error {

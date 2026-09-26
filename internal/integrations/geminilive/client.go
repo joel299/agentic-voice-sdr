@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"nhooyr.io/websocket"
 )
@@ -22,7 +23,11 @@ const (
 	OutputSampleRate = 24000
 )
 
-var ErrNotReady = errors.New("geminilive: session is not ready")
+var (
+	ErrNotReady             = errors.New("geminilive: session is not ready")
+	ErrRemoteClosed         = errors.New("geminilive: provider session closed")
+	ErrCapabilityNotAllowed = errors.New("geminilive: session role does not allow this capability")
+)
 
 type Config struct {
 	APIKey             string
@@ -141,15 +146,27 @@ type ToolCall struct {
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
-type Session struct {
-	conn      *websocket.Conn
-	cfg       Config
-	writeMu   sync.Mutex
-	closeOnce sync.Once
-	done      chan struct{}
+type providerRole uint8
+
+const (
+	roleInputTranscription providerRole = iota + 1
+	roleControlledResponse
+)
+
+type providerSession struct {
+	conn          *websocket.Conn
+	cfg           Config
+	role          providerRole
+	writeMu       sync.Mutex
+	closeOnce     sync.Once
+	done          chan struct{}
+	receiveActive atomic.Bool
 }
 
-func Connect(ctx context.Context, cfg Config) (*Session, error) {
+func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
+	if role != roleInputTranscription && role != roleControlledResponse {
+		return nil, ErrCapabilityNotAllowed
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -170,11 +187,11 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 	conn, _, err := websocket.Dial(ctx, u.String(), nil)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, wrap(ErrorCanceled, context.Cause(ctx))
+			return nil, wrap(ErrorCanceled, ctx.Err())
 		}
 		return nil, wrap(ErrorConnect, errors.New("WebSocket connection failed"))
 	}
-	s := &Session{conn: conn, cfg: cfg, done: make(chan struct{})}
+	s := &providerSession{conn: conn, cfg: cfg, role: role, done: make(chan struct{})}
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -182,7 +199,7 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		case <-s.done:
 		}
 	}()
-	if err := s.sendJSON(ctx, setupMessage(cfg)); err != nil {
+	if err := s.sendJSON(ctx, setupMessage(cfg, role)); err != nil {
 		_ = s.Close()
 		return nil, wrap(ErrorSetup, err)
 	}
@@ -222,11 +239,11 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (s *Session) sendJSON(ctx context.Context, message any) error {
+func (s *providerSession) sendJSON(ctx context.Context, message any) error {
 	return s.send(ctx, message)
 }
 
-func setupMessage(cfg Config) map[string]any {
+func setupMessage(cfg Config, role providerRole) map[string]any {
 	// Gemini Live expects generationConfig, rather than responseModalities and
 	// transcription settings directly under setup.
 	setup := map[string]any{
@@ -234,8 +251,14 @@ func setupMessage(cfg Config) map[string]any {
 		"generationConfig": map[string]any{
 			"responseModalities": cfg.ResponseModalities,
 		},
-		"inputAudioTranscription":  map[string]any{},
-		"outputAudioTranscription": map[string]any{},
+	}
+	switch role {
+	case roleInputTranscription:
+		setup["inputAudioTranscription"] = map[string]any{}
+	case roleControlledResponse:
+		setup["outputAudioTranscription"] = map[string]any{}
+	default:
+		return map[string]any{"setup": map[string]any{}}
 	}
 	if len(cfg.Tools) > 0 {
 		setup["tools"] = cfg.Tools
@@ -248,7 +271,13 @@ func setupMessage(cfg Config) map[string]any {
 
 // SendClientContent sends one discrete user turn and marks it complete. It is
 // intentionally separate from realtimeInput, which is reserved for streaming.
-func (s *Session) SendClientContent(ctx context.Context, text string) error {
+func (s *providerSession) SendClientContent(ctx context.Context, text string) error {
+	if s == nil {
+		return ErrNotReady
+	}
+	if s.role != roleControlledResponse {
+		return ErrCapabilityNotAllowed
+	}
 	if strings.TrimSpace(text) == "" {
 		return errors.New("geminilive: client content is empty")
 	}
@@ -263,13 +292,25 @@ func (s *Session) SendClientContent(ctx context.Context, text string) error {
 	})
 }
 
-func (s *Session) SendText(ctx context.Context, text string) error {
+func (s *providerSession) SendText(ctx context.Context, text string) error {
+	if s == nil {
+		return ErrNotReady
+	}
+	if s.role != roleInputTranscription {
+		return ErrCapabilityNotAllowed
+	}
 	if strings.TrimSpace(text) == "" {
 		return errors.New("geminilive: text is empty")
 	}
 	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"text": text}})
 }
-func (s *Session) SendAudio(ctx context.Context, pcm16k []byte) error {
+func (s *providerSession) SendAudio(ctx context.Context, pcm16k []byte) error {
+	if s == nil {
+		return ErrNotReady
+	}
+	if s.role != roleInputTranscription {
+		return ErrCapabilityNotAllowed
+	}
 	if len(pcm16k) == 0 {
 		return errors.New("geminilive: audio is empty")
 	}
@@ -278,10 +319,16 @@ func (s *Session) SendAudio(ctx context.Context, pcm16k []byte) error {
 
 // EndAudio signals the end of the realtime audio stream while automatic
 // voice activity detection remains enabled by the provider.
-func (s *Session) EndAudio(ctx context.Context) error {
+func (s *providerSession) EndAudio(ctx context.Context) error {
+	if s == nil {
+		return ErrNotReady
+	}
+	if s.role != roleInputTranscription {
+		return ErrCapabilityNotAllowed
+	}
 	return s.send(ctx, map[string]any{"realtimeInput": map[string]any{"audioStreamEnd": true}})
 }
-func (s *Session) send(ctx context.Context, message any) error {
+func (s *providerSession) send(ctx context.Context, message any) error {
 	if s == nil || s.conn == nil {
 		return ErrNotReady
 	}
@@ -302,11 +349,14 @@ func (s *Session) send(ctx context.Context, message any) error {
 	}
 	return nil
 }
-func (s *Session) readJSON(ctx context.Context) (map[string]json.RawMessage, error) {
+func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMessage, error) {
 	typ, data, err := s.conn.Read(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, wrap(ErrorCanceled, ctx.Err())
+		}
+		if websocket.CloseStatus(err) != -1 {
+			return nil, wrap(ErrorRemoteClose, ErrRemoteClosed)
 		}
 		return nil, wrap(ErrorReceive, errors.New("WebSocket read failed"))
 	}
@@ -319,10 +369,14 @@ func (s *Session) readJSON(ctx context.Context) (map[string]json.RawMessage, err
 	}
 	return msg, nil
 }
-func (s *Session) Receive(ctx context.Context) (Event, error) {
+func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if s == nil || s.conn == nil {
 		return Event{}, ErrNotReady
 	}
+	if !s.receiveActive.CompareAndSwap(false, true) {
+		return Event{}, ErrConcurrentReceiveOwner
+	}
+	defer s.receiveActive.Store(false)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -412,7 +466,7 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 	}
 	return Event{Kind: EventUnknown}
 }
-func (s *Session) Close() error {
+func (s *providerSession) Close() error {
 	if s == nil {
 		return nil
 	}

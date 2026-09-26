@@ -84,7 +84,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 	endpoint := "ws" + strings.TrimPrefix(ts.URL, "http")
-	s, err := Connect(context.Background(), Config{APIKey: "secret-not-for-logs", Endpoint: endpoint, Model: "test-model"})
+	s, err := connect(context.Background(), Config{APIKey: "secret-not-for-logs", Endpoint: endpoint, Model: "test-model"}, roleInputTranscription)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,12 +120,12 @@ func TestSessionContractAndEvents(t *testing.T) {
 }
 
 func TestSessionErrorsCancellationAndSecretRedaction(t *testing.T) {
-	if _, err := Connect(context.Background(), Config{}); err == nil || strings.Contains(err.Error(), "secret") {
+	if _, err := connect(context.Background(), Config{}, roleInputTranscription); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("expected sanitized auth error: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Connect(ctx, Config{APIKey: "secret"}); err == nil {
+	if _, err := connect(ctx, Config{APIKey: "secret"}, roleInputTranscription); err == nil {
 		t.Fatal("expected cancellation")
 	}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +137,7 @@ func TestSessionErrorsCancellationAndSecretRedaction(t *testing.T) {
 	defer ts.Close()
 	connectCtx, connectCancel := context.WithTimeout(context.Background(), time.Second)
 	defer connectCancel()
-	_, err := Connect(connectCtx, Config{APIKey: "secret", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	_, err := connect(connectCtx, Config{APIKey: "secret", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")}, roleInputTranscription)
 	if err == nil {
 		t.Fatal("expected setup failure")
 	}
@@ -163,7 +163,7 @@ func TestParseUnknownAndMalformedServerMessages(t *testing.T) {
 }
 
 func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
-	msg := setupMessage(Config{Model: "test-model", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}})
+	msg := setupMessage(Config{Model: "test-model", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}}, roleControlledResponse)
 	setup, ok := msg["setup"].(map[string]any)
 	if !ok {
 		t.Fatal("setup envelope missing")

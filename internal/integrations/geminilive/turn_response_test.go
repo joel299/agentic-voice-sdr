@@ -136,7 +136,7 @@ func TestSendTurnDirectiveRejectsInvalidOversizeAndCanceledWithoutWrite(t *testi
 	}
 }
 
-func testSession(t *testing.T, onMessage func(map[string]any)) (*Session, func()) {
+func testSession(t *testing.T, onMessage func(map[string]any)) (*providerSession, func()) {
 	t.Helper()
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -166,7 +166,7 @@ func testSession(t *testing.T, onMessage func(map[string]any)) (*Session, func()
 	})
 	ts := httptest.NewServer(h)
 	endpoint := "ws" + strings.TrimPrefix(ts.URL, "http")
-	session, err := Connect(context.Background(), Config{APIKey: "test-key", Endpoint: endpoint, Model: "test-model"})
+	session, err := connect(context.Background(), Config{APIKey: "test-key", Endpoint: endpoint, Model: "test-model"}, roleControlledResponse)
 	if err != nil {
 		ts.Close()
 		t.Fatal(err)

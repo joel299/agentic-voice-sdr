@@ -203,6 +203,13 @@ jobs:
           fi
           psql --version
 
+      - name: Set up Go for PostgreSQL repository integration
+        if: steps.infra.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
       - name: Redis + RabbitMQ smoke test
         if: steps.infra.outputs.present == 'true'
         shell: bash
@@ -211,9 +218,19 @@ jobs:
           chmod +x scripts/infra/smoke-test.sh
           ./scripts/infra/smoke-test.sh --down
 
-      - name: PostgreSQL 16 canonical Outbox smoke test
+      - name: PostgreSQL 16 canonical smoke and repository integration
         if: steps.infra.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/db/smoke-test.sh --down
+          cleanup() {
+            docker compose -f deploy/dev/docker-compose.yml stop postgres >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ./scripts/db/smoke-test.sh
+          PGHOST=127.0.0.1 \
+          PGPORT="${POSTGRES_PORT:-5432}" \
+          PGUSER="${POSTGRES_USER}" \
+          PGPASSWORD="${POSTGRES_PASSWORD}" \
+          PGDATABASE="${POSTGRES_DB}" \
+            go test -count=1 ./internal/integrations/postgres/agentprompt

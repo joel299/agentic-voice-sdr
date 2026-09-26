@@ -53,9 +53,9 @@ func TestProtectedAgentPromptRejectsBeforeManagerForEveryEndpoint(t *testing.T) 
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
-		if res.Code != http.StatusUnauthorized || res.Body.String() != `{"error":"unauthorized"}`+"\n" {
+		if res.Code != http.StatusUnauthorized || res.Header().Get("WWW-Authenticate") != "Bearer" || res.Body.String() != `{"error":"unauthorized"}`+"\n" {
 
-			t.Fatalf("%s %s: status=%d body=%q", tc.method, tc.path, res.Code, res.Body.String())
+			t.Fatalf("%s %s: status=%d challenge=%q body=%q", tc.method, tc.path, res.Code, res.Header().Get("WWW-Authenticate"), res.Body.String())
 		}
 		if strings.Contains(res.Body.String(), "HIGHLY-SENSITIVE-PROMPT-CONTENT") {
 			t.Fatal("rejected response leaked prompt")
@@ -150,6 +150,9 @@ func TestStaticBearerAuthorizer(t *testing.T) {
 		allow  bool
 	}{
 		{"correct", "Bearer owner-secret", true},
+		{"lowercase scheme", "bearer owner-secret", true},
+		{"uppercase scheme", "BEARER owner-secret", true},
+		{"mixed case scheme", "BeArEr owner-secret", true},
 		{"wrong", "Bearer wrong", false},
 		{"missing", "", false},
 		{"wrong scheme", "Basic owner-secret", false},
@@ -169,7 +172,7 @@ func TestStaticBearerAuthorizer(t *testing.T) {
 			}
 		})
 	}
-	for _, expected := range []string{"", " ", "	"} {
+	for _, expected := range []string{"", " ", "\t", "\n", " owner-secret", "owner-secret ", "owner secret", "owner-secret\n", "owner-secret\t"} {
 		if _, err := NewStaticBearerAuthorizer(expected); err == nil {
 			t.Fatalf("expected empty token %q to fail", expected)
 		}

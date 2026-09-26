@@ -26,6 +26,7 @@ func NewProtectedAgentPromptHandler(manager AgentPromptManager, authorizer Owner
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !authorizer.Authorize(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -51,7 +52,7 @@ type StaticBearerAuthorizer struct {
 }
 
 func NewStaticBearerAuthorizer(expected string) (*StaticBearerAuthorizer, error) {
-	if strings.TrimSpace(expected) == "" {
+	if expected == "" || strings.IndexFunc(expected, unicode.IsSpace) >= 0 {
 		return nil, errors.New("expected owner token is required")
 	}
 	return &StaticBearerAuthorizer{expected: []byte(expected)}, nil
@@ -62,10 +63,11 @@ func (a *StaticBearerAuthorizer) Authorize(r *http.Request) bool {
 		return false
 	}
 	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
+	separator := strings.IndexByte(header, ' ')
+	if separator <= 0 || !strings.EqualFold(header[:separator], "Bearer") {
 		return false
 	}
-	providedText := strings.TrimPrefix(header, "Bearer ")
+	providedText := header[separator+1:]
 	if providedText == "" || strings.IndexFunc(providedText, unicode.IsSpace) >= 0 {
 		return false
 	}

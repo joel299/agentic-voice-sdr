@@ -81,7 +81,10 @@ func canonicalCapabilityOrUnknown(capability string) string {
 }
 
 // SendTurnDirective renders and sends exactly one discrete Gemini response turn.
-func (s *Session) SendTurnDirective(ctx context.Context, directive conversation.TurnDirective) error {
+func (s *providerSession) SendTurnDirective(ctx context.Context, directive conversation.TurnDirective) error {
+	if s == nil || s.role != roleControlledResponse {
+		return ErrCapabilityNotAllowed
+	}
 	if ctx == nil {
 		return fmt.Errorf("%w: %w", ErrInvalidTurnResponse, ErrNilTurnContext)
 	}

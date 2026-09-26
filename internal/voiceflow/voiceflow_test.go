@@ -60,6 +60,17 @@ func finalEvent(text string) geminilive.Event {
 	return geminilive.Event{Kind: geminilive.EventInputTranscription, InputTranscriptState: geminilive.TranscriptFinal, Text: text}
 }
 
+func recordTurn(t *testing.T, state *conversation.ConversationState, id, text string) {
+	t.Helper()
+	turn, err := conversation.NewTurn(id, conversation.RoleLead, text, conversation.TranscriptFinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecordTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func interimEvent(text string) geminilive.Event {
 	return geminilive.Event{Kind: geminilive.EventInputTranscription, InputTranscriptState: geminilive.TranscriptInterim, Text: text}
 }
@@ -103,6 +114,44 @@ func TestFinalTranscriptCreatesSequentialLeadTurnsIncludingDuplicates(t *testing
 	}
 	if processor.calls != 2 {
 		t.Fatalf("Begin/process calls=%d, want 2", processor.calls)
+	}
+}
+
+func TestRestoredLeadSequenceSeedsNextID(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ids  []string
+		want string
+	}{
+		{name: "single", ids: []string{"lead-000001"}, want: "lead-000002"},
+		{name: "max lead only", ids: []string{"lead-000002", "lead-000007", "agent-000010", "custom-id"}, want: "lead-000008"},
+		{name: "malformed ignored", ids: []string{"lead-", "lead-x", "lead-00000x", "lead-12x"}, want: "lead-000001"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, err := conversation.NewConversationState("conversation-restored")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range test.ids {
+				recordTurn(t, state, id, "restored")
+			}
+			processor := &testProcessor{directive: conversation.TurnDirective{Kind: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}}
+			coordinator, err := turnloop.New(processor, &testResponder{}, conversation.NewResponseGate())
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, err := NewFinalTranscriptHandler(state, coordinator, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.HandleEvent(context.Background(), finalEvent("new turn")); err != nil {
+				t.Fatal(err)
+			}
+			turns := state.Turns()
+			if turns[len(turns)-1].ID != test.want {
+				t.Fatalf("new ID=%q, want %q; turns=%#v", turns[len(turns)-1].ID, test.want, turns)
+			}
+		})
 	}
 }
 

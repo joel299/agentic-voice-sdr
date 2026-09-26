@@ -45,7 +45,33 @@ func NewFinalTranscriptHandler(state *conversation.ConversationState, coordinato
 	return &FinalTranscriptHandler{
 		state: state, coordinator: coordinator, capability: capability,
 		downstream: next, lifecycle: NewResponseLifecycleAdapter(coordinator),
+		nextLead: seedLeadSequence(state.Turns()),
 	}, nil
+}
+
+func seedLeadSequence(turns []conversation.Turn) uint64 {
+	var max uint64
+	for _, turn := range turns {
+		if !strings.HasPrefix(turn.ID, "lead-") {
+			continue
+		}
+		suffix := strings.TrimPrefix(turn.ID, "lead-")
+		if len(suffix) != 6 {
+			continue
+		}
+		var value uint64
+		for _, char := range suffix {
+			if char < '0' || char > '9' {
+				value = 0
+				break
+			}
+			value = value*10 + uint64(char-'0')
+		}
+		if value > max {
+			max = value
+		}
+	}
+	return max
 }
 
 // Lifecycle returns the concrete bridge lifecycle adapter owned by this

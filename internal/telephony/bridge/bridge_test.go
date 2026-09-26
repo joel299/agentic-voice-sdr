@@ -50,13 +50,14 @@ func (f *fakeAudio) written() []audiosocket.Frame {
 }
 
 type fakeGemini struct {
-	mu       sync.Mutex
-	sent     [][]byte
-	events   []geminilive.Event
-	sendErr  error
-	recvErr  error
-	closed   chan struct{}
-	closeOne sync.Once
+	mu        sync.Mutex
+	sent      [][]byte
+	events    []geminilive.Event
+	sendErr   error
+	recvErr   error
+	onReceive func(geminilive.Event)
+	closed    chan struct{}
+	closeOne  sync.Once
 }
 
 func (f *fakeGemini) SendAudio(_ context.Context, audio []byte) error {
@@ -75,6 +76,9 @@ func (f *fakeGemini) Receive(ctx context.Context) (geminilive.Event, error) {
 		event := f.events[0]
 		f.events = f.events[1:]
 		f.mu.Unlock()
+		if f.onReceive != nil {
+			f.onReceive(event)
+		}
 		return event, nil
 	}
 	err := f.recvErr
@@ -89,17 +93,24 @@ func (f *fakeGemini) EndAudio(context.Context) error { return nil }
 func (f *fakeGemini) Close() error                   { f.closeOne.Do(func() { close(f.closed) }); return nil }
 
 type fakeLifecycle struct {
-	mu          sync.Mutex
-	authorized  bool
-	failures    []error
-	completions int
-	completeErr error
-	failErr     error
+	mu             sync.Mutex
+	authorized     bool
+	failures       []error
+	globalFailures []error
+	completions    int
+	completeErr    error
+	failErr        error
 }
 
 type fakeLease struct{ owner *fakeLifecycle }
 
 func (f *fakeLifecycle) CaptureActive() ResponseTurnLease { return &fakeLease{owner: f} }
+func (f *fakeLifecycle) FailActive(_ context.Context, err error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.globalFailures = append(f.globalFailures, err)
+	return f.failErr
+}
 func (f *fakeLease) ModelAudioAuthorized() bool {
 	f.owner.mu.Lock()
 	defer f.owner.mu.Unlock()
@@ -179,6 +190,8 @@ func (s *sequencedLifecycle) CaptureActive() ResponseTurnLease {
 func (s *sequencedLifecycle) Complete(context.Context) error    { return nil }
 func (s *sequencedLifecycle) Fail(context.Context, error) error { return nil }
 
+func (s *sequencedLifecycle) FailActive(context.Context, error) error { return nil }
+
 type errorAudioWriter struct{ err error }
 
 func (w *errorAudioWriter) WriteFrame(audiosocket.Frame) error { return w.err }
@@ -198,7 +211,7 @@ func TestBridgeOutputFailureFailsOwnedLeaseAndPreservesWriteError(t *testing.T) 
 
 func TestBridgeCompleteLifecycleErrorIsReturned(t *testing.T) {
 	completeErr := errors.New("complete failed")
-	lifecycle := &fakeLifecycle{completeErr: completeErr}
+	lifecycle := &fakeLifecycle{authorized: true, completeErr: completeErr}
 	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}, {Kind: geminilive.EventTurnComplete}}, closed: make(chan struct{})}
 	err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {})
 	if !errors.Is(err, completeErr) {
@@ -236,8 +249,84 @@ func TestBridgeDeniedProviderTurnStaysDeniedAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestBridgeTurnCompleteCompletesActiveResponse(t *testing.T) {
+func TestBridgeSameLeaseFalseToTrueRemainsDenied(t *testing.T) {
+	leaseOwner := &fakeLifecycle{}
+	var received int
+	gemini := &fakeGemini{events: []geminilive.Event{
+		{Kind: geminilive.EventAudio, Audio: []byte{1}, AudioMimeType: "audio/pcm;rate=24000"},
+		{Kind: geminilive.EventAudio, Audio: []byte{2}, AudioMimeType: "audio/pcm;rate=24000"},
+		{Kind: geminilive.EventTurnComplete},
+		{Kind: geminilive.EventClosed},
+	}, closed: make(chan struct{})}
+	gemini.onReceive = func(geminilive.Event) {
+		received++
+		if received == 2 {
+			leaseOwner.mu.Lock()
+			leaseOwner.authorized = true
+			leaseOwner.mu.Unlock()
+		}
+	}
+	lifecycle := &sameLeaseLifecycle{lease: &fakeLease{owner: leaseOwner}}
+	output := newFakeAudio(nil, io.EOF)
+	if err := New(nil, output, gemini, nil, lifecycle).runEgress(context.Background(), func() {}); err != nil {
+		t.Fatalf("runEgress() error = %v", err)
+	}
+	if writes := output.written(); len(writes) != 0 {
+		t.Fatalf("same-lease authorization change wrote audio = %#v", writes)
+	}
+	if leaseOwner.completions != 0 {
+		t.Fatalf("denied lease completed %d times", leaseOwner.completions)
+	}
+}
+
+type sameLeaseLifecycle struct{ lease ResponseTurnLease }
+
+func (s *sameLeaseLifecycle) CaptureActive() ResponseTurnLease        { return s.lease }
+func (s *sameLeaseLifecycle) FailActive(context.Context, error) error { return nil }
+
+func TestBridgeAPIErrorBeforeModelOutputFailsActiveLifecycle(t *testing.T) {
 	lifecycle := &fakeLifecycle{}
+	stop := errors.New("stop after API error")
+	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAPIError}}, closed: make(chan struct{})}
+	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, func(context.Context, geminilive.Event) error { return stop }, lifecycle).runEgress(context.Background(), func() {}); !errors.Is(err, stop) {
+		t.Fatalf("runEgress() error = %v, want stop sentinel", err)
+	}
+	if len(lifecycle.globalFailures) != 1 || !errors.Is(lifecycle.globalFailures[0], ErrProviderAPI) {
+		t.Fatalf("global failures = %#v, want ErrProviderAPI", lifecycle.globalFailures)
+	}
+	if len(lifecycle.failures) != 0 {
+		t.Fatalf("lease failures = %#v, want none", lifecycle.failures)
+	}
+}
+
+func TestBridgeClosedBeforeModelOutputFailsActiveLifecycle(t *testing.T) {
+	lifecycle := &fakeLifecycle{}
+	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventClosed}}, closed: make(chan struct{})}
+	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {}); err != nil {
+		t.Fatalf("runEgress() error = %v", err)
+	}
+	if len(lifecycle.globalFailures) != 1 || !errors.Is(lifecycle.globalFailures[0], ErrSessionClosed) {
+		t.Fatalf("global failures = %#v, want ErrSessionClosed", lifecycle.globalFailures)
+	}
+}
+
+func TestBridgeOwnedSessionFailureDoesNotDoubleFailGlobalLifecycle(t *testing.T) {
+	lifecycle := &fakeLifecycle{authorized: true}
+	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}, {Kind: geminilive.EventAPIError}}, closed: make(chan struct{})}
+	stop := errors.New("stop after owned API error")
+	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, func(context.Context, geminilive.Event) error { return stop }, lifecycle).runEgress(context.Background(), func() {}); !errors.Is(err, stop) {
+		t.Fatalf("runEgress() error = %v, want stop sentinel", err)
+	}
+	if len(lifecycle.failures) != 1 || !errors.Is(lifecycle.failures[0], ErrProviderAPI) {
+		t.Fatalf("lease failures = %#v, want one ErrProviderAPI", lifecycle.failures)
+	}
+	if len(lifecycle.globalFailures) != 0 {
+		t.Fatalf("global failures = %#v, want none", lifecycle.globalFailures)
+	}
+}
+
+func TestBridgeTurnCompleteCompletesActiveResponse(t *testing.T) {
+	lifecycle := &fakeLifecycle{authorized: true}
 	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}, {Kind: geminilive.EventTurnComplete}, {Kind: geminilive.EventClosed}}, closed: make(chan struct{})}
 	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {}); err != nil {
 		t.Fatalf("runEgress() error = %v", err)
@@ -250,7 +339,7 @@ func TestBridgeTurnCompleteCompletesActiveResponse(t *testing.T) {
 func TestBridgeFailureEventsFailActiveResponse(t *testing.T) {
 	for _, event := range []geminilive.Event{{Kind: geminilive.EventInterrupted}, {Kind: geminilive.EventAPIError}} {
 		t.Run(string(event.Kind), func(t *testing.T) {
-			lifecycle := &fakeLifecycle{}
+			lifecycle := &fakeLifecycle{authorized: true}
 			gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}, event, {Kind: geminilive.EventClosed}}, closed: make(chan struct{})}
 			if err := New(nil, newFakeAudio(nil, io.EOF), gemini, func(_ context.Context, got geminilive.Event) error {
 				if got.Kind == event.Kind {
@@ -268,7 +357,7 @@ func TestBridgeFailureEventsFailActiveResponse(t *testing.T) {
 }
 
 func TestBridgeClosedFailsActiveResponse(t *testing.T) {
-	lifecycle := &fakeLifecycle{}
+	lifecycle := &fakeLifecycle{authorized: true}
 	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}, {Kind: geminilive.EventClosed}}, closed: make(chan struct{})}
 	if err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {}); err != nil {
 		t.Fatalf("runEgress() error = %v", err)
@@ -281,13 +370,13 @@ func TestBridgeClosedFailsActiveResponse(t *testing.T) {
 func TestBridgeReceiveFailureFailsActiveBeforeReturning(t *testing.T) {
 	disconnect := errors.New("provider payload must not escape")
 	lifecycle := &fakeLifecycle{}
-	gemini := &fakeGemini{events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000"}}, recvErr: disconnect, closed: make(chan struct{})}
+	gemini := &fakeGemini{recvErr: disconnect, closed: make(chan struct{})}
 	err := New(nil, newFakeAudio(nil, io.EOF), gemini, nil, lifecycle).runEgress(context.Background(), func() {})
 	if !errors.Is(err, disconnect) {
 		t.Fatalf("runEgress() error = %v, want original receive error", err)
 	}
-	if len(lifecycle.failures) != 1 || lifecycle.failures[0] == disconnect {
-		t.Fatalf("FailActive calls = %#v, want sanitized failure before return", lifecycle.failures)
+	if len(lifecycle.globalFailures) != 1 || lifecycle.globalFailures[0] == disconnect {
+		t.Fatalf("FailActive calls = %#v, want sanitized failure before return", lifecycle.globalFailures)
 	}
 }
 

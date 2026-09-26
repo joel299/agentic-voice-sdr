@@ -43,6 +43,7 @@ type EventHandler func(context.Context, geminilive.Event) error
 
 type ResponseLifecycle interface {
 	CaptureActive() ResponseTurnLease
+	FailActive(context.Context, error) error
 }
 
 type ResponseTurnLease interface {
@@ -241,7 +242,8 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			return
 		}
 		lease = b.lifecycle.CaptureActive()
-		if lease == nil {
+		if lease == nil || !lease.ModelAudioAuthorized() {
+			lease = nil
 			disposition = providerTurnDenied
 			return
 		}
@@ -254,6 +256,14 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 	failProviderTurn := func(reason error) {
 		if disposition == providerTurnOwned {
 			_ = lease.Fail(ctx, reason)
+		}
+		resetProviderTurn()
+	}
+	failSession := func(reason error) {
+		if disposition == providerTurnOwned {
+			_ = lease.Fail(ctx, reason)
+		} else if b.lifecycle != nil {
+			_ = b.lifecycle.FailActive(ctx, reason)
 		}
 		resetProviderTurn()
 	}
@@ -273,7 +283,7 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			failProviderTurn(ErrReceiveFailed)
+			failSession(ErrReceiveFailed)
 			return err
 		}
 		if event.Kind == geminilive.EventAudio {
@@ -281,7 +291,7 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 				return fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType)
 			}
 			beginProviderTurn()
-			if len(event.Audio) == 0 || disposition != providerTurnOwned || !lease.ModelAudioAuthorized() {
+			if len(event.Audio) == 0 || disposition != providerTurnOwned {
 				continue
 			}
 			if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
@@ -302,10 +312,10 @@ func (b *Bridge) runEgress(ctx context.Context, markTurnComplete func()) error {
 			failProviderTurn(ErrResponseInterrupted)
 		}
 		if event.Kind == geminilive.EventAPIError {
-			failProviderTurn(ErrProviderAPI)
+			failSession(ErrProviderAPI)
 		}
 		if event.Kind == geminilive.EventClosed {
-			failProviderTurn(ErrSessionClosed)
+			failSession(ErrSessionClosed)
 		}
 		if b.handler != nil {
 			if err := b.handler(ctx, event); err != nil {

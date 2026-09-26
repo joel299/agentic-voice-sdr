@@ -231,3 +231,66 @@ func TestBuildRejectsOversizedInstructionWithoutTruncating(t *testing.T) {
 		t.Fatalf("oversized instruction: config=%q err=%v source calls=%d", config.SystemInstruction, err, called)
 	}
 }
+
+func TestBuilderDeepClonesTypedToolConfigAndSessionConfigs(t *testing.T) {
+	base := geminilive.Config{Tools: []geminilive.ToolDefinition{{FunctionDeclarations: []geminilive.FunctionDeclaration{{Name: "typed", Parameters: map[string]any{
+		"metadata": map[string]string{"mode": "safe"},
+		"rules":    []map[string]any{{"name": "a"}},
+		"matrix":   [][]string{{"north", "south"}},
+		"wrapped":  any([1]map[string]string{{"state": "fixed"}}),
+	}}}}}}
+	builder, err := NewBuilder(base, "immutable core", sourceFunc(func(context.Context) (agentprompt.PromptSnapshot, error) {
+		return snapshot(1, "persona", "editable"), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The builder owns the original config value captured at construction.
+	base.Tools[0].FunctionDeclarations[0].Parameters["metadata"].(map[string]string)["mode"] = "base-mutated"
+	base.Tools[0].FunctionDeclarations[0].Parameters["rules"].([]map[string]any)[0]["name"] = "base-mutated"
+
+	sessionA, _, err := builder.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paramsA := sessionA.Tools[0].FunctionDeclarations[0].Parameters
+	if paramsA["metadata"].(map[string]string)["mode"] != "safe" || paramsA["rules"].([]map[string]any)[0]["name"] != "a" {
+		t.Fatal("mutating the caller's base config changed the builder's captured copy")
+	}
+	if got := paramsA["matrix"].([][]string)[0][0]; got != "north" {
+		t.Fatalf("typed nested slice was not preserved: %q", got)
+	}
+	if got := paramsA["wrapped"].([1]map[string]string)[0]["state"]; got != "fixed" {
+		t.Fatalf("array nested in interface was not preserved: %q", got)
+	}
+
+	paramsA["metadata"].(map[string]string)["mode"] = "session-a-mutated"
+	paramsA["rules"].([]map[string]any)[0]["name"] = "session-a-mutated"
+	paramsA["matrix"].([][]string)[0][0] = "session-a-mutated"
+	paramsA["wrapped"].([1]map[string]string)[0]["state"] = "session-a-mutated"
+
+	sessionB, _, err := builder.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paramsB := sessionB.Tools[0].FunctionDeclarations[0].Parameters
+	if paramsB["metadata"].(map[string]string)["mode"] != "safe" {
+		t.Fatal("map[string]string from Session A was shared with Session B")
+	}
+	if paramsB["rules"].([]map[string]any)[0]["name"] != "a" {
+		t.Fatal("[]map[string]any from Session A was shared with Session B")
+	}
+	if paramsB["matrix"].([][]string)[0][0] != "north" {
+		t.Fatal("[][]string from Session A was shared with Session B")
+	}
+	if paramsB["wrapped"].([1]map[string]string)[0]["state"] != "fixed" {
+		t.Fatal("array/interface containers from Session A were shared with Session B")
+	}
+
+	paramsB["metadata"].(map[string]string)["mode"] = "session-b-mutated"
+	paramsB["rules"].([]map[string]any)[0]["name"] = "session-b-mutated"
+	if paramsA["metadata"].(map[string]string)["mode"] != "session-a-mutated" || paramsA["rules"].([]map[string]any)[0]["name"] != "session-a-mutated" {
+		t.Fatal("mutating Session B changed Session A")
+	}
+}

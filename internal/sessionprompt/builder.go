@@ -141,17 +141,49 @@ func cloneMap(input map[string]any) map[string]any {
 }
 
 func cloneValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneMap(typed)
-	case []any:
-		output := make([]any, len(typed))
-		for i, item := range typed {
-			output[i] = cloneValue(item)
+	if value == nil {
+		return nil
+	}
+	return cloneContainer(reflect.ValueOf(value)).Interface()
+}
+
+// cloneContainer recursively copies map/slice/array containers, including
+// containers held behind interface values, while retaining their concrete Go
+// types. JSON scalar values and other non-container values are reused.
+func cloneContainer(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
 		}
-		return output
-	case []string:
-		return append([]string(nil), typed...)
+		cloned := reflect.New(value.Type()).Elem()
+		cloned.Set(cloneContainer(value.Elem()))
+		return cloned
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			cloned.SetMapIndex(iter.Key(), cloneContainer(iter.Value()))
+		}
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneContainer(value.Index(i)))
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneContainer(value.Index(i)))
+		}
+		return cloned
 	default:
 		return value
 	}

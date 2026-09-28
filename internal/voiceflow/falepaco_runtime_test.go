@@ -115,8 +115,8 @@ func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
 	if response.sends != 1 || response.text != "hello from Paco" {
 		t.Fatalf("send=%d text=%q", response.sends, response.text)
 	}
-	if gotID == "" {
-		t.Fatal("session factory was not called")
+	if gotID != "call-000102030405060708090a0b0c0d0e0f" {
+		t.Fatalf("unexpected sanitized session id: %q", gotID)
 	}
 	_ = conn.Close()
 	_ = runtime.Shutdown(context.Background())

@@ -55,9 +55,10 @@ func (b *SplitBridge) Run(ctx context.Context) error {
 	type result struct {
 		err      error
 		response bool
+		input    bool
 	}
 	done := make(chan result, 3)
-	go func() { done <- result{err: b.runSplitIngress(ctx)} }()
+	go func() { done <- result{err: b.runSplitIngress(ctx), input: true} }()
 	go func() { done <- result{err: b.runSplitTranscripts(ctx)} }()
 	go func() { done <- result{err: b.runSplitResponses(ctx), response: true} }()
 
@@ -69,6 +70,12 @@ func (b *SplitBridge) Run(ctx context.Context) error {
 			first = err
 			cancel()
 			closeAll()
+		}
+		if res.input && err == nil {
+			if cancels, ok := b.input.(interface{ CancelOnInputEnd() bool }); ok && cancels.CancelOnInputEnd() {
+				cancel()
+				closeAll()
+			}
 		}
 		if res.response && err == nil {
 			cancel()

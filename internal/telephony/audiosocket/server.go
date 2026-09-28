@@ -18,12 +18,14 @@ var (
 
 // ConnectionHandler handles one accepted AudioSocket connection.
 type ConnectionHandler func(context.Context, *Stream) error
+type ConnectionErrorHandler func(error)
 
 // Server owns the TCP listener and the lifecycle of accepted AudioSocket
 // connections. It does not impose a concurrency limit.
 type Server struct {
-	address string
-	handler ConnectionHandler
+	address      string
+	handler      ConnectionHandler
+	errorHandler ConnectionErrorHandler
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -37,6 +39,17 @@ type Server struct {
 // NewServer creates a TCP server using the caller-provided address.
 func NewServer(address string, handler ConnectionHandler) *Server {
 	return &Server{address: address, handler: handler}
+}
+
+// SetConnectionErrorHandler makes connection-local failures observable without
+// changing the default fail-fast behavior of the generic server.
+func (s *Server) SetConnectionErrorHandler(handler ConnectionErrorHandler) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errorHandler = handler
 }
 
 // Listen binds the configured address. It does not accept connections.
@@ -147,6 +160,13 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			if ctx.Err() != nil || shutdown {
 				return nil
+			}
+			s.mu.Lock()
+			errorHandler := s.errorHandler
+			s.mu.Unlock()
+			if errorHandler != nil {
+				errorHandler(err)
+				continue
 			}
 			s.requestShutdown()
 			return err

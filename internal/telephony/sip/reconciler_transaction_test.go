@@ -145,7 +145,7 @@ func TestResolverTransactionPreservesManagedDirectives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(gotHosts), pinnedHostsMarker+"\n192.0.2.1 old.provider.test\n") {
-		t.Fatalf("managed hosts file is not valid hosts-file syntax: %q", gotHosts)
+		t.Fatalf("managed hosts file is not valid libunbound hosts-file syntax: %q", gotHosts)
 	}
 	got, _ := os.ReadFile(filepath.Join(dir, "resolver_unbound.conf"))
 	text := string(got)
@@ -248,13 +248,13 @@ func TestResolverTransaction(t *testing.T) {
 	}
 }
 
-func TestGeneratePJSIPConfigIPv6UsesBrackets(t *testing.T) {
+func TestGeneratePJSIPConfigKeepsHostnamesWithResolvedIPv6Addresses(t *testing.T) {
 	cfg := TrunkConfig{Name: "ipv6", Host: "sip.provider.test", HostNetworkAddress: "2001:db8::10", Registrar: "reg.provider.test", RegistrarNetworkAddress: "[2001:db8::11]:5070", Port: 5061, Transport: TransportTLS, AuthType: AuthIP, Enabled: true, RegistrationRequired: true, OutboundProxy: "proxy.provider.test", OutboundProxyNetworkAddress: "[2001:db8::12]:5090", FromUser: "test"}
 	rendered, err := GeneratePJSIPConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"contact=sip:[2001:db8::10]:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:[2001:db8::12]:5090"} {
+	for _, want := range []string{"contact=sip:sip.provider.test:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:proxy.provider.test:5061"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("IPv6 rendering missing %q:\n%s", want, rendered)
 		}
@@ -263,14 +263,46 @@ func TestGeneratePJSIPConfigIPv6UsesBrackets(t *testing.T) {
 		t.Fatalf("unbracketed IPv6 URI rendered: %s", rendered)
 	}
 }
+func TestGeneratePJSIPConfigKeepsConfiguredHostnameWhenResolvedIPExists(t *testing.T) {
+	cfg := TrunkConfig{
+		Name: "falepaco", Host: "98034.falepaco.com.br", HostNetworkAddress: "192.0.2.55",
+		Port: 5060, Transport: TransportUDP, Registrar: "98034.falepaco.com.br",
+		RegistrarNetworkAddress: "192.0.2.55", AuthType: AuthUserPass, AuthUsername: "100",
+		Secret: "test-only", RegistrationRequired: true, Enabled: true,
+	}
+	rendered, err := GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"contact=sip:98034.falepaco.com.br:5060",
+		"server_uri=sip:98034.falepaco.com.br:5060",
+		"client_uri=sip:100@98034.falepaco.com.br:5060",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("missing %q from generated config:\n%s", want, MaskPJSIPSecrets(rendered))
+		}
+	}
+	for _, forbidden := range []string{
+		"192.0.2.55", "contact=sip:192.0.2.55", "server_uri=sip:192.0.2.55", "client_uri=sip:100@192.0.2.55",
+	} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("resolved IP persisted as SIP destination (%q):\n%s", forbidden, MaskPJSIPSecrets(rendered))
+		}
+	}
+}
+
 func TestOutboundProxyHostPortMetadataUsesHostname(t *testing.T) {
 	cfg := TrunkConfig{Name: "proxy", Host: "provider.test", HostNetworkAddress: "192.0.2.10", Port: 5061, Transport: TransportTLS, AuthType: AuthIP, Enabled: true, OutboundProxy: "proxy.provider.test:5061", OutboundProxyNetworkAddress: "192.0.2.20:5061"}
 	rendered, err := GeneratePJSIPConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rendered, "; gru83-pin host=proxy.provider.test address=192.0.2.20:5061") {
-		t.Fatalf("proxy metadata contains invalid host: %s", rendered)
+	if !strings.Contains(rendered, "outbound_proxy=sip:proxy.provider.test:5061") {
+		t.Fatalf("proxy hostname was not retained in SIP URI: %s", rendered)
+	}
+	if strings.Contains(rendered, "192.0.2.20") {
+		t.Fatalf("resolved proxy IP was persisted in PJSIP config: %s", rendered)
 	}
 }
 

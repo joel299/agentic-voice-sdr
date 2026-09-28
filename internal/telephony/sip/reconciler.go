@@ -321,6 +321,8 @@ func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
 	}
 	hosts := make([]string, 0, len(byHost))
 	for host, address := range byHost {
+		// libunbound's ub_ctx_hosts() consumes /etc/hosts syntax: address first,
+		// then hostname. Keep this distinct from Unbound zone-file records.
 		hosts = append(hosts, address+" "+host)
 	}
 	sort.Strings(hosts)

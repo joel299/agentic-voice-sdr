@@ -69,7 +69,7 @@ func TestResolverTransactionRestoresFilesOnStageReloadFailure(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "transactional"
 	oldPJSIP := "; gru83-pin host=old.provider.test address=192.0.2.10\n"
-	oldHosts := resolverMarker + "\n192.0.2.10 old.provider.test\n"
+	oldHosts := pinnedHostsMarker + "\n192.0.2.10 old.provider.test\n"
 	oldResolver := resolverMarker + "\n[general]\nresolv = system\ndebug = yes\nhosts = " + filepath.Join(dir, ".gru83-pinned.hosts") + "\n"
 	writeResolverFixture(t, dir, trunk, oldPJSIP, oldHosts, oldResolver)
 	runner := &resolverTxnRunner{pjsipFailures: 1}
@@ -111,12 +111,19 @@ func TestResolverTransactionRejectsUnmanagedResolverWithoutMutation(t *testing.T
 func TestResolverTransactionPreservesManagedDirectives(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "managed"
-	hosts := resolverMarker + "\n192.0.2.1 old.provider.test\n"
+	hosts := pinnedHostsMarker + "\n192.0.2.1 old.provider.test\n"
 	resolver := resolverMarker + "\n[general]\nresolv = system\nnameserver = 192.0.2.53\nta_file = /etc/ssl/cert.pem\ndebug = yes\nhosts = " + filepath.Join(dir, ".gru83-pinned.hosts") + "\n"
 	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.provider.test address=192.0.2.1\n", hosts, resolver)
 	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{})
 	if _, err := r.syncPinnedResolver(); err != nil {
 		t.Fatal(err)
+	}
+	gotHosts, err := os.ReadFile(filepath.Join(dir, ".gru83-pinned.hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotHosts), pinnedHostsMarker+"\n192.0.2.1 old.provider.test\n") {
+		t.Fatalf("managed hosts file is not valid hosts-file syntax: %q", gotHosts)
 	}
 	got, _ := os.ReadFile(filepath.Join(dir, "resolver_unbound.conf"))
 	text := string(got)
@@ -130,7 +137,7 @@ func TestResolverTransactionPreservesManagedDirectives(t *testing.T) {
 func TestResolverTransactionRestoresBothFilesAfterSecondRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "renamefail"
-	oldHosts := resolverMarker + "\n192.0.2.1 old.test\n"
+	oldHosts := pinnedHostsMarker + "\n192.0.2.1 old.test\n"
 	oldResolver := resolverMarker + "\n[general]\nresolv = system\n"
 	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.test address=192.0.2.1\n", oldHosts, oldResolver)
 	calls := 0
@@ -153,7 +160,7 @@ func TestResolverTransactionRestoresBothFilesAfterSecondRenameFailure(t *testing
 func TestResolverTransactionRestoresBothFilesAfterFirstRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "renamefailfirst"
-	oldHosts := resolverMarker + "\n192.0.2.1 old.test\n"
+	oldHosts := pinnedHostsMarker + "\n192.0.2.1 old.test\n"
 	oldResolver := resolverMarker + "\n[general]\nresolv = system\n"
 	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.test address=192.0.2.1\n", oldHosts, oldResolver)
 	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{})
@@ -194,7 +201,7 @@ func TestResolverRollbackRestoresOldMappingAfterSuccessfulStage(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "rollbackstate"
 	oldPJSIP := "; gru83-pin host=old.test address=192.0.2.1\n"
-	oldHosts := resolverMarker + "\n192.0.2.1 old.test\n"
+	oldHosts := pinnedHostsMarker + "\n192.0.2.1 old.test\n"
 	oldResolver := resolverMarker + "\n[general]\nresolv = system\n"
 	writeResolverFixture(t, dir, trunk, oldPJSIP, oldHosts, oldResolver)
 	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{})
@@ -211,7 +218,7 @@ func TestResolverRollbackRestoresOldMappingAfterSuccessfulStage(t *testing.T) {
 func TestResolverTransaction(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "resolverrollback"
-	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.test address=192.0.2.1\n", resolverMarker+"\n192.0.2.1 old.test\n", resolverMarker+"\n[general]\nresolv = system\n")
+	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.test address=192.0.2.1\n", pinnedHostsMarker+"\n192.0.2.1 old.test\n", resolverMarker+"\n[general]\nresolv = system\n")
 	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{pjsipFailures: 1, resolverFailures: 1})
 	err := r.StagePJSIPConfig(context.Background(), trunk, "; gru83-pin host=new.test address=192.0.2.2\n")
 	if err == nil || !strings.Contains(err.Error(), "PRIMARY FAILURE") || strings.Contains(err.Error(), "ROLLBACK FAILURE") {
@@ -307,7 +314,7 @@ func newRemoveRollbackReloader(t *testing.T, dir string, runner *removeRollbackR
 func prepareRemoveRollbackFixture(t *testing.T, dir, trunk string) (string, string, string) {
 	t.Helper()
 	oldPJSIP := "; gru83-pin host=old.provider.test address=192.0.2.10\n"
-	oldHosts := resolverMarker + "\n192.0.2.10 old.provider.test\n"
+	oldHosts := pinnedHostsMarker + "\n192.0.2.10 old.provider.test\n"
 	oldResolver := resolverMarker + "\n[general]\nresolv = system\nhosts = " + filepath.Join(dir, ".gru83-pinned.hosts") + "\n"
 	writeResolverFixture(t, dir, trunk, oldPJSIP, oldHosts, oldResolver)
 	return oldPJSIP, oldHosts, oldResolver

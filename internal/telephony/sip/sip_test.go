@@ -254,6 +254,47 @@ func TestPathTraversalRejection(t *testing.T) {
 	}
 }
 
+type sequenceRegistrationReloader struct {
+	*MockAsteriskReloader
+	states []string
+	checks int
+}
+
+func (r *sequenceRegistrationReloader) CheckRegistration(ctx context.Context, trunkName string) (string, bool, error) {
+	idx := r.checks
+	r.checks++
+	if idx >= len(r.states) {
+		idx = len(r.states) - 1
+	}
+	state := r.states[idx]
+	return state, state == "Registered", nil
+}
+
+func TestManagerWaitsForInitialRegistrationConvergence(t *testing.T) {
+	reloader := &sequenceRegistrationReloader{
+		MockAsteriskReloader: &MockAsteriskReloader{Healthy: true, EndpointActive: true},
+		states:               []string{"Unregistered", "Registered"},
+	}
+	manager, err := sip.NewManager(&mockDialer{}, reloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.ApplyTrunk(context.Background(), sip.TrunkConfig{
+		Provider: "falepaco", Name: "waittest", Host: "sip.example.invalid", Port: 5060,
+		Transport: sip.TransportUDP, AuthType: sip.AuthUserPass, AuthUsername: "100",
+		Secret: "synthetic-test-secret", FromUser: "100", RegistrationRequired: true, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("registration should converge after initial Unregistered state: %v", err)
+	}
+	if status.Status != sip.StatusReady || status.RegistrationState != "Registered" {
+		t.Fatalf("status = %+v, want READY/Registered", status)
+	}
+	if reloader.checks != 2 {
+		t.Fatalf("registration checks = %d, want 2", reloader.checks)
+	}
+}
+
 func TestRegistrationIdentityValidation(t *testing.T) {
 	t.Run("missing identity when registration required", func(t *testing.T) {
 		cfg := sip.TrunkConfig{

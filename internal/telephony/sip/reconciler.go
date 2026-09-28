@@ -168,6 +168,12 @@ func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
 }
 
 const resolverMarker = "; managed by agentic-voice-sdr GRU-83; do not edit"
+const pinnedHostsMarker = "# managed by agentic-voice-sdr GRU-83; do not edit"
+
+const (
+	registrationPollInterval       = 250 * time.Millisecond
+	registrationConvergenceTimeout = 70 * time.Second
+)
 
 type resolverSnapshot struct {
 	hostsPath, resolverPath     string
@@ -202,7 +208,7 @@ func (r *RealAsteriskReloader) captureResolver() (resolverSnapshot, error) {
 	if s.resolverExists && !strings.Contains(string(s.resolver), resolverMarker) {
 		return s, fmt.Errorf("refusing to overwrite unmanaged resolver configuration %s", s.resolverPath)
 	}
-	if s.hostsExists && !strings.Contains(string(s.hosts), resolverMarker) {
+	if s.hostsExists && !strings.Contains(string(s.hosts), pinnedHostsMarker) {
 		return s, fmt.Errorf("refusing to overwrite unmanaged pinned hosts file %s", s.hostsPath)
 	}
 	return s, nil
@@ -319,7 +325,7 @@ func (r *RealAsteriskReloader) syncPinnedResolver() (resolverSnapshot, error) {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return s, fmt.Errorf("failed to create resolver directory %s: %w", dir, err)
 	}
-	hostsContent := resolverMarker + "\n" + strings.Join(hosts, "\n") + "\n"
+	hostsContent := pinnedHostsMarker + "\n" + strings.Join(hosts, "\n") + "\n"
 	resolverContent := string(s.resolver)
 	if resolverContent == "" {
 		resolverContent = resolverMarker + "\n[general]\nresolv = system\n"
@@ -811,7 +817,7 @@ func (r *RealAsteriskReloader) CheckRegistration(ctx context.Context, trunkName 
 		return "Unregistered", false, fmt.Errorf("failed to query Asterisk registration via CLI: %w (output: %s)", err, out)
 	}
 	if strings.Contains(out, "Unable to find object") || strings.Contains(out, "No objects found") || strings.Contains(out, "not found") {
-		return "Unregistered", false, nil
+		return "NotFound", false, nil
 	}
 	if strings.Contains(out, "Registered") || strings.Contains(out, "REGISTERED") {
 		return "Registered", true, nil
@@ -1026,6 +1032,9 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	// Step 7: Verify Registration if required
 	if cfg.RegistrationRequired {
 		regState, regHealthy, regErr := m.reloader.CheckRegistration(ctx, cfg.Name)
+		if regErr == nil && !regHealthy && strings.EqualFold(regState, "Unregistered") {
+			regState, regHealthy, regErr = m.waitForRegistration(ctx, cfg.Name, regState)
+		}
 		report.RegistrationState = regState
 		if regErr != nil || !regHealthy || (regState != "Registered" && regState != "REGISTERED") {
 			if regErr == nil {
@@ -1054,6 +1063,33 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	m.mu.Unlock()
 
 	return report, nil
+}
+
+// waitForRegistration polls read-back after the registration object is loaded.
+// Asterisk starts REGISTER asynchronously during PJSIP module reload, so an
+// immediate CLI read can legitimately report Unregistered before the first
+// challenge/response exchange completes. The bounded wait includes Asterisk's
+// configured 60-second retry interval without issuing duplicate registrations.
+func (m *Manager) waitForRegistration(ctx context.Context, trunkName, initialState string) (string, bool, error) {
+	state := initialState
+	ticker := time.NewTicker(registrationPollInterval)
+	defer ticker.Stop()
+	timer := time.NewTimer(registrationConvergenceTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return state, false, ctx.Err()
+		case <-timer.C:
+			return state, false, fmt.Errorf("registration did not reach Registered within %s", registrationConvergenceTimeout)
+		case <-ticker.C:
+			nextState, healthy, err := m.reloader.CheckRegistration(ctx, trunkName)
+			state = nextState
+			if err != nil || healthy || !strings.EqualFold(nextState, "Unregistered") {
+				return nextState, healthy, err
+			}
+		}
+	}
 }
 
 // GetTrunk retrieves a cloned applied trunk configuration by name.

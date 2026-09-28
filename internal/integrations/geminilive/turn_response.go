@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
 	"github.com/joel299/agentic-voice-sdr/internal/domain/tools"
@@ -80,20 +81,55 @@ func canonicalCapabilityOrUnknown(capability string) string {
 	return "unknown"
 }
 
-// SendTurnDirective renders and sends exactly one discrete Gemini response turn.
-func (s *Session) SendTurnDirective(ctx context.Context, directive conversation.TurnDirective) error {
+const MaxFinalLeadTextBytes = 8192
+
+var (
+	ErrInvalidControlledTurn = errors.New("geminilive: final lead text is required")
+	ErrFinalLeadTextTooLarge = errors.New("geminilive: final lead text exceeds limit")
+)
+
+// NormalizeFinalLeadText collapses whitespace while preserving the words.
+func NormalizeFinalLeadText(text string) (string, error) {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return "", ErrInvalidControlledTurn
+	}
+	if len([]byte(text)) > MaxFinalLeadTextBytes {
+		return "", ErrFinalLeadTextTooLarge
+	}
+	return text, nil
+}
+
+// SendControlledTurn first appends the finalized lead transcript with
+// turnComplete=false, then appends the directive with turnComplete=true.
+func (s *providerSession) SendControlledTurn(ctx context.Context, finalLeadText string, directive conversation.TurnDirective) error {
+	if s == nil || s.role != roleControlledResponse {
+		return ErrCapabilityNotAllowed
+	}
 	if ctx == nil {
 		return fmt.Errorf("%w: %w", ErrInvalidTurnResponse, ErrNilTurnContext)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	leadText, err := NormalizeFinalLeadText(finalLeadText)
+	if err != nil {
+		return err
+	}
 	instruction, err := RenderTurnDirective(directive)
 	if err != nil {
+		return err
+	}
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.sendClientContent(ctx, leadText, false); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.SendClientContent(ctx, instruction)
+	return s.sendClientContent(ctx, instruction, true)
 }

@@ -84,6 +84,28 @@ func TestResolverTransactionRestoresFilesOnStageReloadFailure(t *testing.T) {
 	assertNoTmp(t, dir)
 }
 
+func TestLegacyPinnedHostsMarkerMigratesToCurrentMarker(t *testing.T) {
+	dir := t.TempDir()
+	trunk := "legacy-marker"
+	legacyHosts := legacyPinnedHostsMarker + "\n192.0.2.41 old.provider.test\n"
+	resolver := resolverMarker + "\n[general]\nresolv = system\n"
+	writeResolverFixture(t, dir, trunk, "; gru83-pin host=old.provider.test address=192.0.2.41\n", legacyHosts, resolver)
+	r := newResolverTxnTestReloader(t, dir, &resolverTxnRunner{})
+	if _, err := r.syncPinnedResolver(); err != nil {
+		t.Fatalf("legacy managed hosts file rejected: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, ".gru83-pinned.hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), pinnedHostsMarker+"\n") || strings.Contains(string(got), legacyPinnedHostsMarker) {
+		t.Fatalf("legacy marker was not rewritten canonically: %q", got)
+	}
+	if !strings.Contains(string(got), "192.0.2.41 old.provider.test") {
+		t.Fatalf("legacy mapping was not preserved: %q", got)
+	}
+}
+
 func TestResolverTransactionRejectsUnmanagedResolverWithoutMutation(t *testing.T) {
 	dir := t.TempDir()
 	trunk := "unmanaged"

@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
 
 var errSIPBoundaryUnavailable = errors.New("sip configuration boundary unavailable")
 var errSIPCanonicalValidation = errors.New("invalid canonical SIP configuration")
+
+// SIPConfigurationTimeout bounds the synchronous SIP apply below the shipped
+// HTTP write timeout. Expiry cancels reconciliation, which rolls back using an
+// independent bounded cleanup context.
+const SIPConfigurationTimeout = 8 * time.Second
 
 type SIPAuthRequest struct {
 	Type     string `json:"type"`
@@ -104,7 +110,10 @@ func (c *CanonicalSIPConfigurator) Configure(ctx context.Context, request SIPCon
 		}
 	}
 	_, err = c.manager.ApplyTrunk(ctx, canonical)
-	return err
+	if err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 type unavailableSIPConfigurator struct{}

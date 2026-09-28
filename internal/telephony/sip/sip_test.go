@@ -254,6 +254,65 @@ func TestPathTraversalRejection(t *testing.T) {
 	}
 }
 
+type cancelOnRegistrationRunner struct {
+	cancel             context.CancelFunc
+	reloadContexts     []error
+	registrationChecks int
+}
+
+func (r *cancelOnRegistrationRunner) RunCommand(ctx context.Context, _ string, args ...string) (string, error) {
+	command := strings.Join(args, " ")
+	switch {
+	case strings.Contains(command, "pjsip show transport"):
+		return "Transport: transport-udp/udp", nil
+	case strings.Contains(command, "pjsip show endpoint"):
+		return "Endpoint: trunk-canceltest/Unregistered", nil
+	case strings.Contains(command, "pjsip show registration"):
+		r.registrationChecks++
+		if r.registrationChecks == 1 {
+			r.cancel()
+		}
+		return "Registration: trunk-canceltest-reg\nserver_uri=sip:provider.test\nstatus=Unregistered", nil
+	case strings.Contains(command, "module reload res_pjsip.so"):
+		r.reloadContexts = append(r.reloadContexts, ctx.Err())
+		return "Module reload succeeded", nil
+	case strings.Contains(command, "module reload res_resolver_unbound.so"):
+		return "Module reload succeeded", nil
+	case strings.Contains(command, "core show uptime"):
+		return "System uptime: 1 second", nil
+	default:
+		return "", nil
+	}
+}
+
+func TestCanceledApplyRollsBackWithIndependentContext(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &cancelOnRegistrationRunner{cancel: cancel}
+	reloader := newTestRealReloader(dir, runner)
+	manager, err := sip.NewManager(&mockDialer{}, reloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.ApplyTrunk(ctx, sip.TrunkConfig{
+		Name: "canceltest", Host: "provider.test", HostNetworkAddress: "192.0.2.8", Port: 5060,
+		Transport: sip.TransportUDP, AuthType: sip.AuthIP, FromUser: "100",
+		RegistrationRequired: true, Enabled: true,
+	})
+	if err == nil || status.Status != sip.StatusRegistrationFailed {
+		t.Fatalf("canceled apply status=%s err=%v", status.Status, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "canceltest.conf")); !os.IsNotExist(statErr) {
+		t.Fatalf("staged config was not rolled back: stat err=%v", statErr)
+	}
+	if len(runner.reloadContexts) < 2 {
+		t.Fatalf("PJSIP reloads=%d, want stage and rollback reload", len(runner.reloadContexts))
+	}
+	if runner.reloadContexts[len(runner.reloadContexts)-1] != nil {
+		t.Fatalf("rollback reload received canceled context: %v", runner.reloadContexts[len(runner.reloadContexts)-1])
+	}
+}
+
 type sequenceRegistrationReloader struct {
 	*MockAsteriskReloader
 	states []string

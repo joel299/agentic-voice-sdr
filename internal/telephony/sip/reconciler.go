@@ -169,10 +169,12 @@ func (r *RealAsteriskReloader) getConfigPath(trunkName string) (string, error) {
 
 const resolverMarker = "; managed by agentic-voice-sdr GRU-83; do not edit"
 const pinnedHostsMarker = "# managed by agentic-voice-sdr GRU-83; do not edit"
+const legacyPinnedHostsMarker = "; managed by agentic-voice-sdr GRU-83; do not edit"
 
 const (
 	registrationPollInterval       = 250 * time.Millisecond
 	registrationConvergenceTimeout = 70 * time.Second
+	rollbackCleanupTimeout         = 10 * time.Second
 )
 
 type resolverSnapshot struct {
@@ -208,7 +210,7 @@ func (r *RealAsteriskReloader) captureResolver() (resolverSnapshot, error) {
 	if s.resolverExists && !strings.Contains(string(s.resolver), resolverMarker) {
 		return s, fmt.Errorf("refusing to overwrite unmanaged resolver configuration %s", s.resolverPath)
 	}
-	if s.hostsExists && !strings.Contains(string(s.hosts), pinnedHostsMarker) {
+	if s.hostsExists && !strings.Contains(string(s.hosts), pinnedHostsMarker) && !strings.Contains(string(s.hosts), legacyPinnedHostsMarker) {
 		return s, fmt.Errorf("refusing to overwrite unmanaged pinned hosts file %s", s.hostsPath)
 	}
 	return s, nil
@@ -630,6 +632,9 @@ func (r *RealAsteriskReloader) StagePJSIPConfig(ctx context.Context, trunkName s
 
 // CommitPJSIPConfig finalizes a staged transaction by removing the backup file.
 func (r *RealAsteriskReloader) CommitPJSIPConfig(ctx context.Context, trunkName string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("refusing to commit PJSIP config after operation cancellation: %w", err)
+	}
 	targetPath, err := r.getConfigPath(trunkName)
 	if err != nil {
 		return err
@@ -989,7 +994,9 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 
 	// Helper function for transaction rollback on verification failure
 	rollbackTransaction := func(origErr error, status LifecycleStatus) (StatusReport, error) {
-		rbErr := m.reloader.RollbackPJSIPConfig(ctx, cfg.Name)
+		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), rollbackCleanupTimeout)
+		defer cancelRollback()
+		rbErr := m.reloader.RollbackPJSIPConfig(rollbackCtx, cfg.Name)
 		report.Status = status
 		report.EndpointActive = false
 		if rbErr != nil {
@@ -1050,6 +1057,11 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 		report.EndpointActive = true
 	}
 
+	// A canceled request must never commit the staged runtime configuration.
+	if err := ctx.Err(); err != nil {
+		return rollbackTransaction(err, StatusRegistrationFailed)
+	}
+
 	// Step 8: Commit PJSIP config transaction on full success
 	if err := m.reloader.CommitPJSIPConfig(ctx, cfg.Name); err != nil {
 		return rollbackTransaction(fmt.Errorf("failed to commit PJSIP config: %w", err), StatusConfigured)
@@ -1083,6 +1095,9 @@ func (m *Manager) waitForRegistration(ctx context.Context, trunkName, initialSta
 		case <-timer.C:
 			return state, false, fmt.Errorf("registration did not reach Registered within %s", registrationConvergenceTimeout)
 		case <-ticker.C:
+			if err := ctx.Err(); err != nil {
+				return state, false, err
+			}
 			nextState, healthy, err := m.reloader.CheckRegistration(ctx, trunkName)
 			state = nextState
 			if err != nil || healthy || !strings.EqualFold(nextState, "Unregistered") {

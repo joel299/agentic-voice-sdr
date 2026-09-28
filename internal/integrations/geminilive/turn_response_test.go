@@ -87,46 +87,70 @@ func TestRenderDoesNotForwardUnknownCapabilityText(t *testing.T) {
 	}
 }
 
-func TestSendTurnDirectiveUsesOneControlledClientContentTurn(t *testing.T) {
-	received := make(chan map[string]any, 1)
+func TestSendControlledTurnAppendsFinalContextThenCompletesDirective(t *testing.T) {
+	received := make(chan map[string]any, 2)
 	session, closeSession := testSession(t, func(msg map[string]any) { received <- msg })
 	defer closeSession()
 
-	if err := session.SendTurnDirective(context.Background(), validAskDirective()); err != nil {
+	if err := session.SendControlledTurn(context.Background(), "  olá   quero   saber  ", validAskDirective()); err != nil {
 		t.Fatal(err)
 	}
-	msg := <-received
-	content, ok := msg["clientContent"].(map[string]any)
+	contextMessage := <-received
+	contextContent, ok := contextMessage["clientContent"].(map[string]any)
 	if !ok {
-		t.Fatalf("missing clientContent: %#v", msg)
+		t.Fatalf("missing transcript clientContent: %#v", contextMessage)
 	}
-	if complete, _ := content["turnComplete"].(bool); !complete {
-		t.Fatalf("turn was not completed: %#v", content)
+	if complete, _ := contextContent["turnComplete"].(bool); complete {
+		t.Fatalf("transcript context alone must not complete/start generation: %#v", contextContent)
 	}
-	if _, ok := msg["realtimeInput"]; ok {
-		t.Fatalf("controlled turn used realtimeInput: %#v", msg)
+	contextTurns := contextContent["turns"].([]any)
+	contextTurn := contextTurns[0].(map[string]any)
+	contextParts := contextTurn["parts"].([]any)
+	if got := contextParts[0].(map[string]any)["text"]; got != "olá quero saber" {
+		t.Fatalf("final lead context was not normalized: %#v", got)
+	}
+	directiveMessage := <-received
+	directiveContent, ok := directiveMessage["clientContent"].(map[string]any)
+	if !ok || directiveContent["turnComplete"] != true {
+		t.Fatalf("directive did not complete controlled turn: %#v", directiveMessage)
+	}
+	directiveTurns := directiveContent["turns"].([]any)
+	directiveText := directiveTurns[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(directiveText, "bounded turn outcome") {
+		t.Fatalf("directive missing from completing context: %q", directiveText)
+	}
+	for _, msg := range []map[string]any{contextMessage, directiveMessage} {
+		if _, ok := msg["realtimeInput"]; ok {
+			t.Fatalf("controlled turn used realtimeInput: %#v", msg)
+		}
 	}
 }
 
-func TestSendTurnDirectiveRejectsInvalidOversizeAndCanceledWithoutWrite(t *testing.T) {
+func TestSendControlledTurnRejectsInvalidOversizeAndCanceledWithoutWrite(t *testing.T) {
 	received := make(chan map[string]any, 1)
 	session, closeSession := testSession(t, func(msg map[string]any) { received <- msg })
 	defer closeSession()
 
-	if err := session.SendTurnDirective(context.Background(), conversation.TurnDirective{Kind: conversation.ActionAskQuestion}); !errors.Is(err, conversation.ErrInvalidTurnDirective) {
+	if err := session.SendControlledTurn(context.Background(), " 	 \n", validAskDirective()); !errors.Is(err, ErrInvalidControlledTurn) {
+		t.Fatalf("blank final lead text error = %v", err)
+	}
+	if err := session.SendControlledTurn(context.Background(), strings.Repeat("x", MaxFinalLeadTextBytes+1), validAskDirective()); !errors.Is(err, ErrFinalLeadTextTooLarge) {
+		t.Fatalf("oversize final lead text error = %v", err)
+	}
+	if err := session.SendControlledTurn(context.Background(), "lead", conversation.TurnDirective{Kind: conversation.ActionAskQuestion}); !errors.Is(err, conversation.ErrInvalidTurnDirective) {
 		t.Fatalf("invalid send error = %v", err)
 	}
 	oversize := validDeniedDirective()
 	oversize.Capability = strings.Repeat("x", MaxTurnInstructionBytes+1)
-	if err := session.SendTurnDirective(context.Background(), oversize); !errors.Is(err, ErrTurnInstructionTooLarge) {
+	if err := session.SendControlledTurn(context.Background(), "lead", oversize); !errors.Is(err, ErrTurnInstructionTooLarge) {
 		t.Fatalf("oversize send error = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := session.SendTurnDirective(ctx, validAskDirective()); !errors.Is(err, context.Canceled) {
+	if err := session.SendControlledTurn(ctx, "lead", validAskDirective()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled send error = %v", err)
 	}
-	if err := session.SendTurnDirective(nil, validAskDirective()); !errors.Is(err, ErrInvalidTurnResponse) {
+	if err := session.SendControlledTurn(nil, "lead", validAskDirective()); !errors.Is(err, ErrInvalidTurnResponse) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	select {
@@ -136,7 +160,7 @@ func TestSendTurnDirectiveRejectsInvalidOversizeAndCanceledWithoutWrite(t *testi
 	}
 }
 
-func testSession(t *testing.T, onMessage func(map[string]any)) (*Session, func()) {
+func testSession(t *testing.T, onMessage func(map[string]any)) (*providerSession, func()) {
 	t.Helper()
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -166,7 +190,7 @@ func testSession(t *testing.T, onMessage func(map[string]any)) (*Session, func()
 	})
 	ts := httptest.NewServer(h)
 	endpoint := "ws" + strings.TrimPrefix(ts.URL, "http")
-	session, err := Connect(context.Background(), Config{APIKey: "test-key", Endpoint: endpoint, Model: "test-model"})
+	session, err := connect(context.Background(), Config{APIKey: "test-key", Endpoint: endpoint, Model: "test-model"}, roleControlledResponse)
 	if err != nil {
 		ts.Close()
 		t.Fatal(err)

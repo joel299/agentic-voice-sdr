@@ -60,13 +60,15 @@ func (p *processorSpy) ProcessTurn(ctx context.Context, input turnruntime.TurnIn
 }
 
 type responderSpy struct {
-	calls atomic.Int32
-	err   error
-	mu    sync.Mutex
-	order *[]string
+	calls    atomic.Int32
+	err      error
+	mu       sync.Mutex
+	order    *[]string
+	leadText string
 }
 
-func (r *responderSpy) SendTurnDirective(context.Context, conversation.TurnDirective) error {
+func (r *responderSpy) SendControlledTurn(_ context.Context, leadText string, _ conversation.TurnDirective) error {
+	r.leadText = leadText
 	r.calls.Add(1)
 	if r.order != nil {
 		r.mu.Lock()
@@ -101,6 +103,9 @@ func TestBeginNoToolReservesBeforeRuntimeAndLeavesStarted(t *testing.T) {
 	}
 	if p.calls.Load() != 1 || r.calls.Load() != 1 {
 		t.Fatalf("calls = processor %d responder %d", p.calls.Load(), r.calls.Load())
+	}
+	if r.leadText != "final lead turn" {
+		t.Fatalf("coordinator did not pass finalized source transcript: %q", r.leadText)
 	}
 	if err := c.Complete(key); err != nil {
 		t.Fatalf("Complete: %v", err)

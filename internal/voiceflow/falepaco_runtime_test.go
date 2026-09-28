@@ -74,8 +74,8 @@ func (runtimeTestProcessor) ProcessTurn(context.Context, turnruntime.TurnInput) 
 func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
 	response := &runtimeTestResponse{ready: make(chan struct{}), events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000", Audio: []byte{1, 2}}, {Kind: geminilive.EventTurnComplete}}}
 	var gotID string
-	runtime, err := NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: "127.0.0.1:0", Processor: runtimeTestProcessor{}, Sessions: func(context.Context, string) (geminilive.InputTranscriberSession, geminilive.ControlledResponseSession, error) {
-		gotID = "set"
+	runtime, err := NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: "127.0.0.1:0", Processor: runtimeTestProcessor{}, Sessions: func(_ context.Context, id string) (geminilive.InputTranscriberSession, geminilive.ControlledResponseSession, error) {
+		gotID = id
 		return &runtimeTestInput{}, response, nil
 	}})
 	if err != nil {

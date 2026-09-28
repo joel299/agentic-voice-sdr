@@ -2,6 +2,7 @@ package voiceflow
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -110,7 +111,8 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	response := &e2eResponse{sendCalled: make(chan struct{}), events: make(chan geminilive.Event, 3)}
 	input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 2), seen: make(chan geminilive.TranscriptEvent, 2)}
 	audio := &e2eAudio{frames: []audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1, 2}}}}
-	runtime, err := NewSplitRuntime(audio, audio, input, response, state, processor, conversation.NewResponseGate(), nil, nil)
+	gate := conversation.NewResponseGate()
+	runtime, err := NewSplitRuntime(audio, audio, input, response, state, processor, gate, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +130,9 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	response.mu.Lock()
 	if response.sendCalls != 1 || response.finalText != "final lead" {
 		t.Fatalf("controlled send calls=%d text=%q", response.sendCalls, response.finalText)
+	}
+	if response.directive.Kind != conversation.ActionAskQuestion || response.directive.Reason != conversation.ReasonNeedsClarification {
+		t.Fatalf("controlled directive=%#v", response.directive)
 	}
 	response.mu.Unlock()
 	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{9, 8}, AudioMimeType: "audio/pcm;rate=24000"}
@@ -150,5 +155,9 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	}
 	if len(input.sent) != 1 || string(input.sent[0]) != "\x01\x02" {
 		t.Fatalf("input PCM=%#v", input.sent)
+	}
+	key := conversation.ResponseKey{ConversationID: "e2e-split", SourceTurnID: "lead-000001"}
+	if err := gate.Complete(key); !errors.Is(err, conversation.ErrResponseAlreadyCompleted) {
+		t.Fatalf("exact response key completion read-back error=%v", err)
 	}
 }

@@ -91,6 +91,19 @@ func NewHandler(state *conversation.ConversationState, coordinator *turnloop.Coo
 // HandleEvent ignores interim transcripts for turnloop purposes. Final valid
 // transcripts create one new lead turn and synchronously begin exactly one
 // response. Other events retain their existing downstream behavior.
+// HandleTranscript consumes the real input-session boundary directly. Interim
+// events are intentionally ignored and final events are never converted into
+// a provider response Event.
+func (h *FinalTranscriptHandler) HandleTranscript(ctx context.Context, event geminilive.TranscriptEvent) error {
+	if h == nil || h.state == nil || h.coordinator == nil {
+		return ErrInvalidHandler
+	}
+	if event.State != geminilive.TranscriptFinal {
+		return nil
+	}
+	return h.handleFinalText(ctx, event.Text)
+}
+
 func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminilive.Event) error {
 	if h == nil || h.state == nil || h.coordinator == nil {
 		return ErrInvalidHandler
@@ -98,10 +111,12 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if event.Kind != geminilive.EventInputTranscription || event.InputTranscriptState != geminilive.TranscriptFinal {
 		return h.forward(ctx, event)
 	}
-	text := strings.TrimSpace(event.Text)
+	return h.handleFinalText(ctx, event.Text)
+}
+
+func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText string) error {
+	text := strings.TrimSpace(rawText)
 	if text == "" {
-		// A final transcript is consumed by this handler even when it is blank;
-		// downstream must not turn invalid input into a response.
 		return nil
 	}
 
@@ -118,8 +133,6 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if err != nil {
 		return err
 	}
-	// Begin is synchronous; bind before returning to the receive owner so the
-	// bridge can authorize the very first model audio chunk.
 	h.lifecycle.Bind(key)
 	return nil
 }

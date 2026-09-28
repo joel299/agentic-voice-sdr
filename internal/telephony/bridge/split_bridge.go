@@ -1,0 +1,221 @@
+package bridge
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+
+	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
+)
+
+// TranscriptHandler is the boundary between the input transcription session
+// and the turnloop. It intentionally accepts TranscriptEvent, not Event.
+type TranscriptHandler interface {
+	HandleTranscript(context.Context, geminilive.TranscriptEvent) error
+}
+
+// SplitBridge connects independent input-transcription and controlled-response
+// sessions. The two sessions have separate receive owners and capabilities.
+type SplitBridge struct {
+	input       AudioReader
+	output      AudioWriter
+	transcriber geminilive.InputTranscriberSession
+	responder   geminilive.ControlledResponseSession
+	transcript  TranscriptHandler
+	events      EventHandler
+	lifecycle   ResponseLifecycle
+}
+
+func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.InputTranscriberSession, responder geminilive.ControlledResponseSession, transcript TranscriptHandler, events EventHandler, lifecycle ...ResponseLifecycle) *SplitBridge {
+	var lc ResponseLifecycle
+	if len(lifecycle) > 0 {
+		lc = lifecycle[0]
+	}
+	return &SplitBridge{input: input, output: output, transcriber: transcriber, responder: responder, transcript: transcript, events: events, lifecycle: lc}
+}
+
+// Run owns exactly one Receive loop for each provider session. PCM is sent
+// only to transcriber; response output is read only from responder.
+func (b *SplitBridge) Run(ctx context.Context) error {
+	if b == nil || b.input == nil || b.output == nil || b.transcriber == nil || b.responder == nil || b.transcript == nil {
+		return ErrNilDependency
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var once sync.Once
+	closeAll := func() {
+		once.Do(func() { closeIfPossible(b.input); _ = b.transcriber.Close(); _ = b.responder.Close() })
+	}
+	type result struct {
+		err      error
+		response bool
+	}
+	done := make(chan result, 3)
+	go func() { done <- result{err: b.runSplitIngress(ctx)} }()
+	go func() { done <- result{err: b.runSplitTranscripts(ctx)} }()
+	go func() { done <- result{err: b.runSplitResponses(ctx), response: true} }()
+
+	var first error
+	for i := 0; i < 3; i++ {
+		res := <-done
+		err := res.err
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && first == nil {
+			first = err
+			cancel()
+			closeAll()
+		}
+		if res.response && err == nil {
+			cancel()
+			closeAll()
+		}
+	}
+	closeAll()
+	if first != nil {
+		return first
+	}
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
+}
+
+func (b *SplitBridge) runSplitIngress(ctx context.Context) error {
+	for {
+		frame, err := b.input.ReadFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return b.transcriber.EndAudio(ctx)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		switch frame.Type {
+		case audiosocket.TypeSlin16:
+			if len(frame.Payload) == 0 {
+				continue
+			}
+			if err := b.transcriber.SendAudio(ctx, frame.Payload); err != nil {
+				return err
+			}
+		case audiosocket.TypeHangup:
+			return b.transcriber.EndAudio(ctx)
+		case audiosocket.TypeID, audiosocket.TypeDTMF:
+			continue
+		default:
+			return fmt.Errorf("%w: AudioSocket %s cannot be sent as Gemini PCM16", ErrFormatIncompatible, frame.Type)
+		}
+	}
+}
+
+func (b *SplitBridge) runSplitTranscripts(ctx context.Context) error {
+	for {
+		event, err := b.transcriber.Receive(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if err := b.transcript.HandleTranscript(ctx, event); err != nil {
+			return err
+		}
+	}
+}
+
+func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
+	disposition := providerTurnIdle
+	var lease ResponseTurnLease
+	begin := func() {
+		if disposition != providerTurnIdle {
+			return
+		}
+		if b.lifecycle == nil {
+			disposition = providerTurnDenied
+			return
+		}
+		lease = b.lifecycle.CaptureActive()
+		if lease == nil || !lease.ModelAudioAuthorized() {
+			lease = nil
+			disposition = providerTurnDenied
+			return
+		}
+		disposition = providerTurnOwned
+	}
+	reset := func() { disposition = providerTurnIdle; lease = nil }
+	fail := func(reason error) {
+		if disposition == providerTurnOwned {
+			_ = lease.Fail(ctx, reason)
+		}
+		reset()
+	}
+	failSession := func(reason error) {
+		if disposition == providerTurnOwned {
+			_ = lease.Fail(ctx, reason)
+		} else if b.lifecycle != nil {
+			_ = b.lifecycle.FailActive(ctx, reason)
+		}
+		reset()
+	}
+	complete := func() error {
+		if disposition != providerTurnOwned {
+			reset()
+			return nil
+		}
+		err := lease.Complete(ctx)
+		reset()
+		return err
+	}
+
+	for {
+		event, err := b.responder.Receive(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			failSession(ErrReceiveFailed)
+			return err
+		}
+		switch event.Kind {
+		case geminilive.EventAudio:
+			if event.AudioMimeType != "audio/pcm;rate=24000" {
+				fail(ErrFormatIncompatible)
+				return fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType)
+			}
+			begin()
+			if len(event.Audio) > 0 && disposition == providerTurnOwned {
+				if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+					fail(ErrAudioOutputFailed)
+					return err
+				}
+			}
+		case geminilive.EventOutputTranscription, geminilive.EventToolCall:
+			begin()
+		case geminilive.EventTurnComplete:
+			if err := complete(); err != nil {
+				return err
+			}
+		case geminilive.EventInterrupted:
+			fail(ErrResponseInterrupted)
+		case geminilive.EventAPIError:
+			failSession(ErrProviderAPI)
+		case geminilive.EventClosed:
+			failSession(ErrSessionClosed)
+		}
+		if b.events != nil {
+			if err := b.events(ctx, event); err != nil {
+				return err
+			}
+		}
+		if event.Kind == geminilive.EventClosed {
+			return nil
+		}
+	}
+}

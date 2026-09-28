@@ -28,11 +28,43 @@ func (p *testProcessor) ProcessTurn(_ context.Context, input turnruntime.TurnInp
 	return p.directive, p.err
 }
 
-type testResponder struct{ calls int }
+type testResponder struct {
+	calls     int
+	finalText string
+	directive conversation.TurnDirective
+}
 
-func (r *testResponder) SendTurnDirective(context.Context, conversation.TurnDirective) error {
+func (r *testResponder) SendControlledTurn(_ context.Context, finalText string, directive conversation.TurnDirective) error {
 	r.calls++
+	r.finalText = finalText
+	r.directive = directive
 	return nil
+}
+
+func TestCoordinatorSendsFinalTextAndDirectiveToControlledResponder(t *testing.T) {
+	state, err := conversation.NewConversationState("conversation-controlled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := conversation.NewTurn("lead-000001", conversation.RoleLead, "  final lead context  ", conversation.TranscriptFinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecordTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+	processor := &testProcessor{directive: conversation.TurnDirective{Kind: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}}
+	responder := &testResponder{}
+	coordinator, err := turnloop.New(processor, responder, conversation.NewResponseGate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Begin(context.Background(), state, turn.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if responder.calls != 1 || responder.finalText != turn.Text || responder.directive != processor.directive {
+		t.Fatalf("controlled response call = %#v, want text=%q directive=%#v", responder, turn.Text, processor.directive)
+	}
 }
 
 func newTestHandler(t *testing.T, processorErr error) (*FinalTranscriptHandler, *conversation.ConversationState, *testProcessor) {

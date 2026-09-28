@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -52,7 +53,7 @@ func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
 		Provider: "falepaco", Name: "falepaco", Host: c.domain, Port: 5060, Transport: "udp",
 		Registrar: c.domain,
 		Auth:      httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
-		FromUser:  c.extension, RegistrationRequired: true, Enabled: true,
+		FromUser:  c.extension, RegistrationRequired: false, Enabled: true,
 	}
 }
 
@@ -122,11 +123,14 @@ func run() int {
 		return 3
 	}
 	fmt.Println("configured_host=" + canonical.Host)
+	fmt.Println("configured_username=" + canonical.AuthUsername)
+	fmt.Println("configured_extension=" + canonical.FromUser)
 	fmt.Println("transport=" + string(canonical.Transport))
 	fmt.Printf("port=%d\n", canonical.Port)
-	fmt.Println("server_uri=sip:" + canonical.Registrar + ":5060")
-	fmt.Println("client_uri=sip:" + canonical.AuthUsername + "@" + canonical.Registrar + ":5060")
+	fmt.Println("aor_contact=sip:" + canonical.Host + ":5060")
+	fmt.Println("registration_required=" + strconv.FormatBool(canonical.RegistrationRequired))
 	fmt.Println("pjsip_auth_present=" + yes(strings.Contains(generated, "[trunk-falepaco-auth]")))
+	fmt.Println("pjsip_registration_present=" + yes(strings.Contains(generated, "[trunk-falepaco-reg]")))
 	fmt.Println("hardcoded_ip=no")
 	manager, err := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))
 	if err != nil {

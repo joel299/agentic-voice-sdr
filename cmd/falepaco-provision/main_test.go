@@ -17,7 +17,7 @@ func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical.Host != canonicalDomain || canonical.Registrar != canonicalDomain || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.Secret != credentials.password {
+	if canonical.Host != canonicalDomain || canonical.Registrar != canonicalDomain || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.Secret != credentials.password || canonical.RegistrationRequired {
 		t.Fatalf("runtime credential fields were not mapped into canonical trunk configuration")
 	}
 	generated, err := sip.GeneratePJSIPConfig(canonical)
@@ -30,8 +30,11 @@ func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
 	if canonical.HostNetworkAddress != "" || canonical.RegistrarNetworkAddress != "" || canonical.OutboundProxyNetworkAddress != "" {
 		t.Fatal("resolved IP was supplied as persistent SIP destination")
 	}
-	if !strings.Contains(generated, "server_uri=sip:"+canonicalDomain) || !strings.Contains(generated, "client_uri=sip:"+credentials.username+"@"+canonicalDomain) {
-		t.Fatal("canonical SIP URIs lost the domain")
+	if !strings.Contains(generated, "contact=sip:"+canonicalDomain+":5060") || !strings.Contains(generated, "outbound_auth=trunk-falepaco-auth") {
+		t.Fatal("direct trunk lost canonical destination or digest auth")
+	}
+	if strings.Contains(generated, "[trunk-falepaco-reg]") {
+		t.Fatal("registration object generated although registration is not required")
 	}
 }
 

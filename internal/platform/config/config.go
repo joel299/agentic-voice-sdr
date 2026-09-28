@@ -3,51 +3,57 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
 type Config struct {
-	HTTPAddr           string
-	WhatsAppConfigPath string
-	SIPConfigDir       string
-	ReadTimeout        time.Duration
-	WriteTimeout       time.Duration
-	IdleTimeout        time.Duration
-	ShutdownGrace      time.Duration
+	HTTPAddr                   string
+	WhatsAppConfigPath         string
+	SIPConfigDir               string
+	ReadTimeout                time.Duration
+	WriteTimeout               time.Duration
+	IdleTimeout                time.Duration
+	ShutdownGrace              time.Duration
+	FalePacoAudioSocketEnabled bool
+	FalePacoAudioSocketAddr    string
+	FalePacoRuntimeLogPath     string
 }
 
 func Load() (Config, error) {
-	cfg := Config{
-		HTTPAddr:           envOrDefault("HTTP_ADDR", ":8080"),
-		WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""),
-		SIPConfigDir:       envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""),
-		ReadTimeout:        10 * time.Second,
-		WriteTimeout:       10 * time.Second,
-		IdleTimeout:        60 * time.Second,
-		ShutdownGrace:      10 * time.Second,
+	enabled, err := envBool("FALEPACO_AUDIOSOCKET_ENABLED", false)
+	if err != nil {
+		return Config{}, err
 	}
+	cfg := Config{HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"), WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""), SIPConfigDir: envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, ShutdownGrace: 10 * time.Second, FalePacoAudioSocketEnabled: enabled, FalePacoAudioSocketAddr: envOrDefault("FALEPACO_AUDIOSOCKET_ADDR", "127.0.0.1:9092"), FalePacoRuntimeLogPath: envOrDefault("FALEPACO_RUNTIME_LOG_PATH", "/root/agentic-voice-sdr/.runtime-logs/falepaco/runtime.log")}
 	for _, item := range []struct {
 		name   string
 		target *time.Duration
-	}{
-		{"HTTP_READ_TIMEOUT", &cfg.ReadTimeout},
-		{"HTTP_WRITE_TIMEOUT", &cfg.WriteTimeout},
-		{"HTTP_IDLE_TIMEOUT", &cfg.IdleTimeout},
-		{"HTTP_SHUTDOWN_GRACE", &cfg.ShutdownGrace},
-	} {
-		value := os.Getenv(item.name)
-		if value == "" {
-			continue
+	}{{"HTTP_READ_TIMEOUT", &cfg.ReadTimeout}, {"HTTP_WRITE_TIMEOUT", &cfg.WriteTimeout}, {"HTTP_IDLE_TIMEOUT", &cfg.IdleTimeout}, {"HTTP_SHUTDOWN_GRACE", &cfg.ShutdownGrace}} {
+		if value := os.Getenv(item.name); value != "" {
+			duration, e := time.ParseDuration(value)
+			if e != nil || duration <= 0 {
+				return Config{}, fmt.Errorf("%s must be a positive duration", item.name)
+			}
+			*item.target = duration
 		}
-		duration, err := time.ParseDuration(value)
-		if err != nil || duration <= 0 {
-			return Config{}, fmt.Errorf("%s must be a positive duration", item.name)
-		}
-		*item.target = duration
+	}
+	if cfg.FalePacoAudioSocketEnabled && cfg.FalePacoAudioSocketAddr == "" {
+		return Config{}, fmt.Errorf("FALEPACO_AUDIOSOCKET_ADDR is required when AudioSocket is enabled")
 	}
 	return cfg, nil
 }
-
+func envBool(name string, fallback bool) (bool, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+	return parsed, nil
+}
 func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value

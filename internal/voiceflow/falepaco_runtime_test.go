@@ -92,6 +92,11 @@ func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
 	if runtime.Addr() == "" {
 		t.Fatal("runtime did not listen")
 	}
+	badConn, err := net.Dial("tcp", runtime.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = badConn.Close()
 	conn, err := net.Dial("tcp", runtime.Addr())
 	if err != nil {
 		t.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,5 +128,48 @@ func TestRuntimeCompositionUsesPersistentWhatsAppStore(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"active_instance_id":"wa-1"`) || strings.Contains(response.Body.String(), "secret") {
 		t.Fatalf("persistent runtime store not wired: status=%d body=%s", response.Code, response.Body)
+	}
+}
+
+type testAudioServer struct {
+	serveStarted   chan struct{}
+	shutdownCalled chan struct{}
+	once           sync.Once
+}
+
+func (s *testAudioServer) Listen() error { return nil }
+func (s *testAudioServer) Serve(ctx context.Context) error {
+	close(s.serveStarted)
+	<-ctx.Done()
+	return nil
+}
+func (s *testAudioServer) Shutdown(context.Context) error {
+	s.once.Do(func() { close(s.shutdownCalled) })
+	return nil
+}
+
+func TestRunServersStartsAndShutsDownHTTPAndAudioSocket(t *testing.T) {
+	audio := &testAudioServer{serveStarted: make(chan struct{}), shutdownCalled: make(chan struct{})}
+	httpDone := make(chan struct{})
+	server := newHTTPServer(":0", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runServers(ctx, server, audio, time.Second, func() error { <-httpDone; return http.ErrServerClosed })
+	}()
+	select {
+	case <-audio.serveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("AudioSocket runtime did not start")
+	}
+	cancel()
+	close(httpDone)
+	select {
+	case <-audio.shutdownCalled:
+	case <-time.After(time.Second):
+		t.Fatal("AudioSocket runtime did not shut down")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("runServers() error = %v", err)
 	}
 }

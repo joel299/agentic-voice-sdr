@@ -196,18 +196,39 @@ func TestRawAudioAndDirectiveRouteToSeparateProviderSessions(t *testing.T) {
 		if model != "models/injected-live-model" {
 			t.Fatalf("configured model was not preserved: %q", model)
 		}
+		var generation struct {
+			ResponseModalities []string `json:"responseModalities"`
+		}
+		if err := json.Unmarshal(fields["generationConfig"], &generation); err != nil {
+			t.Fatalf("decode modalities for connection %d: %v", peer.id, err)
+		}
+		want := "AUDIO"
+		if peer.id == inputPeer.id {
+			want = "TEXT"
+		}
+		if len(generation.ResponseModalities) != 1 || generation.ResponseModalities[0] != want {
+			t.Fatalf("connection %d modalities = %v, want [%s]", peer.id, generation.ResponseModalities, want)
+		}
 	}
 
 	phonePCM := []byte{0x11, 0x22, 0x33}
 	if err := transcriber.SendAudio(context.Background(), phonePCM); err != nil {
 		t.Fatal(err)
 	}
-	if err := response.SendTurnDirective(context.Background(), validAskDirective()); err != nil {
+	if err := response.SendControlledTurn(context.Background(), "final lead words", validAskDirective()); err != nil {
 		t.Fatal(err)
 	}
-	first, second := nextRoleMessage(t, fake.messages), nextRoleMessage(t, fake.messages)
-	messages := map[int]map[string]json.RawMessage{first.connection: first.payload, second.connection: second.payload}
-	realtimeRaw, found := messages[inputPeer.id]["realtimeInput"]
+	var inputMessage roleMessage
+	var responseMessages []roleMessage
+	for range 3 {
+		message := nextRoleMessage(t, fake.messages)
+		if message.connection == inputPeer.id {
+			inputMessage = message
+		} else {
+			responseMessages = append(responseMessages, message)
+		}
+	}
+	realtimeRaw, found := inputMessage.payload["realtimeInput"]
 	if !found {
 		t.Fatal("raw phone PCM did not reach the transcription session")
 	}
@@ -219,14 +240,53 @@ func TestRawAudioAndDirectiveRouteToSeparateProviderSessions(t *testing.T) {
 	if err := json.Unmarshal(realtimeRaw, &realtime); err != nil || realtime.Audio.Data != base64.StdEncoding.EncodeToString(phonePCM) {
 		t.Fatal("transcription provider did not receive the exact phone PCM payload")
 	}
-	if _, found := messages[responsePeer.id]["realtimeInput"]; found {
-		t.Fatal("raw phone PCM reached the controlled response session")
+	if len(responseMessages) != 2 {
+		t.Fatalf("response session got %d messages, want lead context + directive", len(responseMessages))
 	}
-	if _, found := messages[responsePeer.id]["clientContent"]; !found {
-		t.Fatal("controlled directive did not reach the response session")
+	for _, message := range responseMessages {
+		if message.connection != responsePeer.id {
+			t.Fatalf("response context/directive routed to connection %d", message.connection)
+		}
+		if _, found := message.payload["realtimeInput"]; found {
+			t.Fatal("raw phone PCM reached the controlled response session")
+		}
 	}
-	if _, found := messages[inputPeer.id]["clientContent"]; found {
-		t.Fatal("controlled directive reached the transcription session")
+	var contextContent, directiveContent struct {
+		Turns []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"turns"`
+		TurnComplete bool `json:"turnComplete"`
+	}
+	if err := json.Unmarshal(responseMessages[0].payload["clientContent"], &contextContent); err != nil {
+		t.Fatal(err)
+	}
+	if contextContent.TurnComplete || len(contextContent.Turns) != 1 || contextContent.Turns[0].Parts[0].Text != "final lead words" {
+		t.Fatalf("final transcript was not context-only on response connection: %+v", contextContent)
+	}
+	if err := json.Unmarshal(responseMessages[1].payload["clientContent"], &directiveContent); err != nil {
+		t.Fatal(err)
+	}
+	if !directiveContent.TurnComplete || !strings.Contains(directiveContent.Turns[0].Parts[0].Text, "bounded turn outcome") {
+		t.Fatalf("directive was not the completing response context: %+v", directiveContent)
+	}
+}
+
+func TestRoleDefaultsAndExplicitModalities(t *testing.T) {
+	input := Config{}.normalized(roleInputTranscription)
+	response := Config{}.normalized(roleControlledResponse)
+	if len(input.ResponseModalities) != 1 || input.ResponseModalities[0] != "TEXT" {
+		t.Fatalf("input transcriber default modalities = %v", input.ResponseModalities)
+	}
+	if len(response.ResponseModalities) != 1 || response.ResponseModalities[0] != "AUDIO" {
+		t.Fatalf("controlled response default modalities = %v", response.ResponseModalities)
+	}
+	explicit := Config{ResponseModalities: []string{"TEXT", "AUDIO"}}
+	gotInput := explicit.normalized(roleInputTranscription)
+	gotResponse := explicit.normalized(roleControlledResponse)
+	if strings.Join(gotInput.ResponseModalities, ",") != "TEXT,AUDIO" || strings.Join(gotResponse.ResponseModalities, ",") != "TEXT,AUDIO" {
+		t.Fatal("explicit caller modalities were not preserved")
 	}
 }
 
@@ -339,7 +399,7 @@ func TestClosingOneSessionDoesNotCorruptOtherSession(t *testing.T) {
 	if err := transcriber.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := response.SendTurnDirective(context.Background(), validAskDirective()); err != nil {
+	if err := response.SendControlledTurn(context.Background(), "final lead words", validAskDirective()); err != nil {
 		t.Fatalf("response session failed after transcriber close: %v", err)
 	}
 	request := nextRoleMessage(t, fake.messages)
@@ -456,7 +516,7 @@ func TestUnderlyingProviderRoleRejectsCrossCapabilities(t *testing.T) {
 	defer response.Close()
 	_ = nextRolePeer(t, fake.peers)
 	_ = nextRolePeer(t, fake.peers)
-	if err := transcriber.(*inputTranscriber).provider.SendTurnDirective(context.Background(), validAskDirective()); !errors.Is(err, ErrCapabilityNotAllowed) {
+	if err := transcriber.(*inputTranscriber).provider.SendControlledTurn(context.Background(), "lead", validAskDirective()); !errors.Is(err, ErrCapabilityNotAllowed) {
 		t.Fatalf("transcription session accepted controlled directive: %v", err)
 	}
 	if err := response.(*controlledResponder).provider.SendAudio(context.Background(), []byte{1, 2}); !errors.Is(err, ErrCapabilityNotAllowed) {

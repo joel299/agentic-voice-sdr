@@ -32,7 +32,7 @@ type InputTranscriberSession interface {
 // ControlledResponseSession accepts only coordinator-issued turn directives
 // and exposes response events. It deliberately has no SendAudio capability.
 type ControlledResponseSession interface {
-	SendTurnDirective(context.Context, conversation.TurnDirective) error
+	SendControlledTurn(context.Context, string, conversation.TurnDirective) error
 	Receive(context.Context) (Event, error)
 	Close() error
 }
@@ -121,11 +121,11 @@ func (s *inputTranscriber) Close() error {
 	return s.provider.Close()
 }
 
-func (s *controlledResponder) SendTurnDirective(ctx context.Context, directive conversation.TurnDirective) error {
+func (s *controlledResponder) SendControlledTurn(ctx context.Context, finalLeadText string, directive conversation.TurnDirective) error {
 	if s == nil || s.provider == nil {
 		return ErrNotReady
 	}
-	return s.provider.SendTurnDirective(ctx, directive)
+	return s.provider.SendControlledTurn(ctx, finalLeadText, directive)
 }
 
 // Receive returns only controlled response lifecycle/output events. Input

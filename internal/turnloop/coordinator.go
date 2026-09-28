@@ -23,7 +23,7 @@ type TurnProcessor interface {
 
 // TurnResponder is the narrow controlled provider send boundary.
 type TurnResponder interface {
-	SendTurnDirective(context.Context, conversation.TurnDirective) error
+	SendControlledTurn(context.Context, string, conversation.TurnDirective) error
 }
 
 // Coordinator claims response ownership before processing a turn and keeps the
@@ -81,7 +81,12 @@ func (c *Coordinator) Begin(ctx context.Context, state *conversation.Conversatio
 		c.failAfterReservation(reservation.Key)
 		return conversation.ResponseKey{}, err
 	}
-	if err := c.responder.SendTurnDirective(ctx, directive); err != nil {
+	finalLeadText, ok := finalizedLeadText(state, sourceTurnID)
+	if !ok {
+		c.failAfterReservation(reservation.Key)
+		return conversation.ResponseKey{}, ErrInvalidCoordinatorInput
+	}
+	if err := c.responder.SendControlledTurn(ctx, finalLeadText, directive); err != nil {
 		c.failAfterReservation(reservation.Key)
 		return conversation.ResponseKey{}, err
 	}
@@ -106,4 +111,16 @@ func (c *Coordinator) Fail(key conversation.ResponseKey) error {
 
 func (c *Coordinator) failAfterReservation(key conversation.ResponseKey) {
 	_ = c.gate.Fail(key)
+}
+
+func finalizedLeadText(state *conversation.ConversationState, sourceTurnID string) (string, bool) {
+	if state == nil {
+		return "", false
+	}
+	for _, turn := range state.Turns() {
+		if turn.ID == sourceTurnID {
+			return turn.Text, turn.Role == conversation.RoleLead && turn.Transcript == conversation.TranscriptFinal
+		}
+	}
+	return "", false
 }

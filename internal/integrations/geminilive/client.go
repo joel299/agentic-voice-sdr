@@ -52,7 +52,7 @@ func ConfigFromEnv() Config {
 	return Config{APIKey: os.Getenv("GEMINI_API_KEY"), Model: os.Getenv("GEMINI_LIVE_MODEL"), Endpoint: os.Getenv("GEMINI_LIVE_ENDPOINT")}
 }
 
-func (c Config) normalized() Config {
+func (c Config) normalized(role providerRole) Config {
 	if c.Model == "" {
 		c.Model = DefaultModel
 	}
@@ -60,7 +60,11 @@ func (c Config) normalized() Config {
 		c.Endpoint = DefaultEndpoint
 	}
 	if len(c.ResponseModalities) == 0 {
-		c.ResponseModalities = []string{"AUDIO"}
+		modality := "AUDIO"
+		if role == roleInputTranscription {
+			modality = "TEXT"
+		}
+		c.ResponseModalities = []string{modality}
 	}
 	return c
 }
@@ -158,6 +162,7 @@ type providerSession struct {
 	cfg           Config
 	role          providerRole
 	writeMu       sync.Mutex
+	turnMu        sync.Mutex
 	closeOnce     sync.Once
 	done          chan struct{}
 	receiveActive atomic.Bool
@@ -170,7 +175,7 @@ func connect(ctx context.Context, cfg Config, role providerRole) (*providerSessi
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cfg = cfg.normalized()
+	cfg = cfg.normalized(role)
 	if cfg.APIKey == "" {
 		return nil, wrap(ErrorAuthentication, errors.New("API key is required"))
 	}
@@ -269,9 +274,9 @@ func setupMessage(cfg Config, role providerRole) map[string]any {
 	return map[string]any{"setup": setup}
 }
 
-// SendClientContent sends one discrete user turn and marks it complete. It is
-// intentionally separate from realtimeInput, which is reserved for streaming.
-func (s *providerSession) SendClientContent(ctx context.Context, text string) error {
+// sendClientContent appends controlled text. The final transcript is sent with
+// turnComplete=false so context alone cannot trigger generation.
+func (s *providerSession) sendClientContent(ctx context.Context, text string, turnComplete bool) error {
 	if s == nil {
 		return ErrNotReady
 	}
@@ -287,7 +292,7 @@ func (s *providerSession) SendClientContent(ctx context.Context, text string) er
 				"role":  "user",
 				"parts": []map[string]string{{"text": text}},
 			}},
-			"turnComplete": true,
+			"turnComplete": turnComplete,
 		},
 	})
 }

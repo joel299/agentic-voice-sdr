@@ -195,6 +195,10 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]string{"error": "configuration_invalid"})
 		return
 	}
+	if validation := falepacoSavedValidation(req, m); validation != nil {
+		jsonOut(w, 400, map[string]any{"error": "configuration_invalid", "invalid_field": validation.Field, "validation_class": validation.Class, "secrets_redacted": true})
+		return
+	}
 	if !req.RegistrationRequired {
 		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "registration.enabled must be true before REGISTER testing", "secrets_redacted": true})
 		return

@@ -157,6 +157,15 @@ func validateFalePacoSave(in falepacoConfigRequest) *configValidationError {
 	}
 	return nil
 }
+func falepacoSavedValidation(req httpapi.SIPConfigRequest, m map[string]string) *configValidationError {
+	return validateFalePacoSave(falepacoConfigRequest{
+		ProviderAddress: m["FALEPACO_SIP_DOMAIN"], RequestURIHost: m["FALEPACO_SIP_OUTBOUND_HOST"],
+		OutboundProxy: req.OutboundProxy, Username: req.Auth.Username, Extension: req.FromUser,
+		CallerID: req.CallerID, Transport: req.Transport, Port: req.Port,
+		Registration: RegistrationConfig{Enabled: req.RegistrationRequired, ServerURI: req.RegistrationServerURI, ClientURI: req.RegistrationClientURI, ContactUser: req.RegistrationContactUser, Realm: req.RegistrationRealm, RetryIntervalSeconds: req.RegistrationRetryInterval, MaxRetries: req.RegistrationMaxRetries},
+	})
+}
+
 func atomicDotenvWrite(m map[string]string) error { return atomicDotenvWriteAt(sipEnv, m) }
 
 func atomicDotenvWriteAt(path string, m map[string]string) error {
@@ -375,6 +384,10 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		stage, class, summary := safeApplyError(e, m["FALEPACO_SIP_PASSWORD"])
 		jsonOut(w, 502, map[string]any{"error": "configuration_invalid", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
+		return
+	}
+	if validation := falepacoSavedValidation(req, m); validation != nil {
+		jsonOut(w, 400, map[string]any{"error": "configuration_invalid", "invalid_field": validation.Field, "validation_class": validation.Class, "apply_stage": "validation", "secrets_redacted": true})
 		return
 	}
 	cfg, e := req.ToCanonical()

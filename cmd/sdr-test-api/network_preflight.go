@@ -78,15 +78,17 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	response := networkPreflightResponse{ProviderIPAllowlistCount: len(falePacoProviderIPs), ProviderIPsConfigured: len(falePacoProviderIPs) == 21, Blockers: []string{}, Warnings: []string{}, UDPRemotePortConfirmed: false}
 	response.DNSTimeoutMS = 4000
-	if m, err := dotenv(sipEnv); err == nil {
-		proxyHost, _, _ := net.SplitHostPort(m["FALEPACO_SIP_OUTBOUND_PROXY"])
+	if m, err := dotenv(sipEnv); err != nil {
+		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_unavailable", "configuration_unavailable", "configuration_unavailable"
+	} else if req, err := savedFalepaco(m); err != nil || falepacoSavedValidation(req, m) != nil {
+		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_invalid", "configuration_invalid", "configuration_invalid"
+	} else {
+		proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
 		response.ProviderAddressDNSState, response.ProviderAddressResolvedIPs, response.ProviderAddressResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_DOMAIN"], 4*time.Second)
 		response.ProviderAddressResolvedIPsCount = len(response.ProviderAddressResolvedIPs)
 		response.RequestURIHostDNSState, response.RequestURIHostResolvedIPs, response.RequestURIHostResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_OUTBOUND_HOST"], 4*time.Second)
 		response.RequestURIHostResolvedIPsCount = len(response.RequestURIHostResolvedIPs)
 		response.OutboundProxyDNSState, _, response.OutboundProxyResolvesToAllowlist = resolveFalePacoHost(proxyHost, 4*time.Second)
-	} else {
-		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_unavailable", "configuration_unavailable", "configuration_unavailable"
 	}
 	for _, state := range []string{response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState} {
 		if state != "resolved" {

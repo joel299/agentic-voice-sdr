@@ -49,6 +49,12 @@ components:
     NetworkPreflightResponse:
       type: object
       properties:
+        resolver_mode: {type: string}
+        system_resolver_state: {type: string}
+        dns_nameserver_count: {type: integer}
+        dns_egress_state: {type: string}
+        provider_address_lookup_duration_ms: {type: integer}
+        request_uri_host_lookup_duration_ms: {type: integer}
         provider_address_dns_state: {type: string}
         provider_address_resolved_ips_count: {type: integer}
         provider_address_resolves_to_allowlist: {type: boolean}

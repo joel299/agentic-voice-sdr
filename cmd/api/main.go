@@ -34,6 +34,17 @@ var productionFalePacoRuntime = func(addr string, geminiConfig geminilive.Config
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: handler, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 }
+
+// Keep the server write deadline later than the bounded SIP PUT operation. The
+// default remains 10 seconds; only deployments configured below this threshold
+// are raised enough to return the operation's timeout response.
+func effectiveHTTPWriteTimeout(configured time.Duration) time.Duration {
+	minimum := httpapi.SIPConfigurationTimeout + time.Second
+	if configured < minimum {
+		return minimum
+	}
+	return configured
+}
 func main() {
 	if err := run(context.Background(), config.Load, serve); err != nil {
 		log.Printf("API startup error: %v", err)
@@ -51,7 +62,7 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 func serve(ctx context.Context, cfg config.Config) error {
 	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfig(cfg))
 	server.ReadTimeout = cfg.ReadTimeout
-	server.WriteTimeout = cfg.WriteTimeout
+	server.WriteTimeout = effectiveHTTPWriteTimeout(cfg.WriteTimeout)
 	server.IdleTimeout = cfg.IdleTimeout
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

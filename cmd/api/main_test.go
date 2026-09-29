@@ -25,6 +25,15 @@ func TestServerConfiguresExplicitTimeouts(t *testing.T) {
 	}
 }
 
+func TestSIPApplyTimeoutFitsHTTPWriteDeadline(t *testing.T) {
+	if got, want := effectiveHTTPWriteTimeout(10*time.Second), 10*time.Second; got != want {
+		t.Fatalf("default write timeout changed: got %s want %s", got, want)
+	}
+	if got, want := effectiveHTTPWriteTimeout(3*time.Second), httpapi.SIPConfigurationTimeout+time.Second; got != want {
+		t.Fatalf("short write timeout=%s, want %s", got, want)
+	}
+}
+
 func TestGracefulShutdownWaitsForActiveRequests(t *testing.T) {
 	requestStarted := make(chan struct{})
 	releaseRequest := make(chan struct{})

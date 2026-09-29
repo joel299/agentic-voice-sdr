@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -138,7 +139,13 @@ func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := a.sip.Configure(r.Context(), input); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), SIPConfigurationTimeout)
+	defer cancel()
+	if err := a.sip.Configure(ctx, input); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "SIP configuration timed out"})
+			return
+		}
 		if errors.Is(err, errSIPCanonicalValidation) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid SIP configuration"})
 			return
@@ -148,6 +155,10 @@ func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "SIP configuration failed"})
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "SIP configuration timed out"})
 		return
 	}
 	safe := input.SafeView()

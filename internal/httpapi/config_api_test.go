@@ -38,6 +38,18 @@ type apiSIP struct{ configured bool }
 
 func (s *apiSIP) Configure(context.Context, SIPConfigRequest) error { s.configured = true; return nil }
 
+type contextCompletionSIP struct {
+	started chan struct{}
+}
+
+func (s contextCompletionSIP) Configure(ctx context.Context, _ SIPConfigRequest) error {
+	close(s.started)
+	<-ctx.Done()
+	// Simulate a collaborator that completes successfully as cancellation races
+	// with its return; the HTTP boundary must still refuse to report success.
+	return nil
+}
+
 type canonicalManager struct {
 	got   sip.TrunkConfig
 	err   error
@@ -90,6 +102,27 @@ func TestWhatsAppConfigurationAPIAndSecretMasking(t *testing.T) {
 	res = requestJSON(t, handler, http.MethodPost, "/v1/config/whatsapp/test", "")
 	if res.Code != http.StatusOK {
 		t.Fatalf("test status=%d body=%s", res.Code, res.Body)
+	}
+}
+
+func TestSIPPutDoesNotReportSuccessAfterRequestExpires(t *testing.T) {
+	started := make(chan struct{})
+	handler := NewRouterWithServices(whatsapp.NewService(whatsapp.NewRegistry(nil), nil), contextCompletionSIP{started: started})
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPut, "/v1/config/sip-trunk", strings.NewReader(`{"provider":"generic","name":"main","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"none"},"enabled":true}`)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { handler.ServeHTTP(response, request); close(done) }()
+	<-started
+	cancel()
+	<-done
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expired SIP operation status=%d body=%s", response.Code, response.Body)
+	}
+	get := requestJSON(t, handler, http.MethodGet, "/v1/config/sip-trunk", "")
+	if get.Code != http.StatusNotFound {
+		t.Fatalf("expired operation was stored: status=%d body=%s", get.Code, get.Body)
 	}
 }
 

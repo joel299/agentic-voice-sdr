@@ -82,7 +82,7 @@ components:
         secrets_redacted: {type: boolean, enum: [true]}
     FalePacoApplyResponse:
       type: object
-      required: [applied, credential_file_loaded_fresh, endpoint_active, auth_object_present, auth_username, auth_realm, outbound_auth_reference, transport, request_uri_host, outbound_proxy, caller_id, registration_required, registration_object_present, transport_object, transport_object_present, secrets_redacted]
+      required: [applied, credential_file_loaded_fresh, endpoint_active, auth_object_present, auth_username, auth_realm, outbound_auth_reference, transport, request_uri_host, outbound_proxy, caller_id, registration_enabled, registration_object_present, transport_object, transport_object_present, secrets_redacted]
       properties:
         applied: {type: boolean, enum: [true]}
         credential_file_loaded_fresh: {type: boolean, enum: [true]}
@@ -95,7 +95,7 @@ components:
         request_uri_host: {type: string}
         outbound_proxy: {type: string}
         caller_id: {type: string}
-        registration_required: {type: boolean}
+        registration_enabled: {type: boolean}
         registration_object_present: {type: boolean}
         transport_object: {type: string}
         transport_object_present: {type: boolean}

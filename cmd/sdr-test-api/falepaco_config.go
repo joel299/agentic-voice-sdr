@@ -343,7 +343,7 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "auth_object_present": authPresent, "auth_username": req.Auth.Username, "auth_realm": req.RegistrationRealm, "outbound_auth_reference": "trunk-falepaco-auth", "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "registration_object_present": registrationPresent, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
+	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "auth_object_present": authPresent, "auth_username": req.Auth.Username, "auth_realm": req.RegistrationRealm, "outbound_auth_reference": "trunk-falepaco-auth", "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_enabled": req.RegistrationRequired, "registration_object_present": registrationPresent, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
 }
 
 var applyCredentialPattern = regexp.MustCompile(`(?i)(password|secret|authorization|proxy-authorization|digest response|nonce|cnonce|opaque)(\s*[=:]\s*)[^,;\s]+`)

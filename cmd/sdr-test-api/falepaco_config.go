@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ type falepacoConfigRequest struct {
 	CallerID             string             `json:"caller_id"`
 	Transport            string             `json:"transport"`
 	Port                 int                `json:"port"`
-	RegistrationRequired bool               `json:"registration_required"`
+	RegistrationRequired *bool              `json:"registration_required,omitempty"`
 	Registration         RegistrationConfig `json:"registration,omitempty"`
 }
 type RegistrationConfig struct {
@@ -41,17 +42,17 @@ type RegistrationConfig struct {
 	MaxRetries           int    `json:"max_retries"`
 }
 type falepacoConfigResponse struct {
-	Configured           bool   `json:"configured"`
-	ProviderAddress      string `json:"provider_address"`
-	RequestURIHost       string `json:"request_uri_host"`
-	OutboundProxy        string `json:"outbound_proxy"`
-	Username             string `json:"username"`
-	Extension            string `json:"extension"`
-	PasswordConfigured   bool   `json:"password_configured"`
-	CallerID             string `json:"caller_id"`
-	Transport            string `json:"transport"`
-	Port                 int    `json:"port"`
-	RegistrationRequired bool   `json:"registration_required"`
+	Configured         bool               `json:"configured"`
+	ProviderAddress    string             `json:"provider_address"`
+	RequestURIHost     string             `json:"request_uri_host"`
+	OutboundProxy      string             `json:"outbound_proxy"`
+	Username           string             `json:"username"`
+	Extension          string             `json:"extension"`
+	PasswordConfigured bool               `json:"password_configured"`
+	CallerID           string             `json:"caller_id"`
+	Transport          string             `json:"transport"`
+	Port               int                `json:"port"`
+	Registration       RegistrationConfig `json:"registration"`
 }
 
 func validSIPHost(h string) error {
@@ -73,8 +74,10 @@ func validSIPHost(h string) error {
 	}
 	return nil
 }
-func atomicDotenvWrite(m map[string]string) error {
-	dir := filepath.Dir(sipEnv)
+func atomicDotenvWrite(m map[string]string) error { return atomicDotenvWriteAt(sipEnv, m) }
+
+func atomicDotenvWriteAt(path string, m map[string]string) error {
+	dir := filepath.Dir(path)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
 	}
@@ -100,7 +103,7 @@ func atomicDotenvWrite(m map[string]string) error {
 	if e = f.Close(); e != nil {
 		return e
 	}
-	if e = os.Rename(name, sipEnv); e != nil {
+	if e = os.Rename(name, path); e != nil {
 		return e
 	}
 	d, e := os.Open(dir)
@@ -118,22 +121,67 @@ func savedFalepaco(m map[string]string) (httpapi.SIPConfigRequest, error) {
 	}
 	port := 5060
 	if m["FALEPACO_SIP_PORT"] != "" {
-		if _, e := fmt.Sscanf(m["FALEPACO_SIP_PORT"], "%d", &port); e != nil {
-			return httpapi.SIPConfigRequest{}, e
+		parsed, err := strconv.Atoi(strings.TrimSpace(m["FALEPACO_SIP_PORT"]))
+		if err != nil || parsed <= 0 {
+			return httpapi.SIPConfigRequest{}, errors.New("invalid SIP port")
 		}
+		port = parsed
 	}
 	transport := m["FALEPACO_SIP_TRANSPORT"]
 	if transport == "" {
 		transport = "tcp"
 	}
-	reg := m["FALEPACO_SIP_REGISTRATION_REQUIRED"] == "true" || m["FALEPACO_SIP_REGISTRATION_ENABLED"] == "true"
+	parseBool := func(key string) (bool, bool, error) {
+		value, exists := m[key]
+		if !exists || value == "" {
+			return false, false, nil
+		}
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return false, true, fmt.Errorf("invalid_registration_configuration: %s must be boolean", key)
+		}
+		return parsed, true, nil
+	}
+	reg, enabledPresent, err := parseBool("FALEPACO_SIP_REGISTRATION_ENABLED")
+	if err != nil {
+		return httpapi.SIPConfigRequest{}, err
+	}
+	legacy, legacyPresent, err := parseBool("FALEPACO_SIP_REGISTRATION_REQUIRED")
+	if err != nil {
+		return httpapi.SIPConfigRequest{}, err
+	}
+	if enabledPresent && legacyPresent && reg != legacy {
+		return httpapi.SIPConfigRequest{}, errors.New("invalid_registration_configuration: conflicting registration flags")
+	}
+	if !enabledPresent {
+		reg = legacy
+	}
+	parsePositive := func(key string, fallback int) (int, error) {
+		value := strings.TrimSpace(m[key])
+		if value == "" {
+			return fallback, nil
+		}
+		result, err := strconv.Atoi(value)
+		if err != nil || result <= 0 {
+			return 0, fmt.Errorf("invalid_registration_configuration: %s must be a positive integer", key)
+		}
+		return result, nil
+	}
+	retry, err := parsePositive("FALEPACO_SIP_RETRY_INTERVAL", 60)
+	if err != nil {
+		return httpapi.SIPConfigRequest{}, err
+	}
+	maxRetries, err := parsePositive("FALEPACO_SIP_MAX_RETRIES", 3)
+	if err != nil {
+		return httpapi.SIPConfigRequest{}, err
+	}
 	req := httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: host, Port: port, Transport: transport, Registrar: host, OutboundProxy: m["FALEPACO_SIP_OUTBOUND_PROXY"], FromDomain: host, FromUser: m["FALEPACO_SIP_EXTENSION"], CallerID: m["FALEPACO_SIP_CALLER_ID"], SendPAI: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: m["FALEPACO_SIP_USERNAME"], Secret: m["FALEPACO_SIP_PASSWORD"]}, RegistrationRequired: reg, Enabled: true}
 	req.RegistrationServerURI = m["FALEPACO_SIP_REGISTRATION_SERVER_URI"]
 	req.RegistrationClientURI = m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"]
 	req.RegistrationContactUser = m["FALEPACO_SIP_CONTACT_USER"]
 	req.RegistrationRealm = m["FALEPACO_SIP_REALM"]
-	req.RegistrationRetryInterval = 60
-	req.RegistrationMaxRetries = 3
+	req.RegistrationRetryInterval = retry
+	req.RegistrationMaxRetries = maxRetries
 	return req, nil
 }
 func (s *server) falepacoGet(w http.ResponseWriter, r *http.Request) {
@@ -141,10 +189,22 @@ func (s *server) falepacoGet(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
 		return
 	}
-	m, _ := dotenv(sipEnv)
-	req, _ := savedFalepaco(m)
-	jsonOut(w, 200, falepacoConfigResponse{Configured: m["FALEPACO_SIP_PASSWORD"] != "" && m["FALEPACO_SIP_USERNAME"] != "", ProviderAddress: m["FALEPACO_SIP_DOMAIN"], RequestURIHost: m["FALEPACO_SIP_OUTBOUND_HOST"], OutboundProxy: req.OutboundProxy, Username: req.Auth.Username, Extension: req.FromUser, PasswordConfigured: m["FALEPACO_SIP_PASSWORD"] != "", CallerID: req.CallerID, Transport: req.Transport, Port: req.Port, RegistrationRequired: req.RegistrationRequired})
+	m, err := dotenv(sipEnv)
+	if err != nil && !os.IsNotExist(err) {
+		jsonOut(w, 500, map[string]string{"error": "credential_source_unavailable"})
+		return
+	}
+	req, err := savedFalepaco(m)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "invalid_registration_configuration"})
+		return
+	}
+	jsonOut(w, 200, falepacoConfigResponse{Configured: m["FALEPACO_SIP_PASSWORD"] != "" && m["FALEPACO_SIP_USERNAME"] != "", ProviderAddress: m["FALEPACO_SIP_DOMAIN"], RequestURIHost: m["FALEPACO_SIP_OUTBOUND_HOST"], OutboundProxy: req.OutboundProxy, Username: req.Auth.Username, Extension: req.FromUser, PasswordConfigured: m["FALEPACO_SIP_PASSWORD"] != "", CallerID: req.CallerID, Transport: req.Transport, Port: req.Port, Registration: RegistrationConfig{Enabled: req.RegistrationRequired, ServerURI: req.RegistrationServerURI, ClientURI: req.RegistrationClientURI, ContactUser: req.RegistrationContactUser, Realm: req.RegistrationRealm, RetryIntervalSeconds: req.RegistrationRetryInterval, MaxRetries: req.RegistrationMaxRetries}})
 }
+func falepacoEnv(in falepacoConfigRequest, password string) map[string]string {
+	return map[string]string{"FALEPACO_SIP_DOMAIN": in.ProviderAddress, "FALEPACO_SIP_OUTBOUND_HOST": in.RequestURIHost, "FALEPACO_SIP_OUTBOUND_PROXY": in.OutboundProxy, "FALEPACO_SIP_USERNAME": in.Username, "FALEPACO_SIP_EXTENSION": in.Extension, "FALEPACO_SIP_PASSWORD": password, "FALEPACO_SIP_CALLER_ID": in.CallerID, "FALEPACO_SIP_TRANSPORT": in.Transport, "FALEPACO_SIP_PORT": fmt.Sprint(in.Port), "FALEPACO_SIP_REGISTRATION_REQUIRED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_ENABLED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_SERVER_URI": in.Registration.ServerURI, "FALEPACO_SIP_REGISTRATION_CLIENT_URI": in.Registration.ClientURI, "FALEPACO_SIP_CONTACT_USER": in.Registration.ContactUser, "FALEPACO_SIP_REALM": in.Registration.Realm, "FALEPACO_SIP_RETRY_INTERVAL": fmt.Sprint(in.Registration.RetryIntervalSeconds), "FALEPACO_SIP_MAX_RETRIES": fmt.Sprint(in.Registration.MaxRetries)}
+}
+
 func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
@@ -155,7 +215,31 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "invalid_request"})
 		return
 	}
-	old, _ := dotenv(sipEnv)
+	if in.RegistrationRequired != nil && *in.RegistrationRequired != in.Registration.Enabled {
+		jsonOut(w, 400, map[string]string{"error": "invalid_registration_configuration"})
+		return
+	}
+	if in.Registration.RetryIntervalSeconds == 0 {
+		in.Registration.RetryIntervalSeconds = 60
+	}
+	if in.Registration.MaxRetries == 0 {
+		in.Registration.MaxRetries = 3
+	}
+	if in.Registration.RetryIntervalSeconds < 1 || in.Registration.MaxRetries < 1 {
+		jsonOut(w, 400, map[string]string{"error": "invalid_registration_configuration"})
+		return
+	}
+	if in.Registration.Enabled {
+		if in.Registration.ServerURI == "" || in.Registration.ClientURI == "" || in.Registration.ContactUser == "" || in.Registration.Realm == "" {
+			jsonOut(w, 400, map[string]string{"error": "invalid_registration_configuration"})
+			return
+		}
+	}
+	old, err := dotenv(sipEnv)
+	if err != nil && !os.IsNotExist(err) {
+		jsonOut(w, 500, map[string]string{"error": "credential_source_unavailable"})
+		return
+	}
 	password := old["FALEPACO_SIP_PASSWORD"]
 	if in.Password != nil {
 		if *in.Password == "" {
@@ -168,13 +252,14 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "invalid_configuration"})
 		return
 	}
+	in.Transport = strings.ToLower(in.Transport)
 	for _, h := range []string{in.ProviderAddress, in.RequestURIHost, strings.Split(in.OutboundProxy, ":")[0]} {
 		if e := validSIPHost(h); e != nil {
 			jsonOut(w, 400, map[string]string{"error": "invalid_sip_host"})
 			return
 		}
 	}
-	m := map[string]string{"FALEPACO_SIP_DOMAIN": in.ProviderAddress, "FALEPACO_SIP_OUTBOUND_HOST": in.RequestURIHost, "FALEPACO_SIP_OUTBOUND_PROXY": in.OutboundProxy, "FALEPACO_SIP_USERNAME": in.Username, "FALEPACO_SIP_EXTENSION": in.Extension, "FALEPACO_SIP_PASSWORD": password, "FALEPACO_SIP_CALLER_ID": in.CallerID, "FALEPACO_SIP_TRANSPORT": in.Transport, "FALEPACO_SIP_PORT": "5060", "FALEPACO_SIP_REGISTRATION_REQUIRED": fmt.Sprint(in.RegistrationRequired), "FALEPACO_SIP_REGISTRATION_ENABLED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_SERVER_URI": in.Registration.ServerURI, "FALEPACO_SIP_REGISTRATION_CLIENT_URI": in.Registration.ClientURI, "FALEPACO_SIP_CONTACT_USER": in.Registration.ContactUser, "FALEPACO_SIP_REALM": in.Registration.Realm, "FALEPACO_SIP_RETRY_INTERVAL": fmt.Sprint(in.Registration.RetryIntervalSeconds), "FALEPACO_SIP_MAX_RETRIES": fmt.Sprint(in.Registration.MaxRetries)}
+	m := falepacoEnv(in, password)
 	if e := atomicDotenvWrite(m); e != nil {
 		jsonOut(w, 500, map[string]string{"error": "credential_write_failed"})
 		return
@@ -193,12 +278,14 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 	}
 	req, e := savedFalepaco(m)
 	if e != nil {
-		jsonOut(w, 502, map[string]string{"error": "configuration_invalid"})
+		stage, class, summary := safeApplyError(e, m["FALEPACO_SIP_PASSWORD"])
+		jsonOut(w, 502, map[string]any{"error": "configuration_invalid", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
 		return
 	}
 	cfg, e := req.ToCanonical()
 	if e != nil {
-		jsonOut(w, 400, map[string]string{"error": "configuration_invalid"})
+		stage, class, summary := safeApplyError(e, m["FALEPACO_SIP_PASSWORD"])
+		jsonOut(w, 400, map[string]any{"error": "configuration_invalid", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
 		return
 	}
 	cfg.DeferRegistrationCheck = true
@@ -246,6 +333,8 @@ func safeApplyError(err error, secret string) (stage, class, summary string) {
 	}
 	message := err.Error()
 	switch {
+	case strings.Contains(message, "res_resolver_unbound.so"):
+		stage, class = "resolver", "pinned_resolver_unavailable"
 	case strings.Contains(message, "invalid trunk configuration") || strings.Contains(message, "invalid SIP"):
 		stage, class = "validation", "invalid_configuration"
 	case strings.Contains(message, "DNS failure"):

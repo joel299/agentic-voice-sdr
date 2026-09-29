@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -22,6 +23,60 @@ func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
 func TestProviderAllowlistContainsOfficialCount(t *testing.T) {
 	if len(falePacoProviderIPs) != 21 {
 		t.Fatalf("provider allowlist count=%d", len(falePacoProviderIPs))
+	}
+}
+
+func TestSavedFalepacoRoundTripsRegistrationFieldsAndRejectsConflicts(t *testing.T) {
+	values := map[string]string{
+		"FALEPACO_SIP_DOMAIN": "provider.example", "FALEPACO_SIP_OUTBOUND_HOST": "request.example",
+		"FALEPACO_SIP_OUTBOUND_PROXY": "proxy.example:5060", "FALEPACO_SIP_USERNAME": "100",
+		"FALEPACO_SIP_EXTENSION": "100", "FALEPACO_SIP_PASSWORD": "secret-never-return",
+		"FALEPACO_SIP_CALLER_ID": "551155200455", "FALEPACO_SIP_TRANSPORT": "tcp", "FALEPACO_SIP_PORT": "5060",
+		"FALEPACO_SIP_REGISTRATION_ENABLED": "true", "FALEPACO_SIP_REGISTRATION_REQUIRED": "true",
+		"FALEPACO_SIP_REGISTRATION_SERVER_URI": "sip:request.example:5060",
+		"FALEPACO_SIP_REGISTRATION_CLIENT_URI": "sip:100@request.example:5060",
+		"FALEPACO_SIP_CONTACT_USER":            "100", "FALEPACO_SIP_REALM": "request.example",
+		"FALEPACO_SIP_RETRY_INTERVAL": "45", "FALEPACO_SIP_MAX_RETRIES": "7",
+	}
+	testEnv := filepath.Join(t.TempDir(), "falepaco.env")
+	input := falepacoConfigRequest{ProviderAddress: values["FALEPACO_SIP_DOMAIN"], RequestURIHost: values["FALEPACO_SIP_OUTBOUND_HOST"], OutboundProxy: values["FALEPACO_SIP_OUTBOUND_PROXY"], Username: values["FALEPACO_SIP_USERNAME"], Extension: values["FALEPACO_SIP_EXTENSION"], CallerID: values["FALEPACO_SIP_CALLER_ID"], Transport: values["FALEPACO_SIP_TRANSPORT"], Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: values["FALEPACO_SIP_REGISTRATION_SERVER_URI"], ClientURI: values["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], ContactUser: values["FALEPACO_SIP_CONTACT_USER"], Realm: values["FALEPACO_SIP_REALM"], RetryIntervalSeconds: 45, MaxRetries: 7}}
+	if err := atomicDotenvWriteAt(testEnv, falepacoEnv(input, values["FALEPACO_SIP_PASSWORD"])); err != nil {
+		t.Fatal(err)
+	}
+	values, err := dotenv(testEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := savedFalepaco(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !req.RegistrationRequired || req.RegistrationServerURI != "sip:request.example:5060" || req.RegistrationClientURI != "sip:100@request.example:5060" || req.RegistrationContactUser != "100" || req.RegistrationRealm != "request.example" || req.RegistrationRetryInterval != 45 || req.RegistrationMaxRetries != 7 {
+		t.Fatalf("registration config did not round-trip: %+v", req)
+	}
+	response := falepacoConfigResponse{ProviderAddress: values["FALEPACO_SIP_DOMAIN"], RequestURIHost: values["FALEPACO_SIP_OUTBOUND_HOST"], OutboundProxy: req.OutboundProxy, Username: req.Auth.Username, Extension: req.FromUser, PasswordConfigured: true, CallerID: req.CallerID, Transport: req.Transport, Port: req.Port, Registration: RegistrationConfig{Enabled: req.RegistrationRequired, ServerURI: req.RegistrationServerURI, ClientURI: req.RegistrationClientURI, ContactUser: req.RegistrationContactUser, Realm: req.RegistrationRealm, RetryIntervalSeconds: req.RegistrationRetryInterval, MaxRetries: req.RegistrationMaxRetries}}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret-never-return") || strings.Contains(string(encoded), `"password"`) {
+		t.Fatalf("secret leaked in GET response: %s", encoded)
+	}
+	values["FALEPACO_SIP_REGISTRATION_REQUIRED"] = "false"
+	if _, err := savedFalepaco(values); err == nil || !strings.Contains(err.Error(), "invalid_registration_configuration") {
+		t.Fatalf("conflicting flags should fail, err=%v", err)
+	}
+}
+
+func TestSavedFalepacoRegistrationDefaultsAndInvalidRetry(t *testing.T) {
+	values := map[string]string{"FALEPACO_SIP_REGISTRATION_ENABLED": "true", "FALEPACO_SIP_REGISTRATION_REQUIRED": "true"}
+	req, err := savedFalepaco(values)
+	if err != nil || req.RegistrationRetryInterval != 60 || req.RegistrationMaxRetries != 3 {
+		t.Fatalf("defaults req=%+v err=%v", req, err)
+	}
+	values["FALEPACO_SIP_RETRY_INTERVAL"] = "60junk"
+	if _, err := savedFalepaco(values); err == nil {
+		t.Fatal("invalid retry interval was silently ignored")
 	}
 }
 

@@ -10,8 +10,8 @@ servers:
 tags:
   - name: Authentication
   - name: Fale Paco Configuration
-  - name: Fale Paco Test
   - name: Fale Paco Registration
+  - name: Fale Paco Test
 components:
   securitySchemes:
     BearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
@@ -19,7 +19,7 @@ components:
     LoginRequest: {type: object, required: [username, password], properties: {username: {type: string, example: owner}, password: {type: string, format: password, example: "********"}}}
     FalePacoConfigRequest:
       type: object
-      required: [provider_address, request_uri_host, outbound_proxy, username, extension, caller_id, transport, port, registration_required]
+      required: [provider_address, request_uri_host, outbound_proxy, username, extension, caller_id, transport, port, registration]
       properties:
         provider_address: {type: string, example: 98034.falepaco.com.br}
         request_uri_host: {type: string, example: 96678.falepaco.com.br}
@@ -30,8 +30,22 @@ components:
         caller_id: {type: string, example: "551155200455"}
         transport: {type: string, enum: [tcp, udp], example: tcp}
         port: {type: integer, example: 5060}
-        registration_required: {type: boolean, example: false}
-        registration: {type: object, properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
+        registration: {type: object, required: [enabled, server_uri, client_uri, contact_user, realm, retry_interval_seconds, max_retries], properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
+    FalePacoConfigResponse:
+      type: object
+      required: [configured, provider_address, request_uri_host, outbound_proxy, username, extension, password_configured, caller_id, transport, port, registration]
+      properties:
+        configured: {type: boolean}
+        provider_address: {type: string}
+        request_uri_host: {type: string}
+        outbound_proxy: {type: string}
+        username: {type: string}
+        extension: {type: string}
+        password_configured: {type: boolean}
+        caller_id: {type: string}
+        transport: {type: string, enum: [tcp, udp]}
+        port: {type: integer}
+        registration: {$ref: '#/components/schemas/FalePacoConfigRequest/properties/registration'}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
   /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
@@ -46,7 +60,7 @@ paths:
   /v1/auth/me:
     get: {tags: [Authentication], security: [{BearerAuth: []}], responses: {"200": {description: Authenticated}, "401": {description: Unauthorized}}}
   /v1/falepaco/config:
-    get: {tags: [Fale Paco Configuration], summary: Get Fale Paco configuration, security: [{BearerAuth: []}], responses: {"200": {description: Sanitized configuration}, "401": {description: Unauthorized}}}
+    get: {tags: [Fale Paco Configuration], summary: Get Fale Paco configuration, security: [{BearerAuth: []}], responses: {"200": {description: Sanitized configuration, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigResponse'}}}}, "401": {description: Unauthorized}}}
     put:
       tags: [Fale Paco Configuration]
       summary: Configure Fale Paco
@@ -54,12 +68,6 @@ paths:
       security: [{BearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigRequest'}}}}
       responses: {"200": {description: Saved sanitized configuration}, "400": {description: Invalid configuration}, "401": {description: Unauthorized}}
-  /v1/falepaco/network/preflight:
-    get:
-      tags: [Fale Paco Configuration]
-      summary: Sanitized network and RTP preflight
-      security: [{BearerAuth: []}]
-      responses: {"200": {description: Sanitized route/firewall/listener checks}, "401": {description: Unauthorized}}
   /v1/falepaco/config/apply:
     post:
       tags: [Fale Paco Configuration]
@@ -67,14 +75,12 @@ paths:
       description: Read fresh runtime credentials, render/apply PJSIP, reload Asterisk, and read back. Does not place a call.
       security: [{BearerAuth: []}]
       responses: {"200": {description: Applied and read back}, "401": {description: Unauthorized}, "502": {description: Asterisk failure}}
-  /v1/test/falepaco/call:
-    post:
-      tags: [Fale Paco Test]
-      summary: Execute one controlled outbound test
-      description: Uses the saved Fale Paco configuration and only allows +5567981340687.
+  /v1/falepaco/network/preflight:
+    get:
+      tags: [Fale Paco Configuration]
+      summary: Sanitized network and RTP preflight
       security: [{BearerAuth: []}]
-      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+5567981340687"}}}}}}
-      responses: {"200": {description: Sanitized SIP result}, "400": {description: Destination not allowed}, "401": {description: Unauthorized}, "409": {description: Another call active}, "502": {description: SIP failure}}
+      responses: {"200": {description: Sanitized route/firewall/listener checks}, "401": {description: Unauthorized}}
 
   /v1/falepaco/registration:
     get:
@@ -91,6 +97,14 @@ paths:
     post:
       tags: [Fale Paco Registration]
       summary: Test SIP REGISTER
-      description: Applies the saved registration configuration and validates registration. Does not place a call.
+      description: Captures TCP port 5060 wire traffic, applies the saved registration configuration and validates the REGISTER challenge/final response. Does not place a call.
       security: [{BearerAuth: []}]
       responses: {"200": {description: Registered}, "401": {description: Unauthorized}, "502": {description: Registration rejected or unavailable}}
+  /v1/test/falepaco/call:
+    post:
+      tags: [Fale Paco Test]
+      summary: Execute one controlled outbound test
+      description: Uses the saved Fale Paco configuration and only allows +556****0687.
+      security: [{BearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+556****0687"}}}}}}
+      responses: {"200": {description: Sanitized SIP result}, "400": {description: Destination not allowed}, "401": {description: Unauthorized}, "409": {description: Another call active}, "502": {description: SIP failure}}

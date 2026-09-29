@@ -116,7 +116,7 @@ func savedFalepaco(m map[string]string) (httpapi.SIPConfigRequest, error) {
 		transport = "tcp"
 	}
 	reg := m["FALEPACO_SIP_REGISTRATION_REQUIRED"] == "true"
-	return httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: host, Port: port, Transport: transport, Registrar: host, OutboundProxy: m["FALEPACO_SIP_OUTBOUND_PROXY"], FromDomain: domain, FromUser: m["FALEPACO_SIP_EXTENSION"], CallerID: m["FALEPACO_SIP_CALLER_ID"], SendPAI: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: m["FALEPACO_SIP_USERNAME"], Secret: m["FALEPACO_SIP_PASSWORD"]}, RegistrationRequired: reg, Enabled: true}, nil
+	return httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: host, Port: port, Transport: transport, Registrar: host, OutboundProxy: m["FALEPACO_SIP_OUTBOUND_PROXY"], FromDomain: host, FromUser: m["FALEPACO_SIP_EXTENSION"], CallerID: m["FALEPACO_SIP_CALLER_ID"], SendPAI: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: m["FALEPACO_SIP_USERNAME"], Secret: m["FALEPACO_SIP_PASSWORD"]}, RegistrationRequired: reg, Enabled: true}, nil
 }
 func (s *server) falepacoGet(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
@@ -146,7 +146,7 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 		}
 		password = *in.Password
 	}
-	if in.ProviderAddress == "" || in.RequestURIHost == "" || in.OutboundProxy == "" || in.Username == "" || in.Extension == "" || password == "" || in.CallerID == "" || strings.ToLower(in.Transport) != "tcp" || in.Port != 5060 {
+	if in.ProviderAddress == "" || in.RequestURIHost == "" || in.OutboundProxy == "" || in.Username == "" || in.Extension == "" || password == "" || in.CallerID == "" || (strings.ToLower(in.Transport) != "tcp" && strings.ToLower(in.Transport) != "udp") || in.Port != 5060 {
 		jsonOut(w, 400, map[string]string{"error": "invalid_configuration"})
 		return
 	}
@@ -200,5 +200,11 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]string{"error": "asterisk_readback_failed"})
 		return
 	}
-	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "outbound_auth_reference": "trunk-falepaco-auth", "auth_username": req.Auth.Username, "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "secrets_redacted": true})
+	transportName := "transport-" + req.Transport
+	transportOut, transportErr := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show transport "+transportName).CombinedOutput()
+	if transportErr != nil || !strings.Contains(string(transportOut), transportName) {
+		jsonOut(w, 502, map[string]string{"error": "asterisk_transport_readback_failed"})
+		return
+	}
+	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "outbound_auth_reference": "trunk-falepaco-auth", "auth_username": req.Auth.Username, "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
 }

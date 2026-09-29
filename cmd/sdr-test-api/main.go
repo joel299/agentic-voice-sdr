@@ -68,6 +68,8 @@ type callResponse struct {
 	SIPStatus                          int    `json:"sip_status"`
 	SIPReason                          string `json:"sip_reason"`
 	SecretsRedacted                    bool   `json:"secrets_redacted"`
+	SelectedTransport                  string `json:"selected_transport"`
+	NetworkProtocolObserved            string `json:"network_protocol_observed"`
 }
 
 func dotenv(path string) (map[string]string, error) {
@@ -294,8 +296,13 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pcap := "/tmp/gru142-sip.pcap"
+	protocol := strings.ToLower(req.Transport)
+	if protocol != "tcp" && protocol != "udp" {
+		jsonOut(w, 400, map[string]string{"error": "transport_not_supported"})
+		return
+	}
 	_ = os.Remove(pcap)
-	tcp := exec.CommandContext(ctx, "tcpdump", "-i", "any", "-s0", "-w", pcap, "tcp port 5060")
+	tcp := exec.CommandContext(ctx, "tcpdump", "-i", "any", "-s0", "-w", pcap, protocol+" port 5060")
 	if e = tcp.Start(); e != nil {
 		jsonOut(w, 502, map[string]string{"error": "sip_capture_setup_failed"})
 		return
@@ -326,7 +333,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	if status == 200 {
 		reason = "OK"
 	}
-	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: "tcp", RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true})
+	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: protocol, RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true, SelectedTransport: protocol, NetworkProtocolObserved: strings.ToUpper(protocol)})
 }
 func (s *server) docs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

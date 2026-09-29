@@ -27,7 +27,7 @@ components:
         extension: {type: string, example: "100"}
         password: {type: string, format: password, writeOnly: true}
         caller_id: {type: string, example: "551155200455"}
-        transport: {type: string, enum: [tcp], example: tcp}
+        transport: {type: string, enum: [tcp, udp], example: tcp}
         port: {type: integer, example: 5060}
         registration_required: {type: boolean, example: false}
 paths:

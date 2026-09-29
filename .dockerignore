@@ -1,0 +1,7 @@
+.runtime-secrets
+.runtime-logs
+.git
+.env
+.env.*
+*.pcap
+*.log

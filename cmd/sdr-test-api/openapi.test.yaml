@@ -1,8 +1,11 @@
 openapi: 3.1.0
 info:
   title: SDR Fale Paco Test API
-  version: 1.0.0
-  description: Test-only outbound-only API. SIP credentials are server-side and the SIP password is never sent through this API. Only the authorized destination can be tested.
+  version: 1.1.0
+  description: >-
+    Test-only outbound-only API. Login first, then use the returned JWT in Authorize.
+    SIP credentials are server-side; the SIP password is never sent through this API.
+    Only the authorized destination can be tested.
 servers:
   - url: https://sdr.iainfinito.com.br
 components:
@@ -10,42 +13,36 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
+      bearerFormat: JWT
   schemas:
-    CallRequest:
-      type: object
-      required: [destination]
-      properties:
-        destination: {type: string, example: "+5567981340687"}
-    CallResponse:
-      type: object
-      properties:
-        ok: {type: boolean}
-        destination: {type: string}
-        credential_source: {type: string}
-        credential_file_loaded_fresh: {type: boolean}
-        auth_username: {type: string}
-        transport: {type: string}
-        request_uri: {type: string}
-        outbound_proxy_host: {type: string}
-        digest_challenge_received: {type: boolean}
-        authenticated_invite_sent: {type: boolean}
-        digest_response_matches_runtime_secret: {type: boolean}
-        sip_status: {type: integer}
-        sip_reason: {type: string}
-        secrets_redacted: {type: boolean}
+    LoginRequest: {type: object, required: [username, password], properties: {username: {type: string, example: owner}, password: {type: string, format: password, example: "********"}}}
+    LoginResponse: {type: object, required: [access_token, token_type, expires_in], properties: {access_token: {type: string, example: eyJ...}, token_type: {type: string, example: Bearer}, expires_in: {type: integer, example: 900}}}
+    CallRequest: {type: object, required: [destination], properties: {destination: {type: string, example: "+5567981340687"}}}
 paths:
   /healthz:
-    get: {responses: {"200": {description: Healthy}}}
+    get:
+      summary: Health
+      responses: {"200": {description: Healthy}}
   /readyz:
-    get: {responses: {"200": {description: Ready}, "503": {description: Not ready}}}
+    get:
+      summary: Readiness
+      responses: {"200": {description: Ready}, "503": {description: Not ready}}
+  /v1/auth/login:
+    post:
+      summary: Login
+      description: Execute this first, copy access_token, click Authorize, and paste the token.
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses: {"200": {description: JWT issued, content: {application/json: {schema: {$ref: '#/components/schemas/LoginResponse'}}}}, "400": {description: Missing credentials}, "401": {description: Invalid credentials}, "429": {description: Rate limit}}
+  /v1/auth/me:
+    get:
+      summary: Validate login
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Authenticated}, "401": {description: Invalid or expired JWT}}
   /v1/test/falepaco/call:
     post:
-      description: Test-only outbound call. No inbound calls, arbitrary destinations, SIP credentials, retries, or SIP configuration are exposed.
+      summary: Execute one controlled outbound test
+      description: Outbound-only and test-only. Credentials are server-side. No SIP password is accepted. Only +5567981340687 is allowed.
       security: [{BearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CallRequest'}}}}
-      responses:
-        "200": {description: Sanitized SIP result, content: {application/json: {schema: {$ref: '#/components/schemas/CallResponse'}}}}
-        "400": {description: Destination not allowed}
-        "401": {description: Bearer required}
-        "409": {description: Another test is active}
-        "502": {description: SIP/Asterisk failure}
+      responses: {"200": {description: Sanitized SIP result}, "400": {description: Destination not allowed}, "401": {description: JWT required}, "409": {description: Another test is active}, "502": {description: SIP or Asterisk failure}}

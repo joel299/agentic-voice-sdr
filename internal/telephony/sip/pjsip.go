@@ -39,7 +39,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .HostNetworkAddressOrHost }}
+contact=sip:{{ .HostNetworkAddressOrHost }}\;transport={{ .Transport }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -49,17 +49,20 @@ disallow=all
 allow={{ .CodecsString }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
 aors=trunk-{{ .Name }}-aor
+{{ if eq .Provider "falepaco" }}direct_media=no{{ end }}
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
+{{ if eq .Provider "falepaco" }}send_pai={{ if .SendPAI }}yes{{ else }}no{{ end }}
+send_rpid={{ if .SendRPID }}yes{{ else }}no{{ end }}{{ end }}
 
 {{ if .RegistrationRequired }}[trunk-{{ .Name }}-reg]
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
 server_uri=sip:{{ .RegistrarOrHost }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 retry_interval=60
 {{ end }}
@@ -107,6 +110,17 @@ type pjsipTemplateData struct {
 }
 
 // GeneratePJSIPConfig renders an Asterisk pjsip.conf snippet for the trunk.
+func BuildOutboundURI(cfg TrunkConfig, destination string) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", fmt.Errorf("invalid trunk: %w", err)
+	}
+	destination = strings.TrimSpace(destination)
+	if destination == "" || strings.ContainsAny(destination, "@;") || strings.ContainsAny(destination, "\r\n") {
+		return "", fmt.Errorf("invalid destination number")
+	}
+	return fmt.Sprintf("sip:%s@%s:%d;transport=%s", destination, cfg.Host, cfg.Port, cfg.Transport), nil
+}
+
 func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", fmt.Errorf("cannot generate PJSIP config for invalid trunk: %w", err)
@@ -136,6 +150,9 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regNetwork = regHost
 	}
 	proxyNetwork := cfg.OutboundProxyNetworkAddress
+	if cfg.Provider == "falepaco" {
+		proxyNetwork = ""
+	}
 	if proxyNetwork == "" {
 		proxyNetwork = cfg.OutboundProxy
 	}

@@ -32,6 +32,8 @@ type SIPConfigRequest struct {
 	FromUser             string         `json:"from_user,omitempty"`
 	FromDomain           string         `json:"from_domain,omitempty"`
 	CallerID             string         `json:"caller_id,omitempty"`
+	SendPAI              bool           `json:"send_pai,omitempty"`
+	SendRPID             bool           `json:"send_rpid,omitempty"`
 	Codecs               []string       `json:"codecs,omitempty"`
 	RegistrationRequired bool           `json:"registration_required"`
 	Enabled              bool           `json:"enabled"`
@@ -49,6 +51,8 @@ type SIPSafeResponse struct {
 	FromUser             string      `json:"from_user,omitempty"`
 	FromDomain           string      `json:"from_domain,omitempty"`
 	CallerID             string      `json:"caller_id,omitempty"`
+	SendPAI              bool        `json:"send_pai,omitempty"`
+	SendRPID             bool        `json:"send_rpid,omitempty"`
 	Codecs               []string    `json:"codecs,omitempty"`
 	RegistrationRequired bool        `json:"registration_required"`
 	Enabled              bool        `json:"enabled"`
@@ -146,7 +150,7 @@ func (c SIPConfigRequest) Validate() error {
 	return nil
 }
 func (c SIPConfigRequest) SafeView() SIPSafeResponse {
-	return SIPSafeResponse{Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port, Transport: c.Transport, Registrar: c.Registrar, OutboundProxy: c.OutboundProxy, Auth: SIPSafeAuth{Type: c.Auth.Type, Username: c.Auth.Username, Realm: c.Auth.Realm}, FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired, Enabled: c.Enabled}
+	return SIPSafeResponse{Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port, Transport: c.Transport, Registrar: c.Registrar, OutboundProxy: c.OutboundProxy, Auth: SIPSafeAuth{Type: c.Auth.Type, Username: c.Auth.Username, Realm: c.Auth.Realm}, FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, SendPAI: c.SendPAI, SendRPID: c.SendRPID, Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired, Enabled: c.Enabled}
 }
 
 // ToCanonical performs the explicit HTTP DTO to canonical sip.TrunkConfig mapping.
@@ -160,7 +164,7 @@ func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
 		Registrar: c.Registrar, OutboundProxy: c.OutboundProxy,
 		AuthType:     sip.AuthType(strings.ToLower(strings.TrimSpace(c.Auth.Type))),
 		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: c.Auth.Realm,
-		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID,
+		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, SendPAI: c.SendPAI, SendRPID: c.SendRPID,
 		Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired,
 		Enabled: c.Enabled,
 	}

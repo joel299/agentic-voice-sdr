@@ -1296,3 +1296,55 @@ func TestRemovePJSIPConfigPropagatesBackupCleanupFailure(t *testing.T) {
 		t.Fatalf("backup should remain observable after cleanup failure: %v", err)
 	}
 }
+
+func TestBuildOutboundURIDoesNotUseAuthExtension(t *testing.T) {
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100"}
+	uri, err := sip.BuildOutboundURI(cfg, "67992466329")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uri != "sip:67992466329@96678.falepaco.com.br:5060;transport=tcp" {
+		t.Fatalf("unexpected outbound URI: %s", uri)
+	}
+	if strings.Contains(uri, "@100") {
+		t.Fatal("auth extension was used as destination")
+	}
+}
+
+func TestPJSIPContactCarriesEscapedTCPParameterAndFromDomain(t *testing.T) {
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", FromDomain: "96678.falepaco.com.br"}
+	rendered, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "contact=sip:96678.falepaco.com.br:5060\\;transport=tcp") {
+		t.Fatalf("missing escaped TCP AOR contact: %s", rendered)
+	}
+	if !strings.Contains(rendered, "from_user=100\nfrom_domain=96678.falepaco.com.br") {
+		t.Fatalf("missing explicit From identity: %s", rendered)
+	}
+}
+
+func TestPJSIPFalePacoOutboundProxyIsEscaped(t *testing.T) {
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", FromDomain: "96678.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060"}
+	rendered, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "outbound_proxy=sip:98034.falepaco.com.br:5060\\;transport=tcp\\;lr") {
+		t.Fatalf("missing escaped outbound proxy: %s", rendered)
+	}
+}
+
+func TestPJSIPCallerIdentityPolicyIsRendered(t *testing.T) {
+	cfg := sip.TrunkConfig{Name: "falepaco", Provider: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", FromDomain: "96678.falepaco.com.br", CallerID: "551155200455", SendPAI: true, SendRPID: false}
+	rendered, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"callerid=551155200455", "send_pai=yes", "send_rpid=no"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("missing %q: %s", want, rendered)
+		}
+	}
+}

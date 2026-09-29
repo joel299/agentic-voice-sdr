@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -250,6 +252,21 @@ func parseDigest(wire, password string) (bool, bool, bool, int) {
 	}
 	return true, true, sip.VerifyDigestResponse(username, password, realm, nonce, "INVITE", uri, qop, nc, cnonce, response), status
 }
+func classifyCaptureError(text string) string {
+	t := strings.ToLower(text)
+	switch {
+	case strings.Contains(t, "permission denied"):
+		return "permission_denied"
+	case strings.Contains(t, "truncated") || strings.Contains(t, "unexpected end"):
+		return "truncated_pcap"
+	case strings.Contains(t, "invalid") || strings.Contains(t, "not a pcap"):
+		return "invalid_pcap"
+	case strings.Contains(t, "timed out"):
+		return "context_timeout"
+	default:
+		return "unknown"
+	}
+}
 func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
@@ -295,36 +312,78 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]string{"error": "asterisk_readback_failed"})
 		return
 	}
-	pcap := "/tmp/gru142-sip.pcap"
+	callID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+	pcap := "/tmp/gru142-sip-" + callID + ".pcap"
 	protocol := strings.ToLower(req.Transport)
 	if protocol != "tcp" && protocol != "udp" {
 		jsonOut(w, 400, map[string]string{"error": "transport_not_supported"})
 		return
 	}
 	_ = os.Remove(pcap)
-	tcp := exec.CommandContext(ctx, "tcpdump", "-i", "any", "-s0", "-w", pcap, protocol+" port 5060")
+	tcp := exec.Command("tcpdump", "-U", "-i", "any", "-s0", "-w", pcap, protocol+" port 5060")
 	if e = tcp.Start(); e != nil {
 		jsonOut(w, 502, map[string]string{"error": "sip_capture_setup_failed"})
 		return
 	}
 	if _, e = exec.CommandContext(ctx, "asterisk", "-rx", "channel originate PJSIP/"+allowedDestination+"@trunk-falepaco application Wait 15").CombinedOutput(); e != nil {
-		_ = tcp.Process.Kill()
+		_ = tcp.Process.Signal(os.Interrupt)
+		_ = tcp.Wait()
 		jsonOut(w, 502, map[string]string{"error": "originate_failed"})
 		return
 	}
 	time.Sleep(18 * time.Second)
-	_ = tcp.Process.Kill()
-	_ = tcp.Wait()
+	captureSignalErr := tcp.Process.Signal(os.Interrupt)
+	captureWaitErr := tcp.Wait()
+	captureExitClean := captureSignalErr == nil && captureWaitErr == nil
 	defer os.Remove(pcap)
-	dump, e := exec.CommandContext(ctx, "tcpdump", "-nn", "-A", "-r", pcap).Output()
+	stat, statErr := os.Stat(pcap)
+	pcapExists := statErr == nil
+	var pcapSize int64
+	if pcapExists {
+		pcapSize = stat.Size()
+	}
+	diag := map[string]any{"selected_transport": protocol, "pcap_path": filepath.Base(pcap), "pcap_exists": pcapExists, "pcap_size_bytes": pcapSize, "capture_exit_clean": captureExitClean, "capture_packets_present": false, "originate_command_started": true, "originate_command_accepted": true, "originate_exit_code": 0, "secrets_redacted": true}
+	if !pcapExists || pcapSize <= 24 {
+		diag["error"] = "capture_empty_or_invalid"
+		diag["pcap_decode_probe"] = "not_run"
+		jsonOut(w, 502, diag)
+		return
+	}
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer probeCancel()
+	var probeErrBuf bytes.Buffer
+	probeCmd := exec.CommandContext(probeCtx, "tcpdump", "-nn", "-r", pcap, "-c", "1")
+	probeCmd.Stderr = &probeErrBuf
+	probeErr := probeCmd.Run()
+	if probeErr != nil {
+		diag["error"] = "sip_capture_decode_failed"
+		diag["pcap_decode_probe"] = "FAIL"
+		diag["decode_exit_code"] = 1
+		diag["decode_error_class"] = classifyCaptureError(probeErrBuf.String())
+		jsonOut(w, 502, diag)
+		return
+	}
+	diag["pcap_decode_probe"] = "PASS"
+	diag["capture_packets_present"] = true
+	decodeCtx, decodeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer decodeCancel()
+	var decodeStderr bytes.Buffer
+	decodeCmd := exec.CommandContext(decodeCtx, "tcpdump", "-nn", "-A", "-r", pcap)
+	decodeCmd.Stderr = &decodeStderr
+	dump, e := decodeCmd.Output()
 	observedProtocol := "unknown"
-	if probe, probeErr := exec.CommandContext(ctx, "tcpdump", "-nn", "-r", pcap, protocol+" port 5060").Output(); probeErr == nil && len(probe) > 0 {
+	if packet, packetErr := exec.CommandContext(decodeCtx, "tcpdump", "-nn", "-r", pcap, protocol+" port 5060").Output(); packetErr == nil && len(packet) > 0 {
 		observedProtocol = strings.ToUpper(protocol)
 	}
 	if e != nil {
-		jsonOut(w, 502, map[string]string{"error": "sip_capture_decode_failed"})
+		diag["error"] = "sip_capture_decode_failed"
+		diag["pcap_decode"] = false
+		diag["decode_exit_code"] = 1
+		diag["decode_error_class"] = classifyCaptureError(decodeStderr.String())
+		jsonOut(w, 502, diag)
 		return
 	}
+	diag["pcap_decode"] = true
 	challenge, auth, digestOK, status := parseDigest(string(dump), req.Auth.Secret)
 	if !challenge || !auth || !digestOK {
 		jsonOut(w, 502, map[string]string{"error": "digest_proof_failed"})

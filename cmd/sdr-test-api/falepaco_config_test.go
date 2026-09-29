@@ -14,6 +14,62 @@ import (
 	"time"
 )
 
+func TestFalePacoTCPResolverForcesTCPAndUsesSystemAddress(t *testing.T) {
+	var gotNetwork, gotAddress string
+	resolver := newFalePacoTCPResolver(func(_ context.Context, network, address string) (net.Conn, error) {
+		gotNetwork, gotAddress = network, address
+		return fakeConn{}, nil
+	})
+	conn, err := resolver.Dial(context.Background(), "udp", "23.19.52.52:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if gotNetwork != "tcp" || gotAddress != "23.19.52.52:53" {
+		t.Fatalf("network=%s address=%s", gotNetwork, gotAddress)
+	}
+}
+
+func TestFalePacoTCPResolverLiveSystemDNS(t *testing.T) {
+	if os.Getenv("RUN_FALEPACO_DNS_TCP_INTEGRATION") != "1" {
+		t.Skip("set RUN_FALEPACO_DNS_TCP_INTEGRATION=1 on the VPS to test configured DNS over TCP")
+	}
+	for host, want := range map[string]string{"98034.falepaco.com.br": "177.11.49.36", "96678.falepaco.com.br": "177.11.49.97"} {
+		state, ips, allowed := resolveFalePacoHost(host, 4*time.Second)
+		found := false
+		for _, ip := range ips {
+			if ip == want {
+				found = true
+			}
+		}
+		if state != "resolved" || !allowed || !found {
+			t.Fatalf("host=%s state=%s ips=%v allowed=%v", host, state, ips, allowed)
+		}
+	}
+}
+
+func TestResolveFalePacoHostClassifiesTimeoutNoAnswerAndOutsideAllowlist(t *testing.T) {
+	original := lookupFalePacoIPs
+	defer func() { lookupFalePacoIPs = original }()
+	lookupFalePacoIPs = func(context.Context, string) ([]net.IPAddr, error) { return nil, context.DeadlineExceeded }
+	state, _, ok := resolveFalePacoHost("host", time.Second)
+	if state != "timeout" || ok {
+		t.Fatalf("timeout classified as %s", state)
+	}
+	lookupFalePacoIPs = func(context.Context, string) ([]net.IPAddr, error) { return nil, &net.DNSError{Err: "no such host"} }
+	state, _, ok = resolveFalePacoHost("host", time.Second)
+	if state != "no_answer" || ok {
+		t.Fatalf("no-answer classified as %s", state)
+	}
+	lookupFalePacoIPs = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("192.168.1.1")}}, nil
+	}
+	state, _, ok = resolveFalePacoHost("host", time.Second)
+	if state != "outside_allowlist" || ok {
+		t.Fatalf("unsafe IP classified as %s", state)
+	}
+}
+
 func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
 	stage, class, summary := safeApplyError(errors.New("asterisk reload failed: password=topsecret"), "topsecret")
 	if stage != "reload" || class != "pjsip_configuration_error" || strings.Contains(summary, "topsecret") || !strings.Contains(summary, "[REDACTED]") {

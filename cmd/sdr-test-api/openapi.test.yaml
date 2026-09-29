@@ -66,6 +66,7 @@ components:
         outbound_proxy_dns_state: {type: string}
         outbound_proxy_resolves_to_allowlist: {type: boolean}
         dns_timeout_ms: {type: integer, example: 4000}
+        dns_transport: {type: string, enum: [tcp], example: tcp}
         warnings: {type: array, items: {type: string}}
         blockers: {type: array, items: {type: string}}
     RegistrationTestResponse:

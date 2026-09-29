@@ -38,6 +38,7 @@ type networkPreflightResponse struct {
 	OutboundProxyDNSState              string   `json:"outbound_proxy_dns_state"`
 	OutboundProxyResolvesToAllowlist   bool     `json:"outbound_proxy_resolves_to_allowlist"`
 	DNSTimeoutMS                       int      `json:"dns_timeout_ms"`
+	DNSTransport                       string   `json:"dns_transport"`
 	ProviderIPAllowlistCount           int      `json:"provider_ip_allowlist_count"`
 	ProviderIPsConfigured              bool     `json:"provider_ips_configured"`
 	TCP5060TestedCount                 int      `json:"tcp_5060_tested_count"`
@@ -84,7 +85,9 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	response := networkPreflightResponse{ProviderIPAllowlistCount: len(falePacoProviderIPs), ProviderIPsConfigured: len(falePacoProviderIPs) == 21, Blockers: []string{}, Warnings: []string{}, UDPRemotePortConfirmed: false}
 	response.DNSTimeoutMS = 4000
-	response.ResolverMode, response.SystemResolverState = systemResolverMode()
+	response.DNSTransport = "tcp"
+	response.ResolverMode = "go_tcp"
+	_, response.SystemResolverState = systemResolverMode()
 	response.DNSNameserverCount = configuredNameserverCount("/etc/resolv.conf")
 	if m, err := dotenv(sipEnv); err != nil {
 		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_unavailable", "configuration_unavailable", "configuration_unavailable"
@@ -183,46 +186,15 @@ func configuredNameserverCount(path string) int {
 	return count
 }
 
+func newFalePacoTCPResolver(dial func(context.Context, string, string) (net.Conn, error)) *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dial(ctx, "tcp", address)
+	}}
+}
+
+var falePacoResolver = newFalePacoTCPResolver((&net.Dialer{}).DialContext)
 var lookupFalePacoIPs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	args := []string{"ahostsv4", host}
-	if exec.Command("systemctl", "is-active", "--quiet", "systemd-resolved").Run() == nil {
-		// Direct NSS requests to the resolved stub hang on this VPS while the
-		// systemd-resolved bus API succeeds. Use that same host resolver API.
-		args = []string{"query", "--type=A", host}
-	}
-	binary := "getent"
-	if args[0] == "query" {
-		binary = "resolvectl"
-	}
-	cmd := exec.CommandContext(ctx, binary, args...)
-	output, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
-			return nil, &net.DNSError{Err: "no such host", Name: host}
-		}
-		return nil, err
-	}
-	var addresses []net.IPAddr
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		for _, field := range strings.Fields(scanner.Text()) {
-			ip := net.ParseIP(field)
-			if ip != nil && ip.To4() != nil {
-				addresses = append(addresses, net.IPAddr{IP: ip})
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if len(addresses) == 0 {
-		return nil, &net.DNSError{Err: "no such host", Name: host}
-	}
-	return addresses, nil
+	return falePacoResolver.LookupIPAddr(ctx, host)
 }
 
 func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, bool) {

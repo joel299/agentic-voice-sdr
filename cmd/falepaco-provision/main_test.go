@@ -75,3 +75,21 @@ func TestLoadRuntimeCredentialsRejectsBroadPermissions(t *testing.T) {
 		t.Fatal("runtime env file with broad permissions was accepted")
 	}
 }
+
+func TestProvisionRequestIncludesFalePacoOutboundProxy(t *testing.T) {
+	request := provisionRequest(runtimeCredentials{domain: canonicalDomain, username: "100", extension: "100", password: "secret"})
+	if request.OutboundProxy != canonicalOutboundProxy {
+		t.Fatalf("unexpected outbound proxy: %q", request.OutboundProxy)
+	}
+	canonical, err := request.ToCanonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := sip.GeneratePJSIPConfig(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "outbound_proxy=sip:98034.falepaco.com.br:5060\\;transport=tcp\\;lr") {
+		t.Fatalf("missing outbound proxy: %s", rendered)
+	}
+}

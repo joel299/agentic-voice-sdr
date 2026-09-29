@@ -141,7 +141,41 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 
 var falepacoResolver = &net.Resolver{PreferGo: true}
 var lookupFalePacoIPs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	return falepacoResolver.LookupIPAddr(ctx, host)
+	// Use NSS/getent just like the host's successful system lookups. The Go
+	// DNS client timed out against this host's stub resolver while getent and
+	// systemd-resolved returned the same A records promptly.
+	cmd := exec.CommandContext(ctx, "getent", "ahostsv4", host)
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+			return nil, &net.DNSError{Err: "no such host", Name: host}
+		}
+		return nil, err
+	}
+	var addresses []net.IPAddr
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		ip := net.ParseIP(fields[0])
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		addresses = append(addresses, net.IPAddr{IP: ip})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(addresses) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host}
+	}
+	return addresses, nil
 }
 
 func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, bool) {

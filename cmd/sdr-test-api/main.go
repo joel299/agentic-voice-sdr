@@ -297,6 +297,13 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]string{"error": "sip_config_invalid"})
 		return
 	}
+	if cfg.RegistrationRequired {
+		stateOut, _ := exec.Command("asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+		if !strings.Contains(string(stateOut), "Registered") {
+			jsonOut(w, 409, map[string]any{"error": "provider_not_registered", "registration_status": "Unregistered", "secrets_redacted": true})
+			return
+		}
+	}
 	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))
 	if e != nil {
 		jsonOut(w, 502, map[string]string{"error": "asterisk_manager_unavailable"})
@@ -489,6 +496,16 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/v1/falepaco/config/apply", s.falepacoApply)
+	mux.HandleFunc("/v1/falepaco/registration", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.registrationGet(w, r)
+		} else if r.Method == http.MethodDelete {
+			s.registrationDelete(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("/v1/falepaco/registration/test", s.registrationTest)
 	mux.HandleFunc("/v1/test/falepaco/call", s.call)
 	_ = http.ListenAndServe(":8081", mux)
 }

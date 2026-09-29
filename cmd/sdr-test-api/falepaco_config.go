@@ -18,16 +18,26 @@ import (
 )
 
 type falepacoConfigRequest struct {
-	ProviderAddress      string  `json:"provider_address"`
-	RequestURIHost       string  `json:"request_uri_host"`
-	OutboundProxy        string  `json:"outbound_proxy"`
-	Username             string  `json:"username"`
-	Extension            string  `json:"extension"`
-	Password             *string `json:"password,omitempty"`
-	CallerID             string  `json:"caller_id"`
-	Transport            string  `json:"transport"`
-	Port                 int     `json:"port"`
-	RegistrationRequired bool    `json:"registration_required"`
+	ProviderAddress      string             `json:"provider_address"`
+	RequestURIHost       string             `json:"request_uri_host"`
+	OutboundProxy        string             `json:"outbound_proxy"`
+	Username             string             `json:"username"`
+	Extension            string             `json:"extension"`
+	Password             *string            `json:"password,omitempty"`
+	CallerID             string             `json:"caller_id"`
+	Transport            string             `json:"transport"`
+	Port                 int                `json:"port"`
+	RegistrationRequired bool               `json:"registration_required"`
+	Registration         RegistrationConfig `json:"registration,omitempty"`
+}
+type RegistrationConfig struct {
+	Enabled              bool   `json:"enabled"`
+	ServerURI            string `json:"server_uri"`
+	ClientURI            string `json:"client_uri"`
+	ContactUser          string `json:"contact_user"`
+	Realm                string `json:"realm"`
+	RetryIntervalSeconds int    `json:"retry_interval_seconds"`
+	MaxRetries           int    `json:"max_retries"`
 }
 type falepacoConfigResponse struct {
 	Configured           bool   `json:"configured"`
@@ -76,7 +86,7 @@ func atomicDotenvWrite(m map[string]string) error {
 	if e = f.Chmod(0600); e != nil {
 		return e
 	}
-	for _, k := range []string{"FALEPACO_SIP_DOMAIN", "FALEPACO_SIP_OUTBOUND_HOST", "FALEPACO_SIP_OUTBOUND_PROXY", "FALEPACO_SIP_USERNAME", "FALEPACO_SIP_EXTENSION", "FALEPACO_SIP_PASSWORD", "FALEPACO_SIP_CALLER_ID", "FALEPACO_SIP_TRANSPORT", "FALEPACO_SIP_PORT", "FALEPACO_SIP_REGISTRATION_REQUIRED"} {
+	for _, k := range []string{"FALEPACO_SIP_DOMAIN", "FALEPACO_SIP_OUTBOUND_HOST", "FALEPACO_SIP_OUTBOUND_PROXY", "FALEPACO_SIP_USERNAME", "FALEPACO_SIP_EXTENSION", "FALEPACO_SIP_PASSWORD", "FALEPACO_SIP_CALLER_ID", "FALEPACO_SIP_TRANSPORT", "FALEPACO_SIP_PORT", "FALEPACO_SIP_REGISTRATION_REQUIRED", "FALEPACO_SIP_REGISTRATION_ENABLED", "FALEPACO_SIP_REGISTRATION_SERVER_URI", "FALEPACO_SIP_REGISTRATION_CLIENT_URI", "FALEPACO_SIP_CONTACT_USER", "FALEPACO_SIP_REALM", "FALEPACO_SIP_RETRY_INTERVAL", "FALEPACO_SIP_MAX_RETRIES"} {
 		if _, ok := m[k]; ok {
 			if _, e = fmt.Fprintf(f, "%s=%s\n", k, m[k]); e != nil {
 				return e
@@ -115,8 +125,15 @@ func savedFalepaco(m map[string]string) (httpapi.SIPConfigRequest, error) {
 	if transport == "" {
 		transport = "tcp"
 	}
-	reg := m["FALEPACO_SIP_REGISTRATION_REQUIRED"] == "true"
-	return httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: host, Port: port, Transport: transport, Registrar: host, OutboundProxy: m["FALEPACO_SIP_OUTBOUND_PROXY"], FromDomain: host, FromUser: m["FALEPACO_SIP_EXTENSION"], CallerID: m["FALEPACO_SIP_CALLER_ID"], SendPAI: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: m["FALEPACO_SIP_USERNAME"], Secret: m["FALEPACO_SIP_PASSWORD"]}, RegistrationRequired: reg, Enabled: true}, nil
+	reg := m["FALEPACO_SIP_REGISTRATION_REQUIRED"] == "true" || m["FALEPACO_SIP_REGISTRATION_ENABLED"] == "true"
+	req := httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: host, Port: port, Transport: transport, Registrar: host, OutboundProxy: m["FALEPACO_SIP_OUTBOUND_PROXY"], FromDomain: host, FromUser: m["FALEPACO_SIP_EXTENSION"], CallerID: m["FALEPACO_SIP_CALLER_ID"], SendPAI: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: m["FALEPACO_SIP_USERNAME"], Secret: m["FALEPACO_SIP_PASSWORD"]}, RegistrationRequired: reg, Enabled: true}
+	req.RegistrationServerURI = m["FALEPACO_SIP_REGISTRATION_SERVER_URI"]
+	req.RegistrationClientURI = m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"]
+	req.RegistrationContactUser = m["FALEPACO_SIP_CONTACT_USER"]
+	req.RegistrationRealm = m["FALEPACO_SIP_REALM"]
+	req.RegistrationRetryInterval = 60
+	req.RegistrationMaxRetries = 3
+	return req, nil
 }
 func (s *server) falepacoGet(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
@@ -156,7 +173,7 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m := map[string]string{"FALEPACO_SIP_DOMAIN": in.ProviderAddress, "FALEPACO_SIP_OUTBOUND_HOST": in.RequestURIHost, "FALEPACO_SIP_OUTBOUND_PROXY": in.OutboundProxy, "FALEPACO_SIP_USERNAME": in.Username, "FALEPACO_SIP_EXTENSION": in.Extension, "FALEPACO_SIP_PASSWORD": password, "FALEPACO_SIP_CALLER_ID": in.CallerID, "FALEPACO_SIP_TRANSPORT": in.Transport, "FALEPACO_SIP_PORT": "5060", "FALEPACO_SIP_REGISTRATION_REQUIRED": fmt.Sprint(in.RegistrationRequired)}
+	m := map[string]string{"FALEPACO_SIP_DOMAIN": in.ProviderAddress, "FALEPACO_SIP_OUTBOUND_HOST": in.RequestURIHost, "FALEPACO_SIP_OUTBOUND_PROXY": in.OutboundProxy, "FALEPACO_SIP_USERNAME": in.Username, "FALEPACO_SIP_EXTENSION": in.Extension, "FALEPACO_SIP_PASSWORD": password, "FALEPACO_SIP_CALLER_ID": in.CallerID, "FALEPACO_SIP_TRANSPORT": in.Transport, "FALEPACO_SIP_PORT": "5060", "FALEPACO_SIP_REGISTRATION_REQUIRED": fmt.Sprint(in.RegistrationRequired), "FALEPACO_SIP_REGISTRATION_ENABLED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_SERVER_URI": in.Registration.ServerURI, "FALEPACO_SIP_REGISTRATION_CLIENT_URI": in.Registration.ClientURI, "FALEPACO_SIP_CONTACT_USER": in.Registration.ContactUser, "FALEPACO_SIP_REALM": in.Registration.Realm, "FALEPACO_SIP_RETRY_INTERVAL": fmt.Sprint(in.Registration.RetryIntervalSeconds), "FALEPACO_SIP_MAX_RETRIES": fmt.Sprint(in.Registration.MaxRetries)}
 	if e := atomicDotenvWrite(m); e != nil {
 		jsonOut(w, 500, map[string]string{"error": "credential_write_failed"})
 		return

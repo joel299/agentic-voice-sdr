@@ -61,10 +61,14 @@ send_rpid={{ if .SendRPID }}yes{{ else }}no{{ end }}{{ end }}
 type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
-server_uri=sip:{{ .RegistrarOrHost }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
-client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
-retry_interval=60
+server_uri={{ if .RegistrationServerURI }}{{ .RegistrationServerURI }}{{ else }}sip:{{ .RegistrarOrHost }}{{ end }}
+{{ if .RegistrationClientURI }}client_uri={{ .RegistrationClientURI }}
+{{ else }}client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
+{{ end }}{{ if .RegistrationContactUser }}contact_user={{ .RegistrationContactUser }}
+{{ end }}{{ if .RegistrationRealm }}realm={{ .RegistrationRealm }}
+{{ end }}{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
+retry_interval={{ if .RegistrationRetryInterval }}{{ .RegistrationRetryInterval }}{{ else }}60{{ end }}
+max_retries={{ if .RegistrationMaxRetries }}{{ .RegistrationMaxRetries }}{{ else }}3{{ end }}
 {{ end }}
 ; gru83-pin host={{ .Host }} address={{ .HostNetworkAddress }}
 {{ if .Registrar }}; gru83-pin host={{ .Registrar }} address={{ .RegistrarNetworkAddress }}

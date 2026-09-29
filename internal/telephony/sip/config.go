@@ -68,6 +68,12 @@ type TrunkConfig struct {
 	SendRPID                    bool          `json:"send_rpid,omitempty"`
 	Codecs                      []string      `json:"codecs,omitempty"`
 	RegistrationRequired        bool          `json:"registration_required"`
+	RegistrationServerURI       string        `json:"registration_server_uri,omitempty"`
+	RegistrationClientURI       string        `json:"registration_client_uri,omitempty"`
+	RegistrationContactUser     string        `json:"registration_contact_user,omitempty"`
+	RegistrationRealm           string        `json:"registration_realm,omitempty"`
+	RegistrationRetryInterval   int           `json:"registration_retry_interval,omitempty"`
+	RegistrationMaxRetries      int           `json:"registration_max_retries,omitempty"`
 	Enabled                     bool          `json:"enabled"`
 }
 

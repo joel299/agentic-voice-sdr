@@ -11,6 +11,9 @@ tags:
   - name: Authentication
   - name: Fale Paco Configuration
   - name: Fale Paco Test
+  - name: Fale Paco Registration
+  - name: Fale Paco Registration
+  - name: Fale Paco Registration
 components:
   securitySchemes:
     BearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
@@ -30,6 +33,8 @@ components:
         transport: {type: string, enum: [tcp, udp], example: tcp}
         port: {type: integer, example: 5060}
         registration_required: {type: boolean, example: false}
+        registration: {type: object, properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
+        registration: {type: object, properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
   /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
@@ -67,3 +72,22 @@ paths:
       security: [{BearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+5567981340687"}}}}}}
       responses: {"200": {description: Sanitized SIP result}, "400": {description: Destination not allowed}, "401": {description: Unauthorized}, "409": {description: Another call active}, "502": {description: SIP failure}}
+
+  /v1/falepaco/registration:
+    get:
+      tags: [Fale Paco Registration]
+      summary: Get registration state
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Sanitized registration state}, "401": {description: Unauthorized}}
+    delete:
+      tags: [Fale Paco Registration]
+      summary: Disable registration object
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Registration disabled}, "401": {description: Unauthorized}}
+  /v1/falepaco/registration/test:
+    post:
+      tags: [Fale Paco Registration]
+      summary: Test SIP REGISTER
+      description: Applies the saved registration configuration and validates registration. Does not place a call.
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Registered}, "401": {description: Unauthorized}, "502": {description: Registration rejected or unavailable}}

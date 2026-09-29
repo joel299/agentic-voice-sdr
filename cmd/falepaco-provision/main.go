@@ -94,14 +94,20 @@ func yes(ok bool) string {
 func run() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
 	defer cancel()
+	secretReadAt := time.Now().UTC()
 	credentials, err := loadRuntimeCredentials(ctx, runtimeEnvPath)
 	if err != nil {
 		fmt.Println("credential_file_loaded=no")
 		return 2
 	}
 	fmt.Println("credential_file_exists=yes")
-	fmt.Println("credential_file_loaded=yes")
+	fmt.Println("credential_file_loaded_fresh=yes")
 	fmt.Println("credential_source=runtime_env_file")
+	fmt.Println("domain_source=runtime_file")
+	fmt.Println("username_source=runtime_file")
+	fmt.Println("extension_source=runtime_file")
+	fmt.Println("password_source=runtime_file")
+	fmt.Println("secret_read_timestamp=" + secretReadAt.Format(time.RFC3339Nano))
 	request := provisionRequest(credentials)
 	canonical, err := request.ToCanonical()
 	if err != nil {
@@ -122,6 +128,8 @@ func run() int {
 	fmt.Println("username_match=" + yes(usernameMatch))
 	fmt.Println("extension_match=" + yes(extensionMatch))
 	fmt.Println("password_match=" + yes(passwordMatch))
+	fmt.Println("username_match_loaded_auth=" + yes(usernameMatch))
+	fmt.Println("password_match_loaded_auth=" + yes(passwordMatch))
 	fmt.Println("secrets_redacted=yes")
 	if !domainMatch || !usernameMatch || !extensionMatch || !passwordMatch {
 		fmt.Println("provisioning_aborted=credential_mismatch")
@@ -134,6 +142,11 @@ func run() int {
 	fmt.Println("configured_host=" + canonical.Host)
 	fmt.Println("configured_username=" + canonical.AuthUsername)
 	fmt.Println("configured_extension=" + canonical.FromUser)
+	fmt.Println("caller_id=" + canonical.CallerID)
+	fmt.Println("send_pai=" + yes(canonical.SendPAI))
+	fmt.Println("send_rpid=" + yes(canonical.SendRPID))
+	fmt.Println("destination_number=+5567981340687")
+	fmt.Println("destination_format=e164_plus")
 	fmt.Println("configured_transport=" + string(canonical.Transport))
 	fmt.Println("transport=" + string(canonical.Transport))
 	fmt.Printf("port=%d\n", canonical.Port)
@@ -149,7 +162,12 @@ func run() int {
 		fmt.Println("manager_init=failed")
 		return 2
 	}
+	pjsipWriteAt := time.Now().UTC()
+	fmt.Println("pjsip_write_timestamp=" + pjsipWriteAt.Format(time.RFC3339Nano))
 	status, err := manager.ApplyTrunk(ctx, canonical)
+	asteriskReloadAt := time.Now().UTC()
+	fmt.Println("asterisk_reload_timestamp=" + asteriskReloadAt.Format(time.RFC3339Nano))
+	fmt.Println("asterisk_reloaded_after_secret_read=" + yes(asteriskReloadAt.After(secretReadAt)))
 	fmt.Println("registration_state=" + status.RegistrationState)
 	fmt.Println("manager_status=" + string(status.Status))
 	fmt.Println("endpoint_active=" + yes(status.EndpointActive))

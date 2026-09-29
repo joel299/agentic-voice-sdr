@@ -317,6 +317,10 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	_ = tcp.Wait()
 	defer os.Remove(pcap)
 	dump, e := exec.CommandContext(ctx, "tcpdump", "-nn", "-A", "-r", pcap).Output()
+	observedProtocol := "unknown"
+	if probe, probeErr := exec.CommandContext(ctx, "tcpdump", "-nn", "-r", pcap, protocol+" port 5060").Output(); probeErr == nil && len(probe) > 0 {
+		observedProtocol = strings.ToUpper(protocol)
+	}
 	if e != nil {
 		jsonOut(w, 502, map[string]string{"error": "sip_capture_decode_failed"})
 		return
@@ -333,7 +337,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	if status == 200 {
 		reason = "OK"
 	}
-	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: protocol, RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true, SelectedTransport: protocol, NetworkProtocolObserved: strings.ToUpper(protocol)})
+	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: protocol, RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true, SelectedTransport: protocol, NetworkProtocolObserved: observedProtocol})
 }
 func (s *server) docs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

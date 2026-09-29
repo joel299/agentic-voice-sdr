@@ -143,7 +143,8 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 func (b *cappedBuffer) Mark() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Len()
+	b.Reset()
+	return 0
 }
 
 func (b *cappedBuffer) String() string {
@@ -436,7 +437,18 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if attempt.Status == "LocalError" && attempt.ErrorClass == "wire_capture_start_failed" {
-		jsonOut(w, 503, map[string]any{"error": "wire_capture_unavailable", "registration_capture_implemented": true, "registration_triggered": false, "registration_trigger_error_class": attempt.ErrorClass, "secrets_redacted": true})
+		jsonOut(w, 503, map[string]any{
+			"error": "wire_capture_unavailable", "selected_transport": req.Transport,
+			"registration_object_present": false, "registration_status": "LocalError", "registration_state": "Unknown",
+			"registration_apply_error": false, "registration_capture_implemented": true,
+			"registration_initial_request_present": false, "registration_challenge_received": false,
+			"registration_authenticated_request_sent": false, "registration_triggered": false,
+			"registration_trigger_attempted": false, "registration_trigger_command": "pjsip send register trunk-falepaco-reg",
+			"registration_trigger_exit_code": -1, "registration_trigger_error_class": attempt.ErrorClass,
+			"registration_pre_state": "Unknown", "registration_post_state": "Unknown",
+			"registration_wire_activity_present": false, "registration_error_class": attempt.ErrorClass,
+			"secrets_redacted": true,
+		})
 		return
 	}
 	applyStage, applyClass, applySummary := "", "", ""

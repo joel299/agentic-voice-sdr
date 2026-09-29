@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestCaptureFailurePreventsRegisterTrigger(t *testing.T) {
+	triggerCalls := 0
+	got := runRegistrationAttempt(context.Background(), registrationAttemptSteps{
+		StartCapture: func(context.Context) error { return errors.New("capture unavailable") },
+		Trigger:      func(context.Context) (int, string) { triggerCalls++; return 0, "" },
+	})
+	if triggerCalls != 0 || got.TriggerAttempted || got.Status != "LocalError" || got.ErrorClass != "wire_capture_start_failed" {
+		t.Fatalf("unexpected result: %+v triggerCalls=%d", got, triggerCalls)
+	}
+}
+
 func TestRegistrationAttemptRunsCaptureApplyReadbackBeforeTrigger(t *testing.T) {
 	var order []string
 	triggerCalls := 0
@@ -64,6 +75,28 @@ func TestPreexistingRejectedDoesNotEndRegistrationPoll(t *testing.T) {
 	}
 	if !shouldStopRegistrationPoll("Rejected", "Registered") {
 		t.Fatal("Registered state did not end poll")
+	}
+}
+
+func TestRegistrationAttemptNoWireActivityIsLocalDespitePreexistingRejected(t *testing.T) {
+	steps := registrationAttemptSteps{
+		StartCapture: func(context.Context) error { return nil },
+		Apply:        func(context.Context) error { return nil },
+		Readback:     func(context.Context) (bool, string, error) { return true, "Rejected", nil },
+		MarkWire:     func() int { return 0 },
+		Trigger:      func(context.Context) (int, string) { return 0, "" },
+		Wait: func(_ context.Context, pre string, triggered bool) string {
+			if pre != "Rejected" || !triggered {
+				t.Fatalf("pre=%s triggered=%t", pre, triggered)
+			}
+			return "Rejected"
+		},
+		StopCapture: func() {},
+		ReadWire:    func(int) sipWireEvidence { return sipWireEvidence{} },
+	}
+	got := runRegistrationAttempt(context.Background(), steps)
+	if got.Status != "NoWireActivity" || got.ErrorClass != "registration_trigger_no_wire" {
+		t.Fatalf("got %+v", got)
 	}
 }
 

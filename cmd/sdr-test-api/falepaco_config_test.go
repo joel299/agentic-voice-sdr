@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
@@ -19,6 +22,51 @@ func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
 func TestProviderAllowlistContainsOfficialCount(t *testing.T) {
 	if len(falePacoProviderIPs) != 21 {
 		t.Fatalf("provider allowlist count=%d", len(falePacoProviderIPs))
+	}
+}
+
+type fakeConn struct{}
+
+func (fakeConn) Read([]byte) (int, error)         { return 0, nil }
+func (fakeConn) Write([]byte) (int, error)        { return 0, nil }
+func (fakeConn) Close() error                     { return nil }
+func (fakeConn) LocalAddr() net.Addr              { return nil }
+func (fakeConn) RemoteAddr() net.Addr             { return nil }
+func (fakeConn) SetDeadline(time.Time) error      { return nil }
+func (fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestProbeTCPAddressesTestsAllIPsAndCountsOnlyReachable(t *testing.T) {
+	tested, reachable := probeTCPAddresses(5060, func(ctx context.Context, network, address string) (net.Conn, error) {
+		if strings.HasSuffix(address, ":5060") && strings.Contains(address, "177.11.49.223") {
+			return fakeConn{}, nil
+		}
+		return nil, errors.New("unreachable")
+	})
+	if tested != len(falePacoProviderIPs) || reachable != 1 {
+		t.Fatalf("tested=%d reachable=%d", tested, reachable)
+	}
+}
+
+func TestIPTablesEgressStateDetectsPolicyAndRuleBlocks(t *testing.T) {
+	if got := iptablesEgressState("-P OUTPUT ACCEPT\n-A OUTPUT -d 177.11.49.223/32 -p tcp --dport 5060 -j DROP\n"); got != "blocked" {
+		t.Fatalf("state=%q", got)
+	}
+	if got := iptablesEgressState("-P OUTPUT DROP\n"); got != "blocked" {
+		t.Fatalf("state=%q", got)
+	}
+	if got := iptablesEgressState("-P OUTPUT ACCEPT\n"); got != "ready" {
+		t.Fatalf("state=%q", got)
+	}
+	if got := iptablesEgressState("-P OUTPUT ACCEPT\n-A OUTPUT -j CUSTOM\n"); got != "unknown" {
+		t.Fatalf("state=%q", got)
+	}
+}
+
+func TestCloudFirewallIsWarningNotBlocker(t *testing.T) {
+	response := networkPreflightResponse{CloudFirewallState: "unknown", Warnings: []string{"cloud_firewall_unverified"}, Blockers: []string{}}
+	if response.CloudFirewallState != "unknown" || len(response.Warnings) != 1 || len(response.Blockers) != 0 {
+		t.Fatalf("response=%+v", response)
 	}
 }
 func TestRTPRangeRequiresExactGeneralValues(t *testing.T) {

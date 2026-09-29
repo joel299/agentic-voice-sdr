@@ -1310,3 +1310,17 @@ func TestBuildOutboundURIDoesNotUseAuthExtension(t *testing.T) {
 		t.Fatal("auth extension was used as destination")
 	}
 }
+
+func TestPJSIPContactCarriesEscapedTCPParameterAndFromDomain(t *testing.T) {
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", FromDomain: "96678.falepaco.com.br"}
+	rendered, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "contact=sip:96678.falepaco.com.br:5060\\;transport=tcp") {
+		t.Fatalf("missing escaped TCP AOR contact: %s", rendered)
+	}
+	if !strings.Contains(rendered, "from_user=100\nfrom_domain=96678.falepaco.com.br") {
+		t.Fatalf("missing explicit From identity: %s", rendered)
+	}
+}

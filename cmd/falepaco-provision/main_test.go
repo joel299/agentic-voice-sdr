@@ -17,7 +17,7 @@ func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical.Provider != "falepaco" || canonical.Host != canonicalOutboundHost || canonical.Registrar != canonicalOutboundHost || canonical.Transport != sip.TransportTCP || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.Secret != credentials.password || canonical.RegistrationRequired {
+	if canonical.Provider != "falepaco" || canonical.Host != canonicalOutboundHost || canonical.Registrar != canonicalOutboundHost || canonical.Transport != sip.TransportTCP || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.FromDomain != canonicalOutboundHost || canonical.Secret != credentials.password || canonical.RegistrationRequired {
 		t.Fatalf("runtime credential fields were not mapped into canonical trunk configuration")
 	}
 	generated, err := sip.GeneratePJSIPConfig(canonical)
@@ -30,10 +30,10 @@ func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
 	if canonical.HostNetworkAddress != "" || canonical.RegistrarNetworkAddress != "" || canonical.OutboundProxyNetworkAddress != "" {
 		t.Fatal("resolved IP was supplied as persistent SIP destination")
 	}
-	if !strings.Contains(generated, "contact=sip:"+canonicalOutboundHost+":5060") || !strings.Contains(generated, "outbound_auth=trunk-falepaco-auth") || !strings.Contains(generated, "transport=transport-tcp") {
+	if !strings.Contains(generated, "contact=sip:"+canonicalOutboundHost+":5060\\;transport=tcp") || !strings.Contains(generated, "outbound_auth=trunk-falepaco-auth") || !strings.Contains(generated, "transport=transport-tcp") {
 		t.Fatal("direct TCP trunk lost canonical destination, digest auth, or TCP transport")
 	}
-	if strings.Contains(generated, "transport=transport-udp") {
+	if strings.Contains(generated, "transport=transport-udp") || !strings.Contains(generated, "direct_media=no") {
 		t.Fatal("Fale Paco provisioning fell back to UDP")
 	}
 	if strings.Contains(generated, "[trunk-falepaco-reg]") {

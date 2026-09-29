@@ -39,7 +39,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .HostNetworkAddressOrHost }}
+contact=sip:{{ .HostNetworkAddressOrHost }}\;transport={{ .Transport }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -49,6 +49,7 @@ disallow=all
 allow={{ .CodecsString }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
 aors=trunk-{{ .Name }}-aor
+{{ if eq .Provider "falepaco" }}direct_media=no{{ end }}
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
 {{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}

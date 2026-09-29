@@ -57,9 +57,10 @@ func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
 	}
 	return httpapi.SIPConfigRequest{
 		Provider: "falepaco", Name: "falepaco", Host: outboundHost, Port: 5060, Transport: canonicalTransport,
-		Registrar: outboundHost,
-		Auth:      httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
-		FromUser:  c.extension, RegistrationRequired: false, Enabled: true,
+		Registrar:  outboundHost,
+		FromDomain: outboundHost,
+		Auth:       httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
+		FromUser:   c.extension, RegistrationRequired: false, Enabled: true,
 	}
 }
 
@@ -134,7 +135,9 @@ func run() int {
 	fmt.Println("configured_transport=" + string(canonical.Transport))
 	fmt.Println("transport=" + string(canonical.Transport))
 	fmt.Printf("port=%d\n", canonical.Port)
-	fmt.Println("aor_contact=sip:" + canonical.Host + ":5060")
+	fmt.Println("aor_contact=sip:" + canonical.Host + ":5060;transport=" + string(canonical.Transport))
+	fmt.Println("from_user=" + canonical.FromUser)
+	fmt.Println("from_domain=" + canonical.FromDomain)
 	fmt.Println("registration_required=" + strconv.FormatBool(canonical.RegistrationRequired))
 	fmt.Println("pjsip_auth_present=" + yes(strings.Contains(generated, "[trunk-falepaco-auth]")))
 	fmt.Println("pjsip_registration_present=" + yes(strings.Contains(generated, "[trunk-falepaco-reg]")))

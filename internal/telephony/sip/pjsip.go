@@ -65,7 +65,6 @@ server_uri={{ if .RegistrationServerURI }}{{ .RegistrationServerURI }}{{ else }}
 {{ if .RegistrationClientURI }}client_uri={{ .RegistrationClientURI }}
 {{ else }}client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 {{ end }}{{ if .RegistrationContactUser }}contact_user={{ .RegistrationContactUser }}
-{{ end }}{{ if .RegistrationRealm }}realm={{ .RegistrationRealm }}
 {{ end }}{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 retry_interval={{ if .RegistrationRetryInterval }}{{ .RegistrationRetryInterval }}{{ else }}60{{ end }}
 max_retries={{ if .RegistrationMaxRetries }}{{ .RegistrationMaxRetries }}{{ else }}3{{ end }}
@@ -161,6 +160,9 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		proxyNetwork = cfg.OutboundProxy
 	}
 
+	if cfg.Realm == "" {
+		cfg.Realm = cfg.RegistrationRealm
+	}
 	data := pjsipTemplateData{
 		TrunkConfig:                        cfg,
 		CodecsString:                       codecsStr,

@@ -455,6 +455,23 @@ func TestRegistrationFailures(t *testing.T) {
 	})
 }
 
+func TestDeferredRegistrationCheckCommitsConfigWithoutImmediateRollback(t *testing.T) {
+	dialer := &mockDialer{}
+	reloader := &MockAsteriskReloader{Healthy: true, EndpointActive: true, RegistrationState: "Unregistered"}
+	mgr, err := sip.NewManager(dialer, reloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := sip.TrunkConfig{Name: "deferred", Host: "sip.example.invalid", AuthType: sip.AuthUserPass, AuthUsername: "user", Secret: "pass", RegistrationRequired: true, DeferRegistrationCheck: true, Enabled: true}
+	status, err := mgr.ApplyTrunk(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("deferred apply failed: %v", err)
+	}
+	if status.RegistrationState != "Pending" || !status.EndpointActive || reloader.RollbackCalled || !reloader.CommitCalled {
+		t.Fatalf("registration must remain pending without rolling back applied config: status=%#v rollback=%v commit=%v", status, reloader.RollbackCalled, reloader.CommitCalled)
+	}
+}
+
 func TestAsteriskHealthAndEndpointChecks(t *testing.T) {
 	t.Run("unhealthy asterisk triggers rollback and error", func(t *testing.T) {
 		dialer := &mockDialer{}

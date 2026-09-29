@@ -11,9 +11,17 @@ func TestRegistrationRenderIncludesExplicitRuntimeFields(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	for _, want := range []string{"[trunk-falepaco-reg]", "transport=transport-tcp", "server_uri=sip:96678.falepaco.com.br:5060", "client_uri=sip:100@96678.falepaco.com.br:5060", "contact_user=100", "realm=96678.falepaco.com.br", "retry_interval=60", "max_retries=3"} {
+	for _, want := range []string{"[trunk-falepaco-reg]", "transport=transport-tcp", "server_uri=sip:96678.falepaco.com.br:5060", "client_uri=sip:100@96678.falepaco.com.br:5060", "contact_user=100", "retry_interval=60", "max_retries=3"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q", want)
 		}
+	}
+	authObject := out[strings.Index(out, "[trunk-falepaco-auth]"):strings.Index(out, "[trunk-falepaco-aor]")]
+	registrationObject := out[strings.Index(out, "[trunk-falepaco-reg]"):]
+	if !strings.Contains(authObject, "realm=96678.falepaco.com.br") {
+		t.Fatal("realm must be emitted on auth object")
+	}
+	if strings.Contains(registrationObject, "realm=") {
+		t.Fatal("realm must not be emitted on registration object")
 	}
 }

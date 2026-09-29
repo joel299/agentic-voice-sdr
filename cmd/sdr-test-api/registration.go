@@ -71,6 +71,7 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "configuration_invalid"})
 		return
 	}
+	cfg.DeferRegistrationCheck = true
 	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))
 	if e != nil {
 		jsonOut(w, 502, map[string]string{"error": "asterisk_manager_unavailable"})
@@ -78,19 +79,45 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	report, applyErr := mgr.ApplyTrunk(ctx, cfg)
-	state := "Unregistered"
-	out, _ := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
-	if strings.Contains(string(out), "Registered") {
-		state = "Registered"
-	} else if strings.Contains(string(out), "Rejected") {
-		state = "Rejected"
+	_, applyErr := mgr.ApplyTrunk(ctx, cfg)
+	applyStage, applyClass, applySummary := "", "", ""
+	if applyErr != nil {
+		applyStage, applyClass, applySummary = safeApplyError(applyErr, m["FALEPACO_SIP_PASSWORD"])
 	}
+	state, output := waitRegistration(ctx)
+	initialRequestPresent := strings.Contains(output, "Request Sent") || state == "Registered" || state == "Rejected"
 	status := 200
 	if applyErr != nil || state != "Registered" {
 		status = 502
 	}
-	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "registration_object_present": true, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": report.RegistrationState, "registration_apply_error": applyErr != nil, "registration_final_response": nil, "registration_challenge_received": nil, "registration_authenticated_request_sent": nil, "registration_digest_matches_runtime_secret": nil, "registration_wire_capture": "not_implemented", "secrets_redacted": true})
+	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "registration_object_present": strings.Contains(output, "trunk-falepaco-reg"), "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": state, "registration_apply_error": applyErr != nil, "apply_stage": applyStage, "apply_error_class": applyClass, "apply_error_summary": applySummary, "registration_initial_request_present": initialRequestPresent, "registration_first_response": nil, "registration_challenge_received": nil, "registration_authenticated_request_sent": nil, "registration_digest_matches_runtime_secret": nil, "registration_final_response": nil, "secrets_redacted": true})
+}
+
+func waitRegistration(ctx context.Context) (string, string) {
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(750 * time.Millisecond)
+	defer poll.Stop()
+	state, output := "Unregistered", ""
+	for {
+		cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		out, _ := exec.CommandContext(cmdCtx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+		cancel()
+		output = string(out)
+		switch {
+		case strings.Contains(output, "Rejected") || strings.Contains(output, "REJECTED"):
+			return "Rejected", output
+		case strings.Contains(output, "Registered") || strings.Contains(output, "REGISTERED"):
+			return "Registered", output
+		}
+		select {
+		case <-ctx.Done():
+			return state, output
+		case <-deadline.C:
+			return state, output
+		case <-poll.C:
+		}
+	}
 }
 func (s *server) registrationDelete(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {

@@ -170,15 +170,22 @@ func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
 	if err := c.Validate(); err != nil {
 		return sip.TrunkConfig{}, err
 	}
+	authRealm := c.Auth.Realm
+	if authRealm == "" {
+		authRealm = c.RegistrationRealm
+	}
 	canonical := sip.TrunkConfig{
 		Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port,
 		Transport: sip.TransportType(strings.ToLower(strings.TrimSpace(c.Transport))),
 		Registrar: c.Registrar, OutboundProxy: c.OutboundProxy,
 		AuthType:     sip.AuthType(strings.ToLower(strings.TrimSpace(c.Auth.Type))),
-		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: c.Auth.Realm,
+		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: authRealm,
 		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, SendPAI: c.SendPAI, SendRPID: c.SendRPID,
 		Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired,
-		Enabled: c.Enabled,
+		RegistrationServerURI: c.RegistrationServerURI, RegistrationClientURI: c.RegistrationClientURI,
+		RegistrationContactUser: c.RegistrationContactUser, RegistrationRetryInterval: c.RegistrationRetryInterval,
+		RegistrationMaxRetries: c.RegistrationMaxRetries,
+		Enabled:                c.Enabled,
 	}
 	if err := canonical.Validate(); err != nil {
 		return sip.TrunkConfig{}, err

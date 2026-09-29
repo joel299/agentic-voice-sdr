@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -200,28 +201,83 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "configuration_invalid"})
 		return
 	}
+	cfg.DeferRegistrationCheck = true
 	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))
 	if e != nil {
-		jsonOut(w, 502, map[string]string{"error": "asterisk_manager_unavailable"})
+		jsonOut(w, 502, map[string]any{"error": "asterisk_manager_unavailable", "apply_stage": "stage", "apply_error_class": "asterisk_manager_unavailable", "apply_error_summary": "Asterisk manager could not be initialized", "secrets_redacted": true})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	report, e := mgr.ApplyTrunk(ctx, cfg)
 	if e != nil {
-		jsonOut(w, 502, map[string]string{"error": "sip_apply_failed"})
+		stage, class, summary := safeApplyError(e, m["FALEPACO_SIP_PASSWORD"])
+		jsonOut(w, 502, map[string]any{"error": "sip_apply_failed", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
 		return
 	}
 	out, _ := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show endpoint trunk-falepaco").CombinedOutput()
 	if !strings.Contains(string(out), "trunk-falepaco") {
-		jsonOut(w, 502, map[string]string{"error": "asterisk_readback_failed"})
+		jsonOut(w, 502, map[string]any{"error": "asterisk_readback_failed", "apply_stage": "endpoint", "apply_error_class": "pjsip_endpoint_readback_failed", "apply_error_summary": "trunk endpoint missing from Asterisk readback", "secrets_redacted": true})
 		return
 	}
 	transportName := "transport-" + req.Transport
 	transportOut, transportErr := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show transport "+transportName).CombinedOutput()
 	if transportErr != nil || !strings.Contains(string(transportOut), transportName) {
-		jsonOut(w, 502, map[string]string{"error": "asterisk_transport_readback_failed"})
+		jsonOut(w, 502, map[string]any{"error": "asterisk_transport_readback_failed", "apply_stage": "transport", "apply_error_class": "pjsip_transport_readback_failed", "apply_error_summary": "configured Asterisk transport missing from readback", "secrets_redacted": true})
 		return
 	}
-	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "outbound_auth_reference": "trunk-falepaco-auth", "auth_username": req.Auth.Username, "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
+	registrationPresent := false
+	if req.RegistrationRequired {
+		registrationOut, registrationErr := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+		registrationPresent = registrationErr == nil && strings.Contains(string(registrationOut), "trunk-falepaco-reg") && !strings.Contains(string(registrationOut), "Unable to find object")
+		if !registrationPresent {
+			jsonOut(w, 502, map[string]any{"error": "asterisk_registration_readback_failed", "apply_stage": "health", "apply_error_class": "pjsip_registration_missing", "apply_error_summary": "registration object missing after reload", "secrets_redacted": true})
+			return
+		}
+	}
+	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "outbound_auth_reference": "trunk-falepaco-auth", "auth_username": req.Auth.Username, "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "registration_object_present": registrationPresent, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
+}
+
+var applyCredentialPattern = regexp.MustCompile(`(?i)(password|secret|authorization|proxy-authorization|digest response|nonce|cnonce|opaque)(\s*[=:]\s*)[^,;\s]+`)
+
+func safeApplyError(err error, secret string) (stage, class, summary string) {
+	if err == nil {
+		return "", "", ""
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "invalid trunk configuration") || strings.Contains(message, "invalid SIP"):
+		stage, class = "validation", "invalid_configuration"
+	case strings.Contains(message, "DNS failure"):
+		stage, class = "dns", "provider_dns_error"
+	case strings.Contains(message, "Connection failed") || strings.Contains(message, "connection failure") || strings.Contains(message, "TLS connection"):
+		stage, class = "reachability", "provider_unreachable"
+	case strings.Contains(message, "PJSIP generation"):
+		stage, class = "render", "pjsip_render_error"
+	case strings.Contains(message, "stage") || strings.Contains(message, "Staging"):
+		stage, class = "stage", "pjsip_stage_error"
+	case strings.Contains(message, "reload") || strings.Contains(message, "Reload"):
+		stage, class = "reload", "pjsip_configuration_error"
+	case strings.Contains(message, "health check"):
+		stage, class = "health", "asterisk_health_error"
+	case strings.Contains(message, "transport"):
+		stage, class = "transport", "pjsip_transport_error"
+	case strings.Contains(message, "endpoint"):
+		stage, class = "endpoint", "pjsip_endpoint_error"
+	case strings.Contains(message, "registration"):
+		stage, class = "registration_wait", "registration_not_ready"
+	case strings.Contains(message, "commit"):
+		stage, class = "commit", "pjsip_commit_error"
+	default:
+		stage, class = "apply", "sip_apply_error"
+	}
+	if secret != "" {
+		message = strings.ReplaceAll(message, secret, "[REDACTED]")
+	}
+	message = applyCredentialPattern.ReplaceAllString(message, "$1$2[REDACTED]")
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 240 {
+		message = message[:240]
+	}
+	return stage, class, message
 }

@@ -74,6 +74,7 @@ type TrunkConfig struct {
 	RegistrationRealm           string        `json:"registration_realm,omitempty"`
 	RegistrationRetryInterval   int           `json:"registration_retry_interval,omitempty"`
 	RegistrationMaxRetries      int           `json:"registration_max_retries,omitempty"`
+	DeferRegistrationCheck      bool          `json:"-"`
 	Enabled                     bool          `json:"enabled"`
 }
 

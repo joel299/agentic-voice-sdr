@@ -496,6 +496,7 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/v1/falepaco/config/apply", s.falepacoApply)
+	mux.HandleFunc("/v1/falepaco/network/preflight", s.networkPreflight)
 	mux.HandleFunc("/v1/falepaco/registration", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.registrationGet(w, r)

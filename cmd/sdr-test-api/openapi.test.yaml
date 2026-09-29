@@ -54,6 +54,12 @@ paths:
       security: [{BearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigRequest'}}}}
       responses: {"200": {description: Saved sanitized configuration}, "400": {description: Invalid configuration}, "401": {description: Unauthorized}}
+  /v1/falepaco/network/preflight:
+    get:
+      tags: [Fale Paco Configuration]
+      summary: Sanitized network and RTP preflight
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Sanitized route/firewall/listener checks}, "401": {description: Unauthorized}}
   /v1/falepaco/config/apply:
     post:
       tags: [Fale Paco Configuration]

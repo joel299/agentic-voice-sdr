@@ -49,7 +49,7 @@ components:
     NetworkPreflightResponse:
       type: object
       properties:
-        resolver_mode: {type: string}
+        resolver_mode: {type: string, enum: [go_tcp], example: go_tcp}
         system_resolver_state: {type: string}
         dns_nameserver_count: {type: integer}
         dns_egress_state: {type: string}

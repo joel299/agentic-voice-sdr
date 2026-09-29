@@ -144,6 +144,18 @@ func run() int {
 	fmt.Println("manager_status=" + string(status.Status))
 	fmt.Println("endpoint_active=" + yes(status.EndpointActive))
 	if err != nil {
+		class := "runtime_error"
+		text := strings.ToLower(err.Error())
+		if strings.Contains(text, "transport") {
+			class = "transport_readback"
+		}
+		if strings.Contains(text, "endpoint") {
+			class = "endpoint_readback"
+		}
+		if strings.Contains(text, "asterisk") {
+			class = "asterisk_readback"
+		}
+		fmt.Println("manager_error_class=" + class)
 		fmt.Println("manager_apply=failed")
 		return 1
 	}

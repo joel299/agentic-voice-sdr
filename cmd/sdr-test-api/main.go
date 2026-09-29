@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -264,18 +263,16 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer callMu.Unlock()
-	c, e := dotenv(sipEnv)
+	m, e := dotenv(sipEnv)
 	if e != nil {
 		jsonOut(w, 502, map[string]string{"error": "credential_source_unavailable"})
 		return
 	}
-	for _, k := range []string{"FALEPACO_SIP_DOMAIN", "FALEPACO_SIP_USERNAME", "FALEPACO_SIP_EXTENSION", "FALEPACO_SIP_PASSWORD"} {
-		if c[k] == "" {
-			jsonOut(w, 502, map[string]string{"error": "credential_source_incomplete"})
-			return
-		}
+	req, e := savedFalepaco(m)
+	if e != nil {
+		jsonOut(w, 502, map[string]string{"error": "configuration_invalid"})
+		return
 	}
-	req := httpapi.SIPConfigRequest{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: "tcp", Registrar: "96678.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", FromDomain: "96678.falepaco.com.br", FromUser: c["FALEPACO_SIP_EXTENSION"], CallerID: "551155200455", SendPAI: true, SendRPID: false, RegistrationRequired: false, Enabled: true, Auth: httpapi.SIPAuthRequest{Type: "userpass", Username: c["FALEPACO_SIP_USERNAME"], Secret: c["FALEPACO_SIP_PASSWORD"]}}
 	cfg, e := req.ToCanonical()
 	if e != nil {
 		jsonOut(w, 502, map[string]string{"error": "sip_config_invalid"})
@@ -317,7 +314,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]string{"error": "sip_capture_decode_failed"})
 		return
 	}
-	challenge, auth, digestOK, status := parseDigest(string(dump), c["FALEPACO_SIP_PASSWORD"])
+	challenge, auth, digestOK, status := parseDigest(string(dump), req.Auth.Secret)
 	if !challenge || !auth || !digestOK {
 		jsonOut(w, 502, map[string]string{"error": "digest_proof_failed"})
 		return
@@ -329,7 +326,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	if status == 200 {
 		reason = "OK"
 	}
-	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: c["FALEPACO_SIP_USERNAME"], Transport: "tcp", RequestURI: "sip:" + allowedDestination + "@96678.falepaco.com.br:5060;transport=tcp", OutboundProxyHost: "98034.falepaco.com.br", DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true})
+	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: "tcp", RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true})
 }
 func (s *server) docs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -412,6 +409,16 @@ func main() {
 	mux.HandleFunc("/scalar.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, "/app/scalar.css") })
 	mux.HandleFunc("/v1/auth/login", s.login)
 	mux.HandleFunc("/v1/auth/me", s.me)
+	mux.HandleFunc("/v1/falepaco/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.falepacoGet(w, r)
+		} else if r.Method == http.MethodPut {
+			s.falepacoPut(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("/v1/falepaco/config/apply", s.falepacoApply)
 	mux.HandleFunc("/v1/test/falepaco/call", s.call)
 	_ = http.ListenAndServe(":8081", mux)
 }

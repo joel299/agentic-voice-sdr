@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestCaptureFailurePreventsRegisterTrigger(t *testing.T) {
@@ -28,7 +29,7 @@ func TestRegistrationAttemptRunsCaptureApplyReadbackBeforeTrigger(t *testing.T) 
 			order = append(order, "readback")
 			return true, "Rejected", nil
 		},
-		MarkWire: func() int { order = append(order, "wire_mark"); return 4 },
+		MarkWire: func() time.Time { order = append(order, "wire_mark"); return time.Unix(1, 0) },
 		Trigger:  func(context.Context) (int, string) { order = append(order, "trigger"); triggerCalls++; return 0, "" },
 		Wait: func(_ context.Context, pre string, triggered bool) string {
 			order = append(order, "wait")
@@ -37,11 +38,11 @@ func TestRegistrationAttemptRunsCaptureApplyReadbackBeforeTrigger(t *testing.T) 
 			}
 			return "Rejected"
 		},
-		StopCapture: func() { order = append(order, "capture_stop") },
-		ReadWire: func(mark int) sipWireEvidence {
+		StopCapture: func() (time.Time, error) { order = append(order, "capture_stop"); return time.Unix(2, 0), nil },
+		ReadWire: func(mark time.Time) sipWireEvidence {
 			order = append(order, "wire_read")
-			if mark != 4 {
-				t.Fatalf("wire mark=%d", mark)
+			if !mark.Equal(time.Unix(1, 0)) {
+				t.Fatalf("wire mark=%v", mark)
 			}
 			return sipWireEvidence{Initial: true, FinalResponse: "403", FinalReason: "Forbidden"}
 		},
@@ -53,16 +54,6 @@ func TestRegistrationAttemptRunsCaptureApplyReadbackBeforeTrigger(t *testing.T) 
 	}
 	if triggerCalls != 1 || !got.Triggered || got.PreState != "Rejected" || got.Status != "Rejected" || !got.WireActivity {
 		t.Fatalf("unexpected result: %+v triggerCalls=%d", got, triggerCalls)
-	}
-}
-
-func TestCappedBufferReadAfterMarkExcludesEarlierPackets(t *testing.T) {
-	buffer := &cappedBuffer{}
-	_, _ = buffer.Write([]byte("old REGISTER"))
-	mark := buffer.Mark()
-	_, _ = buffer.Write([]byte("new REGISTER"))
-	if got := buffer.StringFrom(mark); got != "new REGISTER" {
-		t.Fatalf("wire slice=%q", got)
 	}
 }
 
@@ -83,7 +74,7 @@ func TestRegistrationAttemptNoWireActivityIsLocalDespitePreexistingRejected(t *t
 		StartCapture: func(context.Context) error { return nil },
 		Apply:        func(context.Context) error { return nil },
 		Readback:     func(context.Context) (bool, string, error) { return true, "Rejected", nil },
-		MarkWire:     func() int { return 0 },
+		MarkWire:     func() time.Time { return time.Now() },
 		Trigger:      func(context.Context) (int, string) { return 0, "" },
 		Wait: func(_ context.Context, pre string, triggered bool) string {
 			if pre != "Rejected" || !triggered {
@@ -91,8 +82,8 @@ func TestRegistrationAttemptNoWireActivityIsLocalDespitePreexistingRejected(t *t
 			}
 			return "Rejected"
 		},
-		StopCapture: func() {},
-		ReadWire:    func(int) sipWireEvidence { return sipWireEvidence{} },
+		StopCapture: func() (time.Time, error) { return time.Now(), nil },
+		ReadWire:    func(time.Time) sipWireEvidence { return sipWireEvidence{} },
 	}
 	got := runRegistrationAttempt(context.Background(), steps)
 	if got.Status != "NoWireActivity" || got.ErrorClass != "registration_trigger_no_wire" {
@@ -168,33 +159,5 @@ func TestCallRequiresCurrentRegisteredState(t *testing.T) {
 	}
 	if !callRegistrationReady(registrationStateFromOutput("Status: Registered")) {
 		t.Fatal("call gate rejected Registered")
-	}
-}
-
-func TestParseSIPWireCaptureExtractsSanitizedDigestEvidence(t *testing.T) {
-	capture := `REGISTER sip:host SIP/2.0
-SIP/2.0 401 Unauthorized
-WWW-Authenticate: Digest realm="testrealm@host.com", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", qop="auth", algorithm=MD5
-REGISTER sip:host SIP/2.0
-Authorization: Digest username="Mufasa", realm="testrealm@host.com", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", uri="/dir/index.html", qop=auth, nc=00000001, cnonce="0a4f113b", response="59d17b90f0e821045ecceb843e5b38c4"
-SIP/2.0 200 OK
-Server: provider-test
-`
-	evidence := parseSIPWireCapture(capture, "Mufasa", "Circle Of Life")
-	if !evidence.Initial || evidence.FirstResponse != "401" || !evidence.Challenge || evidence.ChallengeType != "401" || evidence.Realm != "testrealm@host.com" {
-		t.Fatalf("challenge evidence incomplete: %+v", evidence)
-	}
-	if !evidence.Authenticated || evidence.AuthUsername != "Mufasa" || evidence.AuthRealm != "testrealm@host.com" || evidence.AuthURI != "/dir/index.html" || evidence.DigestMatches == nil || !*evidence.DigestMatches {
-		t.Fatalf("digest evidence incorrect: %+v", evidence)
-	}
-	if evidence.FinalResponse != "200" || evidence.FinalReason != "OK" || evidence.Server != "provider-test" {
-		t.Fatalf("final response evidence incomplete: %+v", evidence)
-	}
-}
-
-func TestParseSIPWireCaptureDoesNotClaimUnseenTraffic(t *testing.T) {
-	evidence := parseSIPWireCapture("tcpdump: listening on any", "100", "secret")
-	if evidence.Initial || evidence.Challenge || evidence.Authenticated || evidence.FinalResponse != "" {
-		t.Fatalf("capture without SIP packets must not imply REGISTER evidence: %+v", evidence)
 	}
 }

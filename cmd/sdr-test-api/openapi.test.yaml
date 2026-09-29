@@ -3,7 +3,7 @@ info:
   title: SDR Fale Paco Test API
   version: 1.2.0
   description: >-
-    Test-only outbound-only API. Login, authorize, configure Fale Paco, apply, then run the controlled call.
+    Test-only outbound-only API. Login, authorize, configure Fale Paco, apply, then run a controlled REGISTER test; calls remain gated.
     SIP credentials are server-side and the SIP password is write-only.
 servers:
   - url: https://sdr.iainfinito.com.br
@@ -71,7 +71,7 @@ components:
         blockers: {type: array, items: {type: string}}
     RegistrationTestResponse:
       type: object
-      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, registration_triggered, registration_pre_state, registration_post_state, registration_wire_activity_present, secrets_redacted]
+      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, registration_triggered, registration_pre_state, registration_post_state, registration_wire_activity_present, registration_capture_mode, registration_tcp_reassembly, registration_capture_error_class, registration_capture_window_ms, registration_first_wire_activity_ms, registration_authenticated_request_ms, registration_final_response_ms, registration_temporary_pcap_deleted, secrets_redacted]
       properties:
         selected_transport: {type: string, enum: [tcp, udp], example: tcp}
         network_protocol_observed: {type: string, enum: [TCP, UDP, ""]}
@@ -112,6 +112,14 @@ components:
         registration_final_response: {type: string, example: "200"}
         registration_final_reason: {type: string, example: OK}
         provider_server_or_user_agent: {type: string}
+        registration_capture_mode: {type: string, enum: [pcap_tcp_reassembly, pcap_udp_datagrams, pcap, ""]}
+        registration_tcp_reassembly: {type: string, enum: [PASS, FAIL, NOT_REQUIRED, ""]}
+        registration_capture_error_class: {type: string}
+        registration_capture_window_ms: {type: integer, minimum: 0}
+        registration_first_wire_activity_ms: {type: [integer, "null"], minimum: 0}
+        registration_authenticated_request_ms: {type: [integer, "null"], minimum: 0}
+        registration_final_response_ms: {type: [integer, "null"], minimum: 0, description: Null when no final response was reconstructed}
+        registration_temporary_pcap_deleted: {type: boolean}
         secrets_redacted: {type: boolean, enum: [true]}
     FalePacoApplyResponse:
       type: object
@@ -200,7 +208,7 @@ paths:
     post:
       tags: [Fale Paco Registration]
       summary: Test SIP REGISTER
-      description: Captures SIP traffic on the saved TCP or UDP transport at port 5060, applies the saved registration configuration, reads the registration object and pre-state, then explicitly runs one `pjsip send register trunk-falepaco-reg` trigger. A stale Rejected state without current-attempt wire evidence is reported as NoWireActivity, not provider rejection. Does not place a call.
+      description: Captures the saved TCP or UDP transport on port 5060 to a mode-0600 temporary PCAP, applies the saved registration configuration, reads the registration object and pre-state, then explicitly runs one `pjsip send register trunk-falepaco-reg` trigger. TCP SIP is decoded only after in-process TCP stream reassembly and correlated by Call-ID/CSeq; no tshark dependency or packet-oriented text fallback is used. The PCAP is removed after parsing. A stale Rejected state without current-attempt wire evidence is not provider rejection. Does not place a call.
       security: [{BearerAuth: []}]
       responses:
         "200": {description: Registered, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}

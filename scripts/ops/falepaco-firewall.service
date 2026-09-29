@@ -1,0 +1,13 @@
+[Unit]
+Description=Fale Paco SIP and RTP source allowlist
+After=netfilter-persistent.service network-pre.target
+Before=asterisk.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/falepaco-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

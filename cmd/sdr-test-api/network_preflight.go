@@ -55,11 +55,12 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	response.LocalFirewallDetected = localFirewallDetected()
 	// Provider-level firewall rules are not observable from this host.
 	response.FirewallProviderRules = false
-	response.SIPSignalingRulesReady = response.LocalFirewallDetected && response.UDP5060RouteReady && response.UDP5061RouteReady
+	response.SIPSignalingRulesReady = response.LocalFirewallDetected && response.UDP5060RouteReady && response.UDP5061RouteReady && providerFirewallAllowlistReady()
 	response.RTPUDPStart, response.RTPUDPEnd, response.RTPUDPRangeConfigured = readRTPRange("/etc/asterisk/rtp.conf")
 	response.AsteriskTCP5060Listening, response.AsteriskUDP5060Listening = asteriskListening(5060)
 	response.AsteriskTCP5061Listening, response.AsteriskUDP5061Listening = asteriskListening(5061)
-	response.RTPRulesReady = response.RTPUDPRangeConfigured && response.UDP5060RouteReady
+	response.RTPRulesReady = response.RTPUDPRangeConfigured && response.UDP5060RouteReady && providerFirewallAllowlistReady()
+	response.FirewallProviderRules = false // Cloud/VPS security-group state is not exposed by this host.
 	if !response.TCP5060EgressReady {
 		response.Blockers = append(response.Blockers, "tcp_5060_provider_reachability_unconfirmed")
 	}
@@ -69,8 +70,14 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	if !response.RTPUDPRangeConfigured {
 		response.Blockers = append(response.Blockers, "asterisk_rtp_range_not_configured")
 	}
+	if !response.SIPSignalingRulesReady {
+		response.Blockers = append(response.Blockers, "host_sip_allowlist_rules_missing")
+	}
+	if !response.RTPRulesReady {
+		response.Blockers = append(response.Blockers, "host_rtp_allowlist_rules_missing")
+	}
 	if !response.FirewallProviderRules {
-		response.Blockers = append(response.Blockers, "provider_firewall_rules_unverified")
+		response.Blockers = append(response.Blockers, "cloud_firewall_rules_unverified")
 	}
 	jsonOut(w, http.StatusOK, response)
 }
@@ -108,6 +115,22 @@ func localFirewallDetected() bool {
 		}
 	}
 	return false
+}
+
+func providerFirewallAllowlistReady() bool {
+	out, err := exec.Command("iptables", "-S", "FALEPACO_GRU142").Output()
+	if err != nil {
+		return false
+	}
+	rules := string(out)
+	for _, ip := range falePacoProviderIPs {
+		tcp := "-A FALEPACO_GRU142 -s " + ip + "/32 -p tcp -m multiport --dports 5060,5061 -j ACCEPT"
+		udp := "-A FALEPACO_GRU142 -s " + ip + "/32 -p udp -m multiport --dports 5060,5061,10000:65000 -j ACCEPT"
+		if !strings.Contains(rules, tcp) || !strings.Contains(rules, udp) {
+			return false
+		}
+	}
+	return strings.Contains(rules, "-A FALEPACO_GRU142 -p tcp -m multiport --dports 5060,5061 -j DROP") && strings.Contains(rules, "-A FALEPACO_GRU142 -p udp -m multiport --dports 5060,5061,10000:65000 -j DROP")
 }
 
 func readRTPRange(path string) (int, int, bool) {

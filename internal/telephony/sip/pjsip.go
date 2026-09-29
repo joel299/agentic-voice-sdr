@@ -54,6 +54,8 @@ aors=trunk-{{ .Name }}-aor
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
 {{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
+{{ if eq .Provider "falepaco" }}send_pai={{ if .SendPAI }}yes{{ else }}no{{ end }}
+send_rpid={{ if .SendRPID }}yes{{ else }}no{{ end }}{{ end }}
 
 {{ if .RegistrationRequired }}[trunk-{{ .Name }}-reg]
 type=registration

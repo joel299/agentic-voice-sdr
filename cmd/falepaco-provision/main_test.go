@@ -93,3 +93,10 @@ func TestProvisionRequestIncludesFalePacoOutboundProxy(t *testing.T) {
 		t.Fatalf("missing outbound proxy: %s", rendered)
 	}
 }
+
+func TestProvisionRequestUsesAuthorizedFalePacoDID(t *testing.T) {
+	request := provisionRequest(runtimeCredentials{domain: canonicalDomain, username: "100", extension: "100", password: "secret"})
+	if request.CallerID != "551155200455" || !request.SendPAI || request.SendRPID {
+		t.Fatalf("unexpected caller identity policy: %#v", request)
+	}
+}

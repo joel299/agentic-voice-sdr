@@ -64,6 +64,8 @@ type TrunkConfig struct {
 	FromUser                    string        `json:"from_user,omitempty"`
 	FromDomain                  string        `json:"from_domain,omitempty"`
 	CallerID                    string        `json:"caller_id,omitempty"`
+	SendPAI                     bool          `json:"send_pai,omitempty"`
+	SendRPID                    bool          `json:"send_rpid,omitempty"`
 	Codecs                      []string      `json:"codecs,omitempty"`
 	RegistrationRequired        bool          `json:"registration_required"`
 	Enabled                     bool          `json:"enabled"`

@@ -1335,3 +1335,16 @@ func TestPJSIPFalePacoOutboundProxyIsEscaped(t *testing.T) {
 		t.Fatalf("missing escaped outbound proxy: %s", rendered)
 	}
 }
+
+func TestPJSIPCallerIdentityPolicyIsRendered(t *testing.T) {
+	cfg := sip.TrunkConfig{Name: "falepaco", Provider: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", FromDomain: "96678.falepaco.com.br", CallerID: "551155200455", SendPAI: true, SendRPID: false}
+	rendered, err := sip.GeneratePJSIPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"callerid=551155200455", "send_pai=yes", "send_rpid=no"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("missing %q: %s", want, rendered)
+		}
+	}
+}

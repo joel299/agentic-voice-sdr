@@ -62,7 +62,7 @@ func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
 		OutboundProxy: canonicalOutboundProxy,
 		FromDomain:    outboundHost,
 		Auth:          httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
-		FromUser:      c.extension, RegistrationRequired: false, Enabled: true,
+		FromUser:      c.extension, CallerID: "551155200455", SendPAI: true, SendRPID: false, RegistrationRequired: false, Enabled: true,
 	}
 }
 

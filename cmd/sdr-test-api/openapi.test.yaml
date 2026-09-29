@@ -71,7 +71,7 @@ components:
         blockers: {type: array, items: {type: string}}
     RegistrationTestResponse:
       type: object
-      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, secrets_redacted]
+      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, registration_triggered, registration_pre_state, registration_post_state, registration_wire_activity_present, secrets_redacted]
       properties:
         selected_transport: {type: string, enum: [tcp, udp], example: tcp}
         network_protocol_observed: {type: string, enum: [TCP, UDP, ""]}
@@ -80,8 +80,17 @@ components:
         registration_client_uri: {type: string}
         registration_contact_user: {type: string}
         registration_outbound_proxy: {type: string}
-        registration_status: {type: string, example: Registered}
+        registration_status: {type: string, enum: [Registered, Rejected, NoWireActivity, TriggerFailed, Pending, ApplyFailed, LocalError], example: Registered}
         registration_state: {type: string}
+        registration_pre_state: {type: string}
+        registration_triggered: {type: boolean}
+        registration_trigger_attempted: {type: boolean}
+        registration_trigger_command: {type: string, example: "pjsip send register trunk-falepaco-reg"}
+        registration_trigger_exit_code: {type: integer}
+        registration_trigger_error_class: {type: string}
+        registration_post_state: {type: string}
+        registration_wire_activity_present: {type: boolean}
+        registration_error_class: {type: string}
         registration_apply_error: {type: boolean}
         apply_stage: {type: string}
         apply_error_class: {type: string}
@@ -191,7 +200,7 @@ paths:
     post:
       tags: [Fale Paco Registration]
       summary: Test SIP REGISTER
-      description: Captures SIP traffic on the saved TCP or UDP transport at port 5060. It does not fall back to another transport. Applies the saved registration configuration and validates the REGISTER challenge/final response. Does not place a call.
+      description: Captures SIP traffic on the saved TCP or UDP transport at port 5060, applies the saved registration configuration, reads the registration object and pre-state, then explicitly runs one `pjsip send register trunk-falepaco-reg` trigger. A stale Rejected state without current-attempt wire evidence is reported as NoWireActivity, not provider rejection. Does not place a call.
       security: [{BearerAuth: []}]
       responses:
         "200": {description: Registered, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}

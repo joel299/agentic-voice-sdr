@@ -121,9 +121,14 @@ func parseSIPWireCapture(raw, username, secret string) sipWireEvidence {
 	return ev
 }
 
-type cappedBuffer struct{ bytes.Buffer }
+type cappedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.Len() >= 2<<20 {
 		return len(p), nil
 	}
@@ -133,6 +138,31 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	_, _ = b.Buffer.Write(p)
 	return n, nil
+}
+
+func (b *cappedBuffer) Mark() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Len()
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
+}
+
+func (b *cappedBuffer) StringFrom(mark int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	value := b.Buffer.String()
+	if mark < 0 {
+		mark = 0
+	}
+	if mark > len(value) {
+		mark = len(value)
+	}
+	return value[mark:]
 }
 
 var registrationTestMu sync.Mutex
@@ -148,6 +178,147 @@ type registrationResponse struct {
 	RegistrationStatus        string `json:"registration_status"`
 	RegistrationState         string `json:"registration_state"`
 	SecretsRedacted           bool   `json:"secrets_redacted"`
+}
+
+type registrationAttemptSteps struct {
+	StartCapture func(context.Context) error
+	Apply        func(context.Context) error
+	Readback     func(context.Context) (bool, string, error)
+	MarkWire     func() int
+	Trigger      func(context.Context) (int, string)
+	Wait         func(context.Context, string, bool) string
+	StopCapture  func()
+	ReadWire     func(int) sipWireEvidence
+}
+
+type registrationAttemptResult struct {
+	Status, ErrorClass, TriggerErrorClass string
+	PreState, PostState                   string
+	TriggerAttempted, Triggered           bool
+	TriggerExitCode                       int
+	RegistrationObjectPresent             bool
+	WireActivity                          bool
+	Wire                                  sipWireEvidence
+}
+
+func runRegistrationAttempt(ctx context.Context, steps registrationAttemptSteps) registrationAttemptResult {
+	result := registrationAttemptResult{Status: "LocalError", TriggerExitCode: -1}
+	if err := steps.StartCapture(ctx); err != nil {
+		result.ErrorClass = "wire_capture_start_failed"
+		return result
+	}
+	captureActive := true
+	wireMark := 0
+	finishCapture := func() {
+		if !captureActive {
+			return
+		}
+		steps.StopCapture()
+		captureActive = false
+		result.Wire = steps.ReadWire(wireMark)
+		result.WireActivity = result.Wire.Initial || result.Wire.FirstResponse != "" || result.Wire.FinalResponse != "" || result.Wire.Challenge || result.Wire.Authenticated
+	}
+	defer finishCapture()
+	if err := steps.Apply(ctx); err != nil {
+		result.Status, result.ErrorClass = "ApplyFailed", "registration_apply_failed"
+		finishCapture()
+		return result
+	}
+	present, state, err := steps.Readback(ctx)
+	result.RegistrationObjectPresent = present
+	if state == "" {
+		state = "Unknown"
+	}
+	result.PreState = state
+	if err != nil || !present {
+		result.Status, result.ErrorClass = "LocalError", "registration_object_readback_failed"
+		finishCapture()
+		return result
+	}
+	wireMark = steps.MarkWire()
+	result.TriggerAttempted = true
+	result.TriggerExitCode, result.TriggerErrorClass = steps.Trigger(ctx)
+	result.Triggered = result.TriggerErrorClass == "" && result.TriggerExitCode == 0
+	result.PostState = steps.Wait(ctx, result.PreState, result.Triggered)
+	if result.PostState == "" {
+		result.PostState = "Unknown"
+	}
+	finishCapture()
+	classified := classifyRegistrationAttempt(result.PreState, result.PostState, result.TriggerErrorClass, result.Wire)
+	result.Status, result.ErrorClass = classified.Status, classified.ErrorClass
+	return result
+}
+
+type registrationClassification struct{ Status, ErrorClass string }
+
+func classifyRegistrationAttempt(preState, postState, triggerErrorClass string, wire sipWireEvidence) registrationClassification {
+	if triggerErrorClass != "" {
+		return registrationClassification{"TriggerFailed", triggerErrorClass}
+	}
+	activity := wire.Initial || wire.FirstResponse != "" || wire.FinalResponse != "" || wire.Challenge || wire.Authenticated
+	if !activity {
+		return registrationClassification{"NoWireActivity", "registration_trigger_no_wire"}
+	}
+	staleRejected := preState == "Rejected" && postState == "Rejected"
+	if wire.FinalResponse == "200" && postState == "Registered" {
+		return registrationClassification{"Registered", ""}
+	}
+	if wire.FinalResponse == "403" {
+		return registrationClassification{"Rejected", "provider_registration_rejected"}
+	}
+	if wire.FinalResponse != "" && wire.FinalResponse != "200" && postState == "Rejected" && !staleRejected {
+		return registrationClassification{"Rejected", "provider_registration_rejected"}
+	}
+	return registrationClassification{"Pending", "registration_attempt_incomplete"}
+}
+
+type asteriskCommandRunner func(context.Context, string) (string, int, error)
+
+func sendAsteriskRegister(ctx context.Context, run asteriskCommandRunner) (int, string) {
+	output, exitCode, err := run(ctx, "pjsip send register trunk-falepaco-reg")
+	if err != nil || exitCode != 0 {
+		return exitCode, "asterisk_cli_failed"
+	}
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "unable to") || strings.Contains(lower, "not found") || strings.Contains(lower, "no such") || strings.Contains(lower, "no registration") || strings.Contains(lower, "error") {
+		return exitCode, "asterisk_cli_failed"
+	}
+	return exitCode, ""
+}
+
+func asteriskCommand(ctx context.Context, command string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "asterisk", "-rx", command)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(output), 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return string(output), exitErr.ExitCode(), err
+	}
+	return string(output), -1, err
+}
+
+func callRegistrationReady(state string) bool {
+	return strings.EqualFold(strings.TrimSpace(state), "Registered")
+}
+
+func shouldStopRegistrationPoll(preState, observedState string) bool {
+	return observedState == "Registered" || (observedState == "Rejected" && preState != "Rejected")
+}
+
+func registrationStateFromOutput(output string) string {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "rejected") {
+		return "Rejected"
+	}
+	if strings.Contains(lower, "unregistered") {
+		return "Unregistered"
+	}
+	if regexp.MustCompile(`(?i)\bregistered\b`).MatchString(output) {
+		return "Registered"
+	}
+	return "Unregistered"
 }
 
 func (s *server) registrationGet(w http.ResponseWriter, r *http.Request) {
@@ -170,12 +341,7 @@ func (s *server) registrationGet(w http.ResponseWriter, r *http.Request) {
 	out, _ := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
 	all, _ := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registrations").CombinedOutput()
 	present := strings.Contains(string(out), "trunk-falepaco-reg") || strings.Contains(string(all), "trunk-falepaco-reg")
-	state := "Unregistered"
-	if strings.Contains(string(out), "Registered") {
-		state = "Registered"
-	} else if strings.Contains(string(out), "Rejected") {
-		state = "Rejected"
-	}
+	state := registrationStateFromOutput(string(out))
 	jsonOut(w, 200, registrationResponse{Configured: m["FALEPACO_SIP_USERNAME"] != "" && m["FALEPACO_SIP_PASSWORD"] != "", RegistrationObjectPresent: present, SelectedTransport: req.Transport, RegistrationServerURI: m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], RegistrationClientURI: m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], RegistrationContactUser: m["FALEPACO_SIP_CONTACT_USER"], RegistrationOutboundProxy: req.OutboundProxy, RegistrationStatus: state, RegistrationState: state, SecretsRedacted: true})
 }
 func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
@@ -225,46 +391,86 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
-	capture, captureOutput, captureErr := startSIPWireCapture(req.Transport)
-	if captureErr != nil {
-		jsonOut(w, 503, map[string]any{"error": "wire_capture_unavailable", "registration_capture_implemented": true, "secrets_redacted": true})
+	var capture *exec.Cmd
+	var captureOutput *cappedBuffer
+	var applyErr error
+	attempt := runRegistrationAttempt(ctx, registrationAttemptSteps{
+		StartCapture: func(context.Context) error {
+			var err error
+			capture, captureOutput, err = startSIPWireCapture(req.Transport)
+			return err
+		},
+		Apply: func(ctx context.Context) error {
+			_, applyErr = mgr.ApplyTrunk(ctx, cfg)
+			return applyErr
+		},
+		Readback: func(ctx context.Context) (bool, string, error) {
+			out, err := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+			text := string(out)
+			present := strings.Contains(text, "trunk-falepaco-reg") && !strings.Contains(text, "Unable to find object")
+			return present, registrationStateFromOutput(text), err
+		},
+		MarkWire: func() int {
+			if captureOutput == nil {
+				return 0
+			}
+			return captureOutput.Mark()
+		},
+		Trigger: func(ctx context.Context) (int, string) { return sendAsteriskRegister(ctx, asteriskCommand) },
+		Wait: func(ctx context.Context, preState string, triggered bool) string {
+			if triggered {
+				return waitRegistration(ctx, preState)
+			}
+			out, err := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+			if err != nil {
+				return "Unknown"
+			}
+			return registrationStateFromOutput(string(out))
+		},
+		StopCapture: func() { stopSIPWireCapture(capture) },
+		ReadWire: func(mark int) sipWireEvidence {
+			if captureOutput == nil {
+				return sipWireEvidence{}
+			}
+			return parseSIPWireCapture(captureOutput.StringFrom(mark), req.Auth.Username, m["FALEPACO_SIP_PASSWORD"])
+		},
+	})
+	if attempt.Status == "LocalError" && attempt.ErrorClass == "wire_capture_start_failed" {
+		jsonOut(w, 503, map[string]any{"error": "wire_capture_unavailable", "registration_capture_implemented": true, "registration_triggered": false, "registration_trigger_error_class": attempt.ErrorClass, "secrets_redacted": true})
 		return
 	}
-	_, applyErr := mgr.ApplyTrunk(ctx, cfg)
 	applyStage, applyClass, applySummary := "", "", ""
 	if applyErr != nil {
 		applyStage, applyClass, applySummary = safeApplyError(applyErr, m["FALEPACO_SIP_PASSWORD"])
 	}
-	state := "ApplyFailed"
-	if applyErr == nil {
-		state, _ = waitRegistration(ctx)
-	}
-	registrationReadback, _ := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
-	registrationObjectPresent := strings.Contains(string(registrationReadback), "trunk-falepaco-reg") && !strings.Contains(string(registrationReadback), "Unable to find object")
-	stopSIPWireCapture(capture)
-	wire := parseSIPWireCapture(captureOutput.String(), req.Auth.Username, m["FALEPACO_SIP_PASSWORD"])
-	if wire.FinalResponse == "200" {
-		state = "Registered"
-	} else if wire.FinalResponse == "403" {
-		state = "Rejected"
-	}
-	status := 200
-	if applyErr != nil || wire.FinalResponse != "200" {
-		status = 502
+	status := 502
+	if attempt.Status == "Registered" {
+		status = 200
 	}
 	networkProtocolObserved := ""
-	if wire.Initial {
+	if attempt.Wire.Initial {
 		networkProtocolObserved = strings.ToUpper(req.Transport)
 	}
-	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "network_protocol_observed": networkProtocolObserved, "registration_object_present": registrationObjectPresent, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": state, "registration_apply_error": applyErr != nil, "apply_stage": applyStage, "apply_error_class": applyClass, "apply_error_summary": applySummary,
-		"registration_capture_implemented": true, "registration_initial_request_present": wire.Initial,
-		"registration_first_response": wire.FirstResponse, "registration_first_reason": wire.FirstReason,
-		"registration_challenge_received": wire.Challenge, "registration_challenge_type": wire.ChallengeType,
-		"registration_realm": wire.Realm, "registration_algorithm": wire.Algorithm, "registration_qop": wire.QOP,
-		"registration_authenticated_request_sent": wire.Authenticated, "registration_auth_username": wire.AuthUsername,
-		"registration_auth_realm": wire.AuthRealm, "registration_auth_uri": wire.AuthURI,
-		"registration_digest_matches_runtime_secret": wire.DigestMatches, "registration_final_response": wire.FinalResponse,
-		"registration_final_reason": wire.FinalReason, "provider_server_or_user_agent": wire.Server, "secrets_redacted": true})
+	jsonOut(w, status, map[string]any{
+		"selected_transport": req.Transport, "network_protocol_observed": networkProtocolObserved,
+		"registration_object_present": attempt.RegistrationObjectPresent,
+		"registration_server_uri":     m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"],
+		"registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy,
+		"registration_status": attempt.Status, "registration_state": attempt.PostState,
+		"registration_apply_error": applyErr != nil, "apply_stage": applyStage, "apply_error_class": applyClass, "apply_error_summary": applySummary,
+		"registration_pre_state": attempt.PreState, "registration_triggered": attempt.Triggered, "registration_trigger_attempted": attempt.TriggerAttempted,
+		"registration_trigger_command": "pjsip send register trunk-falepaco-reg", "registration_trigger_exit_code": attempt.TriggerExitCode,
+		"registration_trigger_error_class": attempt.TriggerErrorClass, "registration_post_state": attempt.PostState,
+		"registration_wire_activity_present": attempt.WireActivity, "registration_error_class": attempt.ErrorClass,
+		"registration_capture_implemented": true, "registration_initial_request_present": attempt.Wire.Initial,
+		"registration_first_response": attempt.Wire.FirstResponse, "registration_first_reason": attempt.Wire.FirstReason,
+		"registration_challenge_received": attempt.Wire.Challenge, "registration_challenge_type": attempt.Wire.ChallengeType,
+		"registration_realm": attempt.Wire.Realm, "registration_algorithm": attempt.Wire.Algorithm, "registration_qop": attempt.Wire.QOP,
+		"registration_authenticated_request_sent": attempt.Wire.Authenticated, "registration_auth_username": attempt.Wire.AuthUsername,
+		"registration_auth_realm": attempt.Wire.AuthRealm, "registration_auth_uri": attempt.Wire.AuthURI,
+		"registration_digest_matches_runtime_secret": attempt.Wire.DigestMatches, "registration_final_response": attempt.Wire.FinalResponse,
+		"registration_final_reason": attempt.Wire.FinalReason, "provider_server_or_user_agent": attempt.Wire.Server, "secrets_redacted": true,
+	})
 }
 
 func startSIPWireCapture(selectedTransport string) (*exec.Cmd, *cappedBuffer, error) {
@@ -303,28 +509,27 @@ func stopSIPWireCapture(cmd *exec.Cmd) {
 	}
 }
 
-func waitRegistration(ctx context.Context) (string, string) {
+func waitRegistration(ctx context.Context, preState string) string {
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	poll := time.NewTicker(750 * time.Millisecond)
 	defer poll.Stop()
-	state, output := "Unregistered", ""
+	state := "Unregistered"
 	for {
 		cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		out, _ := exec.CommandContext(cmdCtx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
+		out, err := exec.CommandContext(cmdCtx, "asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
 		cancel()
-		output = string(out)
-		switch {
-		case strings.Contains(output, "Rejected") || strings.Contains(output, "REJECTED"):
-			return "Rejected", output
-		case strings.Contains(output, "Registered") || strings.Contains(output, "REGISTERED"):
-			return "Registered", output
+		if err == nil {
+			state = registrationStateFromOutput(string(out))
+		}
+		if shouldStopRegistrationPoll(preState, state) {
+			return state
 		}
 		select {
 		case <-ctx.Done():
-			return state, output
+			return state
 		case <-deadline.C:
-			return state, output
+			return state
 		case <-poll.C:
 		}
 	}

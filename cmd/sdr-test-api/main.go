@@ -299,7 +299,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	}
 	if cfg.RegistrationRequired {
 		stateOut, _ := exec.Command("asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
-		if !strings.Contains(string(stateOut), "Registered") {
+		if !callRegistrationReady(registrationStateFromOutput(string(stateOut))) {
 			jsonOut(w, 409, map[string]any{"error": "provider_not_registered", "registration_status": "Unregistered", "secrets_redacted": true})
 			return
 		}

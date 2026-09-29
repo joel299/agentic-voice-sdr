@@ -21,6 +21,12 @@ var falePacoProviderIPs = []string{
 }
 
 type networkPreflightResponse struct {
+	ResolverMode                       string   `json:"resolver_mode"`
+	SystemResolverState                string   `json:"system_resolver_state"`
+	DNSNameserverCount                 int      `json:"dns_nameserver_count"`
+	DNSEgressState                     string   `json:"dns_egress_state"`
+	ProviderAddressLookupDurationMS    int64    `json:"provider_address_lookup_duration_ms"`
+	RequestURIHostLookupDurationMS     int64    `json:"request_uri_host_lookup_duration_ms"`
 	ProviderAddressDNSState            string   `json:"provider_address_dns_state"`
 	ProviderAddressResolvedIPsCount    int      `json:"provider_address_resolved_ips_count"`
 	ProviderAddressResolvesToAllowlist bool     `json:"provider_address_resolves_to_allowlist"`
@@ -78,17 +84,29 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	response := networkPreflightResponse{ProviderIPAllowlistCount: len(falePacoProviderIPs), ProviderIPsConfigured: len(falePacoProviderIPs) == 21, Blockers: []string{}, Warnings: []string{}, UDPRemotePortConfirmed: false}
 	response.DNSTimeoutMS = 4000
+	response.ResolverMode, response.SystemResolverState = systemResolverMode()
+	response.DNSNameserverCount = configuredNameserverCount("/etc/resolv.conf")
 	if m, err := dotenv(sipEnv); err != nil {
 		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_unavailable", "configuration_unavailable", "configuration_unavailable"
 	} else if req, err := savedFalepaco(m); err != nil || falepacoSavedValidation(req, m) != nil {
 		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_invalid", "configuration_invalid", "configuration_invalid"
 	} else {
 		proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
+		start := time.Now()
 		response.ProviderAddressDNSState, response.ProviderAddressResolvedIPs, response.ProviderAddressResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_DOMAIN"], 4*time.Second)
+		response.ProviderAddressLookupDurationMS = time.Since(start).Milliseconds()
 		response.ProviderAddressResolvedIPsCount = len(response.ProviderAddressResolvedIPs)
+		start = time.Now()
 		response.RequestURIHostDNSState, response.RequestURIHostResolvedIPs, response.RequestURIHostResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_OUTBOUND_HOST"], 4*time.Second)
+		response.RequestURIHostLookupDurationMS = time.Since(start).Milliseconds()
 		response.RequestURIHostResolvedIPsCount = len(response.RequestURIHostResolvedIPs)
 		response.OutboundProxyDNSState, _, response.OutboundProxyResolvesToAllowlist = resolveFalePacoHost(proxyHost, 4*time.Second)
+		if response.ProviderAddressDNSState == "resolved" && response.RequestURIHostDNSState == "resolved" {
+			response.DNSEgressState = "reachable"
+		} else {
+			response.DNSEgressState = "degraded"
+			response.Warnings = append(response.Warnings, "dns_resolution_degraded")
+		}
 	}
 	for _, state := range []string{response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState} {
 		if state != "resolved" {
@@ -139,12 +157,44 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, response)
 }
 
-var falepacoResolver = &net.Resolver{PreferGo: true}
+func systemResolverMode() (string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "systemd-resolved").Run() == nil {
+		return "systemd-resolved", "active"
+	}
+	return "system-nss", "unknown"
+}
+
+func configuredNameserverCount(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) > 0 && fields[0] == "nameserver" {
+			count++
+		}
+	}
+	return count
+}
+
 var lookupFalePacoIPs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	// Use NSS/getent just like the host's successful system lookups. The Go
-	// DNS client timed out against this host's stub resolver while getent and
-	// systemd-resolved returned the same A records promptly.
-	cmd := exec.CommandContext(ctx, "getent", "ahostsv4", host)
+	args := []string{"ahostsv4", host}
+	if exec.Command("systemctl", "is-active", "--quiet", "systemd-resolved").Run() == nil {
+		// Direct NSS requests to the resolved stub hang on this VPS while the
+		// systemd-resolved bus API succeeds. Use that same host resolver API.
+		args = []string{"query", "--type=A", host}
+	}
+	binary := "getent"
+	if args[0] == "query" {
+		binary = "resolvectl"
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -159,15 +209,12 @@ var lookupFalePacoIPs = func(ctx context.Context, host string) ([]net.IPAddr, er
 	var addresses []net.IPAddr
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) == 0 {
-			continue
+		for _, field := range strings.Fields(scanner.Text()) {
+			ip := net.ParseIP(field)
+			if ip != nil && ip.To4() != nil {
+				addresses = append(addresses, net.IPAddr{IP: ip})
+			}
 		}
-		ip := net.ParseIP(fields[0])
-		if ip == nil || ip.To4() == nil {
-			continue
-		}
-		addresses = append(addresses, net.IPAddr{IP: ip})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err

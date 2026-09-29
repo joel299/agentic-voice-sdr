@@ -90,7 +90,7 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	if applyErr != nil || state != "Registered" {
 		status = 502
 	}
-	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "registration_object_present": true, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": report.RegistrationState, "registration_apply_error": applyErr != nil, "registration_final_response": 0, "registration_challenge_received": false, "registration_authenticated_request_sent": state == "Registered", "registration_digest_matches_runtime_secret": state == "Registered", "secrets_redacted": true})
+	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "registration_object_present": true, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": report.RegistrationState, "registration_apply_error": applyErr != nil, "registration_final_response": nil, "registration_challenge_received": nil, "registration_authenticated_request_sent": nil, "registration_digest_matches_runtime_secret": nil, "registration_wire_capture": "not_implemented", "secrets_redacted": true})
 }
 func (s *server) registrationDelete(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {

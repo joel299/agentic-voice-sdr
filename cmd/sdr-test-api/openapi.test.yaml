@@ -12,8 +12,6 @@ tags:
   - name: Fale Paco Configuration
   - name: Fale Paco Test
   - name: Fale Paco Registration
-  - name: Fale Paco Registration
-  - name: Fale Paco Registration
 components:
   securitySchemes:
     BearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
@@ -33,7 +31,6 @@ components:
         transport: {type: string, enum: [tcp, udp], example: tcp}
         port: {type: integer, example: 5060}
         registration_required: {type: boolean, example: false}
-        registration: {type: object, properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
         registration: {type: object, properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}

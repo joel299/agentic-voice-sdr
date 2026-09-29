@@ -11,7 +11,7 @@ import (
 )
 
 func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
-	credentials := runtimeCredentials{domain: canonicalDomain, username: "auth-user", extension: "100", password: "test-only-secret", outboundHost: canonicalOutboundHost}
+	credentials := runtimeCredentials{domain: canonicalDomain, username: "auth-user", extension: "100", password: "test-only-secret", outboundHost: "96678.falepaco.com.br"}
 	request := provisionRequest(credentials)
 	canonical, err := request.ToCanonical()
 	if err != nil {

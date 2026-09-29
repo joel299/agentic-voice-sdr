@@ -22,7 +22,7 @@ components:
       required: [provider_address, request_uri_host, outbound_proxy, username, extension, caller_id, transport, port, registration]
       properties:
         provider_address: {type: string, example: 98034.falepaco.com.br}
-        request_uri_host: {type: string, example: 96678.falepaco.com.br}
+        request_uri_host: {type: string, example: 98034.falepaco.com.br}
         outbound_proxy: {type: string, example: 98034.falepaco.com.br:5060}
         username: {type: string, example: "100"}
         extension: {type: string, example: "100"}
@@ -30,7 +30,7 @@ components:
         caller_id: {type: string, example: "551155200455"}
         transport: {type: string, enum: [tcp, udp], example: tcp}
         port: {type: integer, example: 5060}
-        registration: {type: object, required: [enabled, server_uri, client_uri, contact_user, realm, retry_interval_seconds, max_retries], properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:96678.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@96678.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 96678.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
+        registration: {type: object, required: [enabled, server_uri, client_uri, contact_user, realm, retry_interval_seconds, max_retries], properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:98034.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@98034.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 98034.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
     FalePacoConfigResponse:
       type: object
       required: [configured, provider_address, request_uri_host, outbound_proxy, username, extension, password_configured, caller_id, transport, port, registration]
@@ -114,12 +114,12 @@ components:
         registration_first_reason: {type: [string, "null"], example: Unauthorized}
         registration_challenge_received: {type: boolean}
         registration_challenge_type: {type: string, example: "401"}
-        registration_realm: {type: string, example: 96678.falepaco.com.br}
+        registration_realm: {type: string, example: 98034.falepaco.com.br}
         registration_algorithm: {type: string, example: MD5}
         registration_qop: {type: string, example: auth}
         registration_authenticated_request_sent: {type: boolean}
         registration_auth_username: {type: string, example: "100"}
-        registration_auth_realm: {type: string, example: 96678.falepaco.com.br}
+        registration_auth_realm: {type: string, example: 98034.falepaco.com.br}
         registration_auth_uri: {type: string}
         registration_digest_matches_runtime_secret: {type: [boolean, "null"]}
         registration_final_response: {type: string, example: "200"}

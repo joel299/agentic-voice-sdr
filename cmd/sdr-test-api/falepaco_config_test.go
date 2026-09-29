@@ -96,11 +96,12 @@ func TestResolveFalePacoHostChecksAllAnswersAgainstOfficialAllowlist(t *testing.
 }
 
 func TestFalePacoSaveValidationIsDNSIndependentAndStrictlyAllowlisted(t *testing.T) {
-	cfg := falepacoConfigRequest{ProviderAddress: "98034.falepaco.com.br", RequestURIHost: "96678.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", Username: "100", Extension: "100", CallerID: "551155200455", Transport: "tcp", Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: "sip:96678.falepaco.com.br:5060", ClientURI: "sip:100@96678.falepaco.com.br:5060", ContactUser: "100", Realm: "96678.falepaco.com.br", RetryIntervalSeconds: 60, MaxRetries: 3}}
+	cfg := falepacoConfigRequest{ProviderAddress: "98034.falepaco.com.br", RequestURIHost: "98034.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", Username: "100", Extension: "100", CallerID: "551155200455", Transport: "tcp", Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: "sip:98034.falepaco.com.br:5060", ClientURI: "sip:100@98034.falepaco.com.br:5060", ContactUser: "100", Realm: "98034.falepaco.com.br", RetryIntervalSeconds: 60, MaxRetries: 3}}
 	if got := validateFalePacoSave(cfg); got != nil {
 		t.Fatalf("approved config should validate without live DNS: %+v", got)
 	}
 	// Candidate B changes only the registrar/client domain; retain observed auth realm.
+	cfg.Registration.Realm = "96678.falepaco.com.br" // historical challenge realm must remain independently representable
 	cfg.RequestURIHost = "98034.falepaco.com.br"
 	cfg.Registration.ServerURI = "sip:98034.falepaco.com.br:5060"
 	cfg.Registration.ClientURI = "sip:100@98034.falepaco.com.br:5060"
@@ -264,26 +265,26 @@ func TestNetworkPreflightRequiresBearerBeforeProbing(t *testing.T) {
 	}
 }
 func TestSavedFalepacoUsesPersistedTransport(t *testing.T) {
-	m := map[string]string{"FALEPACO_SIP_DOMAIN": "98034.falepaco.com.br", "FALEPACO_SIP_OUTBOUND_HOST": "96678.falepaco.com.br", "FALEPACO_SIP_OUTBOUND_PROXY": "98034.falepaco.com.br:5060", "FALEPACO_SIP_USERNAME": "100", "FALEPACO_SIP_EXTENSION": "100", "FALEPACO_SIP_PASSWORD": "secret", "FALEPACO_SIP_CALLER_ID": "551155200455", "FALEPACO_SIP_TRANSPORT": "udp", "FALEPACO_SIP_PORT": "5060"}
+	m := map[string]string{"FALEPACO_SIP_DOMAIN": "98034.falepaco.com.br", "FALEPACO_SIP_OUTBOUND_HOST": "98034.falepaco.com.br", "FALEPACO_SIP_OUTBOUND_PROXY": "98034.falepaco.com.br:5060", "FALEPACO_SIP_USERNAME": "100", "FALEPACO_SIP_EXTENSION": "100", "FALEPACO_SIP_PASSWORD": "secret", "FALEPACO_SIP_CALLER_ID": "551155200455", "FALEPACO_SIP_TRANSPORT": "tcp", "FALEPACO_SIP_PORT": "5060"}
 	req, err := savedFalepaco(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Transport != "udp" {
+	if req.Transport != "tcp" {
 		t.Fatalf("transport=%s", req.Transport)
 	}
 	cfg, err := req.ToCanonical()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(cfg.Transport) != "udp" {
+	if string(cfg.Transport) != "tcp" {
 		t.Fatalf("canonical transport=%s", cfg.Transport)
 	}
 }
 
 func TestAsteriskAuthReadbackParsesSemanticFields(t *testing.T) {
-	output := "Auth:  trunk-falepaco-auth/100\n auth_type : userpass\n username : 100\n realm : 96678.falepaco.com.br\n password=[REDACTED]\n"
-	if asteriskParameter(output, "auth_type") != "userpass" || asteriskParameter(output, "username") != "100" || asteriskParameter(output, "realm") != "96678.falepaco.com.br" {
+	output := "Auth:  trunk-falepaco-auth/100\n auth_type : userpass\n username : 100\n realm : 98034.falepaco.com.br\n password=[REDACTED]\n"
+	if asteriskParameter(output, "auth_type") != "userpass" || asteriskParameter(output, "username") != "100" || asteriskParameter(output, "realm") != "98034.falepaco.com.br" {
 		t.Fatal("auth readback fields were not parsed")
 	}
 }

@@ -239,11 +239,11 @@ func TestSIPDisableDoesNotDependOnDNS(t *testing.T) {
 
 func TestSIPRegistrationCanonicalFieldsSurviveMapping(t *testing.T) {
 	request := SIPConfigRequest{
-		Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060,
+		Provider: "falepaco", Name: "falepaco", Host: "98034.falepaco.com.br", Port: 5060,
 		Transport: "tcp", Auth: SIPAuthRequest{Type: "userpass", Username: "100", Secret: "secret"},
-		RegistrationRealm: "96678.falepaco.com.br", RegistrationRequired: true, Enabled: true,
-		RegistrationServerURI:   "sip:96678.falepaco.com.br:5060",
-		RegistrationClientURI:   "sip:100@96678.falepaco.com.br:5060",
+		RegistrationRealm: "98034.falepaco.com.br", RegistrationRequired: true, Enabled: true,
+		RegistrationServerURI:   "sip:98034.falepaco.com.br:5060",
+		RegistrationClientURI:   "sip:100@98034.falepaco.com.br:5060",
 		RegistrationContactUser: "100", RegistrationRetryInterval: 45, RegistrationMaxRetries: 7,
 	}
 	canonical, err := request.ToCanonical()

@@ -20,8 +20,8 @@ import (
 const (
 	testSIPUser   = "100"
 	testSIPSecret = "secret-for-test-only"
-	testSIPRealm  = "96678.falepaco.com.br"
-	testSIPURI    = "sip:96678.falepaco.com.br:5060"
+	testSIPRealm  = "98034.falepaco.com.br"
+	testSIPURI    = "sip:98034.falepaco.com.br:5060"
 )
 
 func digestResponseForTest(username, realm, secret, uri, nonce, nc, cnonce, qop string) string {

@@ -20,6 +20,31 @@ func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
 		t.Fatalf("unsafe or incomplete apply diagnostics: stage=%q class=%q summary=%q", stage, class, summary)
 	}
 }
+func TestFalePacoSaveValidationIsDNSIndependentAndStrictlyAllowlisted(t *testing.T) {
+	cfg := falepacoConfigRequest{ProviderAddress: "98034.falepaco.com.br", RequestURIHost: "96678.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", Username: "100", Extension: "100", CallerID: "551155200455", Transport: "tcp", Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: "sip:96678.falepaco.com.br:5060", ClientURI: "sip:100@96678.falepaco.com.br:5060", ContactUser: "100", Realm: "96678.falepaco.com.br", RetryIntervalSeconds: 60, MaxRetries: 3}}
+	if got := validateFalePacoSave(cfg); got != nil {
+		t.Fatalf("approved config should validate without live DNS: %+v", got)
+	}
+	cfg.ProviderAddress = "example.com"
+	if got := validateFalePacoSave(cfg); got == nil || got.Field != "provider_address" || got.Class != "host_not_allowed" {
+		t.Fatalf("external host should be rejected precisely: %+v", got)
+	}
+	cfg.ProviderAddress = "127.0.0.1"
+	if got := validateFalePacoSave(cfg); got == nil || got.Class != "unsafe_literal_ip" {
+		t.Fatalf("IP literal should be rejected: %+v", got)
+	}
+}
+
+func TestResolveFalePacoHostChecksEntireAllowlist(t *testing.T) {
+	allow := map[string]bool{}
+	for _, ip := range falePacoProviderIPs {
+		allow[ip] = true
+	}
+	if len(allow) != 21 || !allow["177.11.49.36"] || !allow["177.11.49.97"] {
+		t.Fatalf("official IP set incorrect: %d", len(allow))
+	}
+}
+
 func TestProviderAllowlistContainsOfficialCount(t *testing.T) {
 	if len(falePacoProviderIPs) != 21 {
 		t.Fatalf("provider allowlist count=%d", len(falePacoProviderIPs))

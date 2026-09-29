@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,38 +19,49 @@ var falePacoProviderIPs = []string{
 }
 
 type networkPreflightResponse struct {
-	ProviderIPAllowlistCount int      `json:"provider_ip_allowlist_count"`
-	ProviderIPsConfigured    bool     `json:"provider_ips_configured"`
-	TCP5060TestedCount       int      `json:"tcp_5060_tested_count"`
-	TCP5060ReachableCount    int      `json:"tcp_5060_reachable_count"`
-	TCP5060AnyReachable      bool     `json:"tcp_5060_any_reachable"`
-	TCP5060ProbeComplete     bool     `json:"tcp_5060_probe_complete"`
-	TCP5061TestedCount       int      `json:"tcp_5061_tested_count"`
-	TCP5061ReachableCount    int      `json:"tcp_5061_reachable_count"`
-	TCP5061AnyReachable      bool     `json:"tcp_5061_any_reachable"`
-	TCP5061ProbeComplete     bool     `json:"tcp_5061_probe_complete"`
-	UDP5060RouteReady        bool     `json:"udp_5060_route_ready"`
-	UDP5061RouteReady        bool     `json:"udp_5061_route_ready"`
-	RTPUDPStart              int      `json:"rtp_udp_start"`
-	RTPUDPEnd                int      `json:"rtp_udp_end"`
-	RTPUDPRangeConfigured    bool     `json:"rtp_udp_range_configured"`
-	AsteriskTCP5060Listening bool     `json:"asterisk_tcp_5060_listening"`
-	AsteriskUDP5060Listening bool     `json:"asterisk_udp_5060_listening"`
-	AsteriskTCP5061Listening bool     `json:"asterisk_tcp_5061_listening"`
-	AsteriskUDP5061Listening bool     `json:"asterisk_udp_5061_listening"`
-	LocalFirewallDetected    bool     `json:"local_firewall_detected"`
-	HostFirewallRulesReady   bool     `json:"host_firewall_rules_ready"`
-	FirewallProviderRules    bool     `json:"firewall_provider_rules_present"`
-	CloudFirewallState       string   `json:"cloud_firewall_state"`
-	IPTablesOutputPolicy     string   `json:"iptables_output_policy"`
-	NFTablesDetected         bool     `json:"nftables_detected"`
-	HostEgressPolicyState    string   `json:"host_egress_policy_state"`
-	EffectiveEgressState     string   `json:"effective_egress_state"`
-	SIPSignalingRulesReady   bool     `json:"sip_signaling_rules_ready"`
-	RTPRulesReady            bool     `json:"rtp_rules_ready"`
-	UDPRemotePortConfirmed   bool     `json:"udp_remote_port_confirmed"`
-	Warnings                 []string `json:"warnings"`
-	Blockers                 []string `json:"blockers"`
+	ProviderAddressDNSState            string   `json:"provider_address_dns_state"`
+	ProviderAddressResolvedIPsCount    int      `json:"provider_address_resolved_ips_count"`
+	ProviderAddressResolvesToAllowlist bool     `json:"provider_address_resolves_to_allowlist"`
+	ProviderAddressResolvedIPs         []string `json:"provider_address_resolved_ips"`
+	RequestURIHostDNSState             string   `json:"request_uri_host_dns_state"`
+	RequestURIHostResolvedIPsCount     int      `json:"request_uri_host_resolved_ips_count"`
+	RequestURIHostResolvesToAllowlist  bool     `json:"request_uri_host_resolves_to_allowlist"`
+	RequestURIHostResolvedIPs          []string `json:"request_uri_host_resolved_ips"`
+	OutboundProxyDNSState              string   `json:"outbound_proxy_dns_state"`
+	OutboundProxyResolvesToAllowlist   bool     `json:"outbound_proxy_resolves_to_allowlist"`
+	DNSTimeoutMS                       int      `json:"dns_timeout_ms"`
+	ProviderIPAllowlistCount           int      `json:"provider_ip_allowlist_count"`
+	ProviderIPsConfigured              bool     `json:"provider_ips_configured"`
+	TCP5060TestedCount                 int      `json:"tcp_5060_tested_count"`
+	TCP5060ReachableCount              int      `json:"tcp_5060_reachable_count"`
+	TCP5060AnyReachable                bool     `json:"tcp_5060_any_reachable"`
+	TCP5060ProbeComplete               bool     `json:"tcp_5060_probe_complete"`
+	TCP5061TestedCount                 int      `json:"tcp_5061_tested_count"`
+	TCP5061ReachableCount              int      `json:"tcp_5061_reachable_count"`
+	TCP5061AnyReachable                bool     `json:"tcp_5061_any_reachable"`
+	TCP5061ProbeComplete               bool     `json:"tcp_5061_probe_complete"`
+	UDP5060RouteReady                  bool     `json:"udp_5060_route_ready"`
+	UDP5061RouteReady                  bool     `json:"udp_5061_route_ready"`
+	RTPUDPStart                        int      `json:"rtp_udp_start"`
+	RTPUDPEnd                          int      `json:"rtp_udp_end"`
+	RTPUDPRangeConfigured              bool     `json:"rtp_udp_range_configured"`
+	AsteriskTCP5060Listening           bool     `json:"asterisk_tcp_5060_listening"`
+	AsteriskUDP5060Listening           bool     `json:"asterisk_udp_5060_listening"`
+	AsteriskTCP5061Listening           bool     `json:"asterisk_tcp_5061_listening"`
+	AsteriskUDP5061Listening           bool     `json:"asterisk_udp_5061_listening"`
+	LocalFirewallDetected              bool     `json:"local_firewall_detected"`
+	HostFirewallRulesReady             bool     `json:"host_firewall_rules_ready"`
+	FirewallProviderRules              bool     `json:"firewall_provider_rules_present"`
+	CloudFirewallState                 string   `json:"cloud_firewall_state"`
+	IPTablesOutputPolicy               string   `json:"iptables_output_policy"`
+	NFTablesDetected                   bool     `json:"nftables_detected"`
+	HostEgressPolicyState              string   `json:"host_egress_policy_state"`
+	EffectiveEgressState               string   `json:"effective_egress_state"`
+	SIPSignalingRulesReady             bool     `json:"sip_signaling_rules_ready"`
+	RTPRulesReady                      bool     `json:"rtp_rules_ready"`
+	UDPRemotePortConfirmed             bool     `json:"udp_remote_port_confirmed"`
+	Warnings                           []string `json:"warnings"`
+	Blockers                           []string `json:"blockers"`
 }
 
 func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +75,23 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := networkPreflightResponse{ProviderIPAllowlistCount: len(falePacoProviderIPs), ProviderIPsConfigured: len(falePacoProviderIPs) == 21, Blockers: []string{}, Warnings: []string{}, UDPRemotePortConfirmed: false}
+	response.DNSTimeoutMS = 4000
+	if m, err := dotenv(sipEnv); err == nil {
+		proxyHost, _, _ := net.SplitHostPort(m["FALEPACO_SIP_OUTBOUND_PROXY"])
+		response.ProviderAddressDNSState, response.ProviderAddressResolvedIPs, response.ProviderAddressResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_DOMAIN"], 4*time.Second)
+		response.ProviderAddressResolvedIPsCount = len(response.ProviderAddressResolvedIPs)
+		response.RequestURIHostDNSState, response.RequestURIHostResolvedIPs, response.RequestURIHostResolvesToAllowlist = resolveFalePacoHost(m["FALEPACO_SIP_OUTBOUND_HOST"], 4*time.Second)
+		response.RequestURIHostResolvedIPsCount = len(response.RequestURIHostResolvedIPs)
+		response.OutboundProxyDNSState, _, response.OutboundProxyResolvesToAllowlist = resolveFalePacoHost(proxyHost, 4*time.Second)
+	} else {
+		response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState = "configuration_unavailable", "configuration_unavailable", "configuration_unavailable"
+	}
+	for _, state := range []string{response.ProviderAddressDNSState, response.RequestURIHostDNSState, response.OutboundProxyDNSState} {
+		if state != "resolved" {
+			response.Blockers = append(response.Blockers, "falepaco_dns_"+state)
+			break
+		}
+	}
 	response.TCP5060TestedCount, response.TCP5060ReachableCount = providerTCPReachable(5060)
 	response.TCP5060AnyReachable = response.TCP5060ReachableCount > 0
 	response.TCP5060ProbeComplete = response.TCP5060TestedCount == len(falePacoProviderIPs)
@@ -103,6 +133,62 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 		response.Blockers = append(response.Blockers, "asterisk_rtp_range_not_configured")
 	}
 	jsonOut(w, http.StatusOK, response)
+}
+
+func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "timeout", []string{}, false
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "no such host") {
+			return "no_answer", []string{}, false
+		}
+		return "resolver_error", []string{}, false
+	}
+	allowed := make(map[string]bool, len(falePacoProviderIPs))
+	for _, ip := range falePacoProviderIPs {
+		allowed[ip] = true
+	}
+	set, safe := map[string]bool{}, len(ips) > 0
+	for _, entry := range ips {
+		value := entry.IP.String()
+		set[value] = true
+		if !allowed[value] {
+			safe = false
+		}
+	}
+	result := make([]string, 0, len(set))
+	for ip := range set {
+		result = append(result, ip)
+	}
+	sort.Strings(result)
+	if len(result) == 0 {
+		return "no_answer", result, false
+	}
+	if !safe {
+		return "outside_allowlist", result, false
+	}
+	return "resolved", result, true
+}
+
+func verifyFalePacoDNS(host string, timeout time.Duration) (string, string) {
+	state, _, allowed := resolveFalePacoHost(host, timeout)
+	if allowed {
+		return "", ""
+	}
+	switch state {
+	case "timeout":
+		return "provider_dns_timeout", "DNS resolution timed out"
+	case "no_answer":
+		return "provider_dns_no_answer", "DNS returned no addresses"
+	case "outside_allowlist":
+		return "provider_dns_outside_allowlist", "DNS answer is outside the Fale Paco allowlist"
+	default:
+		return "provider_dns_error", "DNS resolver failed"
+	}
 }
 
 func providerTCPReachable(port int) (tested, reachable int) {

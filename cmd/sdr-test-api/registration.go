@@ -8,6 +8,7 @@ import (
 	"errors"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -199,8 +200,16 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "registration.enabled must be true before REGISTER testing", "secrets_redacted": true})
 		return
 	}
-	if req.Transport != "tcp" || req.Port != 5060 {
-		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "REGISTER test requires configured TCP transport on port 5060", "secrets_redacted": true})
+	proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
+	for _, item := range []struct{ host, field string }{{m["FALEPACO_SIP_DOMAIN"], "provider_address"}, {m["FALEPACO_SIP_OUTBOUND_HOST"], "request_uri_host"}, {proxyHost, "outbound_proxy"}} {
+		class, summary := verifyFalePacoDNS(item.host, 4*time.Second)
+		if class != "" {
+			jsonOut(w, 502, map[string]any{"error": "registration_test_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": item.field, "apply_error_summary": summary, "secrets_redacted": true})
+			return
+		}
+	}
+	if (req.Transport != "tcp" && req.Transport != "udp") || req.Port != 5060 {
+		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "REGISTER test requires configured TCP or UDP transport on port 5060", "secrets_redacted": true})
 		return
 	}
 	cfg, e := req.ToCanonical()
@@ -216,7 +225,7 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
-	capture, captureOutput, captureErr := startSIPWireCapture()
+	capture, captureOutput, captureErr := startSIPWireCapture(req.Transport)
 	if captureErr != nil {
 		jsonOut(w, 503, map[string]any{"error": "wire_capture_unavailable", "registration_capture_implemented": true, "secrets_redacted": true})
 		return
@@ -243,7 +252,11 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	if applyErr != nil || wire.FinalResponse != "200" {
 		status = 502
 	}
-	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "registration_object_present": registrationObjectPresent, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": state, "registration_apply_error": applyErr != nil, "apply_stage": applyStage, "apply_error_class": applyClass, "apply_error_summary": applySummary,
+	networkProtocolObserved := ""
+	if wire.Initial {
+		networkProtocolObserved = strings.ToUpper(req.Transport)
+	}
+	jsonOut(w, status, map[string]any{"selected_transport": req.Transport, "network_protocol_observed": networkProtocolObserved, "registration_object_present": registrationObjectPresent, "registration_server_uri": m["FALEPACO_SIP_REGISTRATION_SERVER_URI"], "registration_client_uri": m["FALEPACO_SIP_REGISTRATION_CLIENT_URI"], "registration_contact_user": m["FALEPACO_SIP_CONTACT_USER"], "registration_outbound_proxy": req.OutboundProxy, "registration_status": state, "registration_state": state, "registration_apply_error": applyErr != nil, "apply_stage": applyStage, "apply_error_class": applyClass, "apply_error_summary": applySummary,
 		"registration_capture_implemented": true, "registration_initial_request_present": wire.Initial,
 		"registration_first_response": wire.FirstResponse, "registration_first_reason": wire.FirstReason,
 		"registration_challenge_received": wire.Challenge, "registration_challenge_type": wire.ChallengeType,
@@ -254,11 +267,15 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		"registration_final_reason": wire.FinalReason, "provider_server_or_user_agent": wire.Server, "secrets_redacted": true})
 }
 
-func startSIPWireCapture() (*exec.Cmd, *cappedBuffer, error) {
+func startSIPWireCapture(selectedTransport string) (*exec.Cmd, *cappedBuffer, error) {
+	if selectedTransport != "tcp" && selectedTransport != "udp" {
+		return nil, nil, errors.New("unsupported capture transport")
+	}
 	if _, err := exec.LookPath("tcpdump"); err != nil {
 		return nil, nil, err
 	}
-	cmd := exec.Command("tcpdump", "-i", "any", "-l", "-nn", "-s0", "-A", "tcp", "port", "5060")
+	protocol := selectedTransport
+	cmd := exec.Command("tcpdump", "-i", "any", "-l", "-nn", "-s0", "-A", protocol, "port", "5060")
 	buffer := &cappedBuffer{}
 	cmd.Stdout, cmd.Stderr = buffer, io.Discard
 	if err := cmd.Start(); err != nil {

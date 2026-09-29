@@ -46,11 +46,28 @@ components:
         transport: {type: string, enum: [tcp, udp]}
         port: {type: integer}
         registration: {$ref: '#/components/schemas/FalePacoConfigRequest/properties/registration'}
+    NetworkPreflightResponse:
+      type: object
+      properties:
+        provider_address_dns_state: {type: string}
+        provider_address_resolved_ips_count: {type: integer}
+        provider_address_resolves_to_allowlist: {type: boolean}
+        provider_address_resolved_ips: {type: array, items: {type: string}}
+        request_uri_host_dns_state: {type: string}
+        request_uri_host_resolved_ips_count: {type: integer}
+        request_uri_host_resolves_to_allowlist: {type: boolean}
+        request_uri_host_resolved_ips: {type: array, items: {type: string}}
+        outbound_proxy_dns_state: {type: string}
+        outbound_proxy_resolves_to_allowlist: {type: boolean}
+        dns_timeout_ms: {type: integer, example: 4000}
+        warnings: {type: array, items: {type: string}}
+        blockers: {type: array, items: {type: string}}
     RegistrationTestResponse:
       type: object
       required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, secrets_redacted]
       properties:
-        selected_transport: {type: string, example: tcp}
+        selected_transport: {type: string, enum: [tcp, udp], example: tcp}
+        network_protocol_observed: {type: string, enum: [TCP, UDP, ""]}
         registration_object_present: {type: boolean}
         registration_server_uri: {type: string}
         registration_client_uri: {type: string}
@@ -127,7 +144,7 @@ paths:
     put:
       tags: [Fale Paco Configuration]
       summary: Configure Fale Paco
-      description: Save manually entered SIP configuration. Password is write-only; omitted password preserves the existing SIP password.
+      description: Save manually entered SIP configuration. Save validates syntax and the Fale Paco host allowlist without live DNS; apply/preflight perform bounded DNS and IP allowlist checks. Password is write-only; omitted password preserves the existing SIP password.
       security: [{BearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigRequest'}}}}
       responses: {"200": {description: Saved sanitized configuration}, "400": {description: Invalid configuration}, "401": {description: Unauthorized}}
@@ -146,7 +163,11 @@ paths:
       tags: [Fale Paco Configuration]
       summary: Sanitized network and RTP preflight
       security: [{BearerAuth: []}]
-      responses: {"200": {description: Sanitized route/firewall/listener checks}, "401": {description: Unauthorized}}
+      responses:
+        "200":
+          description: Bounded DNS/IP allowlist, route/firewall/listener checks
+          content: {application/json: {schema: {$ref: '#/components/schemas/NetworkPreflightResponse'}}}
+        "401": {description: Unauthorized}
 
   /v1/falepaco/registration:
     get:
@@ -163,7 +184,7 @@ paths:
     post:
       tags: [Fale Paco Registration]
       summary: Test SIP REGISTER
-      description: Captures TCP port 5060 wire traffic, applies the saved registration configuration and validates the REGISTER challenge/final response. Does not place a call.
+      description: Captures SIP traffic on the saved TCP or UDP transport at port 5060. It does not fall back to another transport. Applies the saved registration configuration and validates the REGISTER challenge/final response. Does not place a call.
       security: [{BearerAuth: []}]
       responses:
         "200": {description: Registered, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}

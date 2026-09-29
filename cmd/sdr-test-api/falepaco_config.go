@@ -55,22 +55,105 @@ type falepacoConfigResponse struct {
 	Registration       RegistrationConfig `json:"registration"`
 }
 
+type configValidationError struct {
+	Field string `json:"invalid_field"`
+	Class string `json:"validation_class"`
+}
+
+func (e *configValidationError) Error() string { return e.Class }
+
+var falepacoSaveHosts = map[string]bool{"98034.falepaco.com.br": true, "96678.falepaco.com.br": true}
+var falepacoHostSyntax = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$`)
+
+// validSIPHost performs SAVE-time syntax and strict profile allowlisting only; DNS belongs to APPLY/PREFLIGHT.
 func validSIPHost(h string) error {
-	h = strings.TrimSpace(h)
-	if h == "" || strings.ContainsAny(h, " /\t\r\n") {
-		return errors.New("invalid SIP host")
+	if h == "" || strings.TrimSpace(h) != h || !falepacoHostSyntax.MatchString(h) || strings.Contains(h, "..") {
+		return errors.New("syntax")
 	}
-	if ip := net.ParseIP(h); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified()) {
-		return errors.New("internal SIP host")
+	if net.ParseIP(h) != nil {
+		return errors.New("unsafe_literal_ip")
 	}
-	ips, e := net.LookupIP(h)
-	if e != nil || len(ips) == 0 {
-		return errors.New("SIP host does not resolve")
+	if !falepacoSaveHosts[strings.ToLower(h)] {
+		return errors.New("host_not_allowed")
 	}
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
-			return errors.New("SIP host resolves internal")
+	return nil
+}
+func validateHostField(field, host string) *configValidationError {
+	if err := validSIPHost(host); err != nil {
+		return &configValidationError{Field: field, Class: err.Error()}
+	}
+	return nil
+}
+func hostPort(value string, field string, expectedPort int) (string, *configValidationError) {
+	host, portText, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", &configValidationError{Field: field, Class: "invalid_port"}
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || (expectedPort > 0 && port != expectedPort) {
+		return "", &configValidationError{Field: field, Class: "invalid_port"}
+	}
+	if e := validateHostField(field, host); e != nil {
+		return "", e
+	}
+	return strings.ToLower(host), nil
+}
+func sipURIHost(value, field string, userRequired bool) (string, string, *configValidationError) {
+	if !strings.HasPrefix(strings.ToLower(value), "sip:") || strings.ContainsAny(value, "?#; 	\r\n") {
+		return "", "", &configValidationError{Field: field, Class: "invalid_registration_uri"}
+	}
+	rest := value[4:]
+	user := ""
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		user, rest = rest[:i], rest[i+1:]
+		if user == "" {
+			return "", "", &configValidationError{Field: field, Class: "invalid_registration_uri"}
 		}
+	} else if userRequired {
+		return "", "", &configValidationError{Field: field, Class: "invalid_registration_uri"}
+	}
+	host, problem := hostPort(rest, field, 5060)
+	if problem != nil {
+		if problem.Class == "invalid_port" {
+			problem.Class = "invalid_registration_uri"
+		}
+		return "", "", problem
+	}
+	return host, user, nil
+}
+func validateFalePacoSave(in falepacoConfigRequest) *configValidationError {
+	for _, item := range []struct{ field, host string }{{"provider_address", in.ProviderAddress}, {"request_uri_host", in.RequestURIHost}} {
+		if e := validateHostField(item.field, item.host); e != nil {
+			return e
+		}
+	}
+	proxyHost, e := hostPort(in.OutboundProxy, "outbound_proxy", in.Port)
+	if e != nil {
+		return e
+	}
+	if in.Port < 1 || in.Port > 65535 {
+		return &configValidationError{Field: "port", Class: "invalid_port"}
+	}
+	if in.Transport != "tcp" && in.Transport != "udp" {
+		return &configValidationError{Field: "transport", Class: "syntax"}
+	}
+	if !in.Registration.Enabled {
+		return nil
+	}
+	serverHost, _, e := sipURIHost(in.Registration.ServerURI, "registration.server_uri", false)
+	if e != nil {
+		return e
+	}
+	clientHost, user, e := sipURIHost(in.Registration.ClientURI, "registration.client_uri", true)
+	if e != nil {
+		return e
+	}
+	realmErr := validateHostField("registration.realm", in.Registration.Realm)
+	if realmErr != nil {
+		return realmErr
+	}
+	if proxyHost != strings.ToLower(in.ProviderAddress) || serverHost != strings.ToLower(in.RequestURIHost) || clientHost != strings.ToLower(in.RequestURIHost) || strings.ToLower(in.Registration.Realm) != strings.ToLower(in.RequestURIHost) || user != in.Extension {
+		return &configValidationError{Field: "registration", Class: "invalid_registration_uri"}
 	}
 	return nil
 }
@@ -248,16 +331,18 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 		}
 		password = *in.Password
 	}
-	if in.ProviderAddress == "" || in.RequestURIHost == "" || in.OutboundProxy == "" || in.Username == "" || in.Extension == "" || password == "" || in.CallerID == "" || (strings.ToLower(in.Transport) != "tcp" && strings.ToLower(in.Transport) != "udp") || in.Port != 5060 {
+	if in.ProviderAddress == "" || in.RequestURIHost == "" || in.OutboundProxy == "" || in.Username == "" || in.Extension == "" || password == "" || in.CallerID == "" || (strings.ToLower(in.Transport) != "tcp" && strings.ToLower(in.Transport) != "udp") {
 		jsonOut(w, 400, map[string]string{"error": "invalid_configuration"})
 		return
 	}
+	if in.Port != 5060 {
+		jsonOut(w, 400, map[string]any{"error": "invalid_sip_host", "invalid_field": "port", "validation_class": "invalid_port"})
+		return
+	}
 	in.Transport = strings.ToLower(in.Transport)
-	for _, h := range []string{in.ProviderAddress, in.RequestURIHost, strings.Split(in.OutboundProxy, ":")[0]} {
-		if e := validSIPHost(h); e != nil {
-			jsonOut(w, 400, map[string]string{"error": "invalid_sip_host"})
-			return
-		}
+	if validation := validateFalePacoSave(in); validation != nil {
+		jsonOut(w, 400, map[string]any{"error": "invalid_sip_host", "invalid_field": validation.Field, "validation_class": validation.Class})
+		return
 	}
 	m := falepacoEnv(in, password)
 	if e := atomicDotenvWrite(m); e != nil {
@@ -297,6 +382,14 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 		stage, class, summary := safeApplyError(e, m["FALEPACO_SIP_PASSWORD"])
 		jsonOut(w, 400, map[string]any{"error": "configuration_invalid", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
 		return
+	}
+	proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
+	for _, item := range []struct{ host, field string }{{m["FALEPACO_SIP_DOMAIN"], "provider_address"}, {m["FALEPACO_SIP_OUTBOUND_HOST"], "request_uri_host"}, {proxyHost, "outbound_proxy"}} {
+		class, summary := verifyFalePacoDNS(item.host, 4*time.Second)
+		if class != "" {
+			jsonOut(w, 502, map[string]any{"error": "sip_apply_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": item.field, "apply_error_summary": summary, "secrets_redacted": true})
+			return
+		}
 	}
 	cfg.DeferRegistrationCheck = true
 	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))

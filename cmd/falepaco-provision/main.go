@@ -17,6 +17,7 @@ import (
 
 const runtimeEnvPath = "/root/agentic-voice-sdr/.runtime-secrets/falepaco.env"
 const canonicalDomain = "98034.falepaco.com.br"
+const canonicalTransport = "tcp"
 
 type runtimeCredentials struct {
 	domain, username, extension, password string
@@ -50,7 +51,7 @@ func loadRuntimeCredentials(ctx context.Context, path string) (runtimeCredential
 
 func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
 	return httpapi.SIPConfigRequest{
-		Provider: "falepaco", Name: "falepaco", Host: c.domain, Port: 5060, Transport: "udp",
+		Provider: "falepaco", Name: "falepaco", Host: c.domain, Port: 5060, Transport: canonicalTransport,
 		Registrar: c.domain,
 		Auth:      httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
 		FromUser:  c.extension, RegistrationRequired: false, Enabled: true,
@@ -125,6 +126,7 @@ func run() int {
 	fmt.Println("configured_host=" + canonical.Host)
 	fmt.Println("configured_username=" + canonical.AuthUsername)
 	fmt.Println("configured_extension=" + canonical.FromUser)
+	fmt.Println("configured_transport=" + string(canonical.Transport))
 	fmt.Println("transport=" + string(canonical.Transport))
 	fmt.Printf("port=%d\n", canonical.Port)
 	fmt.Println("aor_contact=sip:" + canonical.Host + ":5060")

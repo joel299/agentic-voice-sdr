@@ -100,6 +100,13 @@ func TestFalePacoSaveValidationIsDNSIndependentAndStrictlyAllowlisted(t *testing
 	if got := validateFalePacoSave(cfg); got != nil {
 		t.Fatalf("approved config should validate without live DNS: %+v", got)
 	}
+	// Candidate B changes only the registrar/client domain; retain observed auth realm.
+	cfg.RequestURIHost = "98034.falepaco.com.br"
+	cfg.Registration.ServerURI = "sip:98034.falepaco.com.br:5060"
+	cfg.Registration.ClientURI = "sip:100@98034.falepaco.com.br:5060"
+	if got := validateFalePacoSave(cfg); got != nil {
+		t.Fatalf("canonical registrar must allow preserving independent observed realm: %+v", got)
+	}
 	cfg.ProviderAddress = "example.com"
 	if got := validateFalePacoSave(cfg); got == nil || got.Field != "provider_address" || got.Class != "host_not_allowed" {
 		t.Fatalf("external host should be rejected precisely: %+v", got)

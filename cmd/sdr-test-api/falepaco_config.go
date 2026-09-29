@@ -152,7 +152,7 @@ func validateFalePacoSave(in falepacoConfigRequest) *configValidationError {
 	if realmErr != nil {
 		return realmErr
 	}
-	if proxyHost != strings.ToLower(in.ProviderAddress) || serverHost != strings.ToLower(in.RequestURIHost) || clientHost != strings.ToLower(in.RequestURIHost) || strings.ToLower(in.Registration.Realm) != strings.ToLower(in.RequestURIHost) || user != in.Extension {
+	if proxyHost != strings.ToLower(in.ProviderAddress) || serverHost != strings.ToLower(in.RequestURIHost) || clientHost != strings.ToLower(in.RequestURIHost) || user != in.Extension {
 		return &configValidationError{Field: "registration", Class: "invalid_registration_uri"}
 	}
 	return nil

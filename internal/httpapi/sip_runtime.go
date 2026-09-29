@@ -57,8 +57,14 @@ func (p *sipDestinationPolicy) PinConfig(ctx context.Context, cfg sip.TrunkConfi
 		}
 	}
 	if cfg.OutboundProxy != "" {
-		if cfg.OutboundProxyNetworkAddress, err = p.pinHostPort(ctx, cfg.OutboundProxy); err != nil {
-			return sip.TrunkConfig{}, fmt.Errorf("outbound proxy destination rejected: %w", err)
+		resolvedProxy, proxyErr := p.pinHostPort(ctx, cfg.OutboundProxy)
+		if proxyErr != nil {
+			return sip.TrunkConfig{}, fmt.Errorf("outbound proxy destination rejected: %w", proxyErr)
+		}
+		if cfg.Provider == "falepaco" {
+			cfg.OutboundProxyNetworkAddress = ""
+		} else {
+			cfg.OutboundProxyNetworkAddress = resolvedProxy
 		}
 	}
 	return cfg, nil

@@ -18,6 +18,7 @@ import (
 const runtimeEnvPath = "/root/agentic-voice-sdr/.runtime-secrets/falepaco.env"
 const canonicalDomain = "98034.falepaco.com.br"
 const canonicalOutboundHost = "96678.falepaco.com.br"
+const canonicalOutboundProxy = "98034.falepaco.com.br:5060"
 const canonicalTransport = "tcp"
 
 type runtimeCredentials struct {
@@ -57,10 +58,11 @@ func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
 	}
 	return httpapi.SIPConfigRequest{
 		Provider: "falepaco", Name: "falepaco", Host: outboundHost, Port: 5060, Transport: canonicalTransport,
-		Registrar:  outboundHost,
-		FromDomain: outboundHost,
-		Auth:       httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
-		FromUser:   c.extension, RegistrationRequired: false, Enabled: true,
+		Registrar:     outboundHost,
+		OutboundProxy: canonicalOutboundProxy,
+		FromDomain:    outboundHost,
+		Auth:          httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
+		FromUser:      c.extension, RegistrationRequired: false, Enabled: true,
 	}
 }
 

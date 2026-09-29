@@ -52,7 +52,7 @@ aors=trunk-{{ .Name }}-aor
 {{ if eq .Provider "falepaco" }}direct_media=no{{ end }}
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
 
 {{ if .RegistrationRequired }}[trunk-{{ .Name }}-reg]
@@ -60,7 +60,7 @@ type=registration
 transport=transport-{{ .Transport }}
 {{ if eq .AuthType "userpass" }}outbound_auth=trunk-{{ .Name }}-auth{{ end }}
 server_uri=sip:{{ .RegistrarOrHost }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
 client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 retry_interval=60
 {{ end }}
@@ -148,6 +148,9 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regNetwork = regHost
 	}
 	proxyNetwork := cfg.OutboundProxyNetworkAddress
+	if cfg.Provider == "falepaco" {
+		proxyNetwork = ""
+	}
 	if proxyNetwork == "" {
 		proxyNetwork = cfg.OutboundProxy
 	}

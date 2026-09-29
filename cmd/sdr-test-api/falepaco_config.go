@@ -266,6 +266,16 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.falepacoGet(w, r)
 }
+func asteriskParameter(output, name string) string {
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == name {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
+}
+
 func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
@@ -307,6 +317,17 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 502, map[string]any{"error": "asterisk_readback_failed", "apply_stage": "endpoint", "apply_error_class": "pjsip_endpoint_readback_failed", "apply_error_summary": "trunk endpoint missing from Asterisk readback", "secrets_redacted": true})
 		return
 	}
+	if !strings.Contains(string(out), "trunk-falepaco-auth") {
+		jsonOut(w, 502, map[string]any{"error": "asterisk_auth_readback_failed", "apply_stage": "auth", "apply_error_class": "pjsip_auth_readback_failed", "apply_error_summary": "configured auth object missing from endpoint readback", "secrets_redacted": true})
+		return
+	}
+	authOut, authErr := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show auth trunk-falepaco-auth").CombinedOutput()
+	authText := string(authOut)
+	authPresent := authErr == nil && strings.Contains(authText, "Auth:  trunk-falepaco-auth/"+req.Auth.Username) && asteriskParameter(authText, "auth_type") == "userpass" && asteriskParameter(authText, "username") == req.Auth.Username && asteriskParameter(authText, "realm") == req.RegistrationRealm
+	if !authPresent {
+		jsonOut(w, 502, map[string]any{"error": "asterisk_auth_readback_failed", "apply_stage": "auth", "apply_error_class": "pjsip_auth_readback_mismatch", "apply_error_summary": "auth object username, type or realm did not match configured values", "secrets_redacted": true})
+		return
+	}
 	transportName := "transport-" + req.Transport
 	transportOut, transportErr := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show transport "+transportName).CombinedOutput()
 	if transportErr != nil || !strings.Contains(string(transportOut), transportName) {
@@ -322,7 +343,7 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "outbound_auth_reference": "trunk-falepaco-auth", "auth_username": req.Auth.Username, "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "registration_object_present": registrationPresent, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
+	jsonOut(w, 200, map[string]any{"applied": true, "credential_file_loaded_fresh": true, "endpoint_active": report.EndpointActive, "auth_object_present": authPresent, "auth_username": req.Auth.Username, "auth_realm": req.RegistrationRealm, "outbound_auth_reference": "trunk-falepaco-auth", "transport": req.Transport, "request_uri_host": req.Host, "outbound_proxy": req.OutboundProxy, "caller_id": req.CallerID, "registration_required": req.RegistrationRequired, "registration_object_present": registrationPresent, "transport_object": transportName, "transport_object_present": true, "secrets_redacted": true})
 }
 
 var applyCredentialPattern = regexp.MustCompile(`(?i)(password|secret|authorization|proxy-authorization|digest response|nonce|cnonce|opaque)(\s*[=:]\s*)[^,;\s]+`)

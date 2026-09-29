@@ -80,6 +80,35 @@ components:
         registration_final_reason: {type: string, example: OK}
         provider_server_or_user_agent: {type: string}
         secrets_redacted: {type: boolean, enum: [true]}
+    FalePacoApplyResponse:
+      type: object
+      required: [applied, credential_file_loaded_fresh, endpoint_active, auth_object_present, auth_username, auth_realm, outbound_auth_reference, transport, request_uri_host, outbound_proxy, caller_id, registration_required, registration_object_present, transport_object, transport_object_present, secrets_redacted]
+      properties:
+        applied: {type: boolean, enum: [true]}
+        credential_file_loaded_fresh: {type: boolean, enum: [true]}
+        endpoint_active: {type: boolean}
+        auth_object_present: {type: boolean}
+        auth_username: {type: string}
+        auth_realm: {type: string}
+        outbound_auth_reference: {type: string}
+        transport: {type: string, enum: [tcp, udp]}
+        request_uri_host: {type: string}
+        outbound_proxy: {type: string}
+        caller_id: {type: string}
+        registration_required: {type: boolean}
+        registration_object_present: {type: boolean}
+        transport_object: {type: string}
+        transport_object_present: {type: boolean}
+        secrets_redacted: {type: boolean, enum: [true]}
+    ApplyErrorResponse:
+      type: object
+      required: [error, apply_stage, apply_error_class, apply_error_summary, secrets_redacted]
+      properties:
+        error: {type: string}
+        apply_stage: {type: string}
+        apply_error_class: {type: string}
+        apply_error_summary: {type: string}
+        secrets_redacted: {type: boolean, enum: [true]}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
   /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
@@ -108,7 +137,10 @@ paths:
       summary: Apply Fale Paco configuration
       description: Read fresh runtime credentials, render/apply PJSIP, reload Asterisk, and read back. Does not place a call.
       security: [{BearerAuth: []}]
-      responses: {"200": {description: Applied and read back}, "401": {description: Unauthorized}, "502": {description: Asterisk failure}}
+      responses:
+        "200": {description: Applied and read back with auth/transport/registration readback, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoApplyResponse'}}}}
+        "401": {description: Unauthorized}
+        "502": {description: Asterisk failure, content: {application/json: {schema: {$ref: '#/components/schemas/ApplyErrorResponse'}}}}
   /v1/falepaco/network/preflight:
     get:
       tags: [Fale Paco Configuration]

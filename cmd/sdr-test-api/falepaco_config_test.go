@@ -173,3 +173,10 @@ func TestSavedFalepacoUsesPersistedTransport(t *testing.T) {
 		t.Fatalf("canonical transport=%s", cfg.Transport)
 	}
 }
+
+func TestAsteriskAuthReadbackParsesSemanticFields(t *testing.T) {
+	output := "Auth:  trunk-falepaco-auth/100\n auth_type : userpass\n username : 100\n realm : 96678.falepaco.com.br\n password=[REDACTED]\n"
+	if asteriskParameter(output, "auth_type") != "userpass" || asteriskParameter(output, "username") != "100" || asteriskParameter(output, "realm") != "96678.falepaco.com.br" {
+		t.Fatal("auth readback fields were not parsed")
+	}
+}

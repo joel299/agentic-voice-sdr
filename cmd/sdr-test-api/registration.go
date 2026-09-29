@@ -19,22 +19,27 @@ import (
 )
 
 type sipWireEvidence struct {
-	Initial                              bool
-	FirstResponse, FirstReason           string
-	Challenge                            bool
-	ChallengeType, Realm, Algorithm, QOP string
-	Authenticated                        bool
-	AuthUsername, AuthRealm, AuthURI     string
-	DigestMatches                        *bool
-	FinalResponse, FinalReason, Server   string
-	CapturePacketsPresent                bool
-	CaptureMode, TCPReassembly           string
-	CaptureErrorClass                    string
-	CaptureWindowMS                      int64
-	FirstWireActivityMS                  *int64
-	AuthenticatedRequestMS               *int64
-	FinalResponseMS                      *int64
-	TemporaryPCAPDeleted                 bool
+	Initial                                             bool
+	FirstResponse, FirstReason                          string
+	Challenge                                           bool
+	ChallengeType, Realm, Algorithm, QOP                string
+	Authenticated                                       bool
+	AuthUsername, AuthRealm, AuthURI                    string
+	DigestMatches                                       *bool
+	FinalResponse, FinalReason, Server                  string
+	RequestURI, FromURI, ToURI, ContactURI              string
+	ViaSentBy, Expires, RouteURI                        string
+	SourceIPPort, RemoteIPPort                          string
+	FinalWarningHeader, FinalReasonHeader               string
+	FinalWarningHeaderPresent, FinalReasonHeaderPresent bool
+	CapturePacketsPresent                               bool
+	CaptureMode, TCPReassembly                          string
+	CaptureErrorClass                                   string
+	CaptureWindowMS                                     int64
+	FirstWireActivityMS                                 *int64
+	AuthenticatedRequestMS                              *int64
+	FinalResponseMS                                     *int64
+	TemporaryPCAPDeleted                                bool
 }
 
 var digestValue = regexp.MustCompile(`(?i)(cnonce|username|algorithm|response|realm|nonce|uri|qop|nc)\s*=\s*(?:"([^"]*)"|([^,\s]+))`)

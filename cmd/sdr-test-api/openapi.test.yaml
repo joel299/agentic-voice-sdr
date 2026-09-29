@@ -80,6 +80,19 @@ components:
         registration_client_uri: {type: string}
         registration_contact_user: {type: string}
         registration_outbound_proxy: {type: string}
+        register_request_uri: {type: string}
+        register_from_uri: {type: string}
+        register_to_uri: {type: string}
+        register_contact_uri: {type: string}
+        register_via_sent_by: {type: string}
+        register_expires: {type: string}
+        register_route_uri: {type: string}
+        register_source_ip_port: {type: string}
+        register_remote_ip_port: {type: string}
+        final_warning_header_present: {type: boolean}
+        final_warning_header: {type: string}
+        final_reason_header_present: {type: boolean}
+        final_reason_header: {type: string}
         registration_status: {type: string, enum: [Registered, Rejected, NoWireActivity, TriggerFailed, Pending, ApplyFailed, LocalError], example: Registered}
         registration_state: {type: string}
         registration_pre_state: {type: string}

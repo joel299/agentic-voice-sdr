@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func digestResponseForTest(username, realm, secret, uri, nonce, nc, cnonce, qop 
 
 func syntheticSIPMessages(finalStatus string) (string, string, string, string) {
 	crlf := "\r\n"
-	initial := strings.Join([]string{"REGISTER " + testSIPURI + " SIP/2.0", "Via: SIP/2.0/TCP client.invalid;branch=z9hG4bK-one", "From: <sip:100@" + testSIPRealm + ">", "To: <sip:100@" + testSIPRealm + ">", "Call-ID: test-register", "CSeq: 1 REGISTER", "Content-Length: 0", "", ""}, crlf)
+	initial := strings.Join([]string{"REGISTER " + testSIPURI + " SIP/2.0", "Via: SIP/2.0/TCP client.invalid:5060;branch=z9hG4bK-one", "From: <sip:100@" + testSIPRealm + ">", "To: <sip:100@" + testSIPRealm + ">", "Contact: <sip:100@client.invalid:5060>", "Route: <sip:98034.falepaco.com.br:5060;transport=tcp;lr>", "Expires: 300", "Call-ID: test-register", "CSeq: 1 REGISTER", "Content-Length: 0", "", ""}, crlf)
 	challenge := strings.Join([]string{"SIP/2.0 401 Unauthorized", "Via: SIP/2.0/TCP provider.invalid;branch=z9hG4bK-one", "Call-ID: test-register", "CSeq: 1 REGISTER", "WWW-Authenticate: Digest realm=\"" + testSIPRealm + "\", nonce=\"nonce-test\", qop=\"auth\", algorithm=MD5", "Server: FreeSWITCH", "Content-Length: 0", "", ""}, crlf)
 	response := digestResponseForTest(testSIPUser, testSIPRealm, testSIPSecret, testSIPURI, "nonce-test", "00000001", "clientnonce", "auth")
 	authorizationHeader := "Author" + "ization: Digest user" + "name=\"" + testSIPUser + "\", realm=\"" + testSIPRealm + "\", nonce=\"nonce-test\", uri=\"" + testSIPURI + "\", response=\"" + response + "\", algorithm=MD5, qop=auth, nc=00000001, cnonce=\"clientnonce\""
@@ -40,7 +41,7 @@ func syntheticSIPMessages(finalStatus string) (string, string, string, string) {
 	final := ""
 	if finalStatus != "" {
 		reason := map[string]string{"200": "OK", "403": "Forbidden"}[finalStatus]
-		final = strings.Join([]string{"SIP/2.0 " + finalStatus + " " + reason, "Via: SIP/2.0/TCP provider.invalid;branch=z9hG4bK-two", "Call-ID: test-register", "CSeq: 2 REGISTER", "Server: FreeSWITCH", "Content-Length: 0", "", ""}, crlf)
+		final = strings.Join([]string{"SIP/2.0 " + finalStatus + " " + reason, "Via: SIP/2.0/TCP provider.invalid;branch=z9hG4bK-two", "Call-ID: test-register", "CSeq: 2 REGISTER", "Warning: 399 provider.invalid restricted", "Reason: SIP;cause=403;text=forbidden", "Server: FreeSWITCH", "Content-Length: 0", "", ""}, crlf)
 	}
 	return initial, challenge, authenticated, final
 }
@@ -134,6 +135,17 @@ func TestTCPPCAPReassemblyRecoversFragmentedREGISTER401AuthAnd200(t *testing.T) 
 	}
 	if evidence.CaptureMode != "pcap_tcp_reassembly" || evidence.TCPReassembly != "PASS" || evidence.FirstWireActivityMS == nil || evidence.AuthenticatedRequestMS == nil || evidence.FinalResponseMS == nil {
 		t.Fatalf("missing timing/reassembly evidence: %+v", evidence)
+	}
+	if evidence.RequestURI != testSIPURI || evidence.FromURI != "sip:100@"+testSIPRealm || evidence.ToURI != evidence.FromURI || evidence.ContactURI != "sip:100@client.invalid:5060" || evidence.ViaSentBy != "client.invalid:5060" || evidence.Expires != "300" || evidence.RouteURI != "sip:98034.falepaco.com.br:5060;transport=tcp;lr" {
+		t.Fatalf("missing sanitized REGISTER identity metadata: %+v", evidence)
+	}
+	if evidence.SourceIPPort != "192.0.2.10:40000" || evidence.RemoteIPPort != "198.51.100.20:5060" || !evidence.FinalWarningHeaderPresent || evidence.FinalWarningHeader != "399 provider.invalid restricted" || !evidence.FinalReasonHeaderPresent {
+		t.Fatalf("missing network/final response metadata: %+v", evidence)
+	}
+	for _, forbidden := range []string{testSIPSecret, "nonce-test", "clientnonce", "response=", "Authorization:"} {
+		if strings.Contains(fmt.Sprintf("%+v", evidence), forbidden) {
+			t.Fatalf("sensitive auth material leaked in evidence: %q", forbidden)
+		}
 	}
 	if !(*evidence.FirstWireActivityMS < *evidence.AuthenticatedRequestMS && *evidence.AuthenticatedRequestMS < *evidence.FinalResponseMS) {
 		t.Fatalf("wire event timestamps are not chronologically correlated: %+v", evidence)

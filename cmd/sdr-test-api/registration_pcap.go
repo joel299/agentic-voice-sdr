@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -22,11 +23,12 @@ const maxRegistrationPCAPBytes = 48 << 20
 const maxRegistrationTCPPackets = 30000
 
 type sipPCAPMessage struct {
-	startLine string
-	headers   map[string]string
-	offset    int
-	firstSeen time.Time
-	seen      time.Time
+	startLine  string
+	headers    map[string]string
+	requestURI string
+	offset     int
+	firstSeen  time.Time
+	seen       time.Time
 }
 
 type sipCaptureSpan struct {
@@ -170,6 +172,12 @@ func takeSIPMessage(data []byte) (sipPCAPMessage, []byte, bool) {
 			return empty, data, false
 		}
 		message := sipPCAPMessage{startLine: lines[0], headers: headers, offset: startOffset}
+		if strings.HasPrefix(lines[0], "REGISTER ") {
+			parts := strings.Fields(lines[0])
+			if len(parts) > 1 {
+				message.requestURI = parts[1]
+			}
+		}
 		return message, append([]byte(nil), data[total:]...), true
 	}
 	return empty, data, false
@@ -332,6 +340,7 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 	var packetCount int
 	var capturePacketsPresent, sawTCP, sawUDP bool
 	var firstWireActivity time.Time
+	var sourceIPPort, remoteIPPort string
 	for {
 		data, ci, readErr := reader.ReadPacketData()
 		if errors.Is(readErr, io.EOF) {
@@ -375,6 +384,10 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 		sawTCP = true
 		if !ci.Timestamp.Before(captureMarker) && len(tcp.Payload) > 0 {
 			capturePacketsPresent = true
+			if sourceIPPort == "" {
+				sourceIPPort = net.JoinHostPort(network.NetworkFlow().Src().String(), strconv.Itoa(int(tcp.SrcPort)))
+				remoteIPPort = net.JoinHostPort(network.NetworkFlow().Dst().String(), strconv.Itoa(int(tcp.DstPort)))
+			}
 			if firstWireActivity.IsZero() || ci.Timestamp.Before(firstWireActivity) {
 				firstWireActivity = ci.Timestamp
 			}
@@ -388,6 +401,7 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 		}
 	}
 	evidence.CapturePacketsPresent = capturePacketsPresent && packetCount > 0
+	evidence.SourceIPPort, evidence.RemoteIPPort = sourceIPPort, remoteIPPort
 	if sawTCP {
 		evidence.CaptureMode, evidence.TCPReassembly = "pcap_tcp_reassembly", "PASS"
 	}
@@ -428,6 +442,13 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 			proxyAuth, hasProxyAuthorization := message.headers["proxy-authorization"]
 			if !hasAuthorization && !hasProxyAuthorization {
 				evidence.Initial = true
+				evidence.RequestURI = message.requestURI
+				evidence.FromURI = sipHeaderURI(message.headers["from"])
+				evidence.ToURI = sipHeaderURI(message.headers["to"])
+				evidence.ContactURI = sipHeaderURI(message.headers["contact"])
+				evidence.ViaSentBy = sipViaSentBy(message.headers["via"])
+				evidence.Expires = sanitizeSIPHeader(message.headers["expires"])
+				evidence.RouteURI = sipHeaderURI(message.headers["route"])
 			}
 			if callID == currentCallID && currentCallID != "" && (hasAuthorization || hasProxyAuthorization) {
 				evidence.Authenticated = true
@@ -470,6 +491,12 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 		statusCode, _ := strconv.Atoi(code)
 		if statusCode >= 200 && code != "401" && code != "407" {
 			evidence.FinalResponse, evidence.FinalReason = code, reason
+			if warning, ok := message.headers["warning"]; ok {
+				evidence.FinalWarningHeaderPresent, evidence.FinalWarningHeader = true, sanitizeSIPHeader(warning)
+			}
+			if headerReason, ok := message.headers["reason"]; ok {
+				evidence.FinalReasonHeaderPresent, evidence.FinalReasonHeader = true, sanitizeSIPHeader(headerReason)
+			}
 			evidence.FinalResponseMS = durationMillisPtr(message.seen.Sub(attemptStart))
 		}
 		if server := message.headers["server"]; server != "" {
@@ -480,6 +507,37 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 		}
 	}
 	return evidence, nil
+}
+
+func sipHeaderURI(value string) string {
+	start, end := strings.Index(value, "<"), strings.Index(value, ">")
+	if start >= 0 && end > start {
+		return sanitizeSIPHeader(value[start+1 : end])
+	}
+	value = strings.TrimSpace(strings.SplitN(value, ";", 2)[0])
+	return sanitizeSIPHeader(strings.Trim(value, "<> \\t\\\""))
+}
+
+func sipViaSentBy(value string) string {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return ""
+	}
+	return sanitizeSIPHeader(strings.SplitN(fields[1], ";", 2)[0])
+}
+
+func sanitizeSIPHeader(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) > 256 {
+		value = value[:256]
+	}
+	return value
 }
 
 func sipCSeqSequence(value string) string {
@@ -536,6 +594,19 @@ func classifyRegistrationPCAPError(err error) string {
 
 func registrationWireFields(wire sipWireEvidence) map[string]any {
 	return map[string]any{
+		"register_request_uri":                       wire.RequestURI,
+		"register_from_uri":                          wire.FromURI,
+		"register_to_uri":                            wire.ToURI,
+		"register_contact_uri":                       wire.ContactURI,
+		"register_via_sent_by":                       wire.ViaSentBy,
+		"register_expires":                           wire.Expires,
+		"register_route_uri":                         wire.RouteURI,
+		"register_source_ip_port":                    wire.SourceIPPort,
+		"register_remote_ip_port":                    wire.RemoteIPPort,
+		"final_warning_header_present":               wire.FinalWarningHeaderPresent,
+		"final_warning_header":                       wire.FinalWarningHeader,
+		"final_reason_header_present":                wire.FinalReasonHeaderPresent,
+		"final_reason_header":                        wire.FinalReasonHeader,
 		"registration_initial_request_present":       wire.Initial,
 		"registration_first_response":                wire.FirstResponse,
 		"registration_first_reason":                  wire.FirstReason,

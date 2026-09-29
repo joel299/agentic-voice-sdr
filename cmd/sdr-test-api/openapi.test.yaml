@@ -46,6 +46,40 @@ components:
         transport: {type: string, enum: [tcp, udp]}
         port: {type: integer}
         registration: {$ref: '#/components/schemas/FalePacoConfigRequest/properties/registration'}
+    RegistrationTestResponse:
+      type: object
+      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, secrets_redacted]
+      properties:
+        selected_transport: {type: string, example: tcp}
+        registration_object_present: {type: boolean}
+        registration_server_uri: {type: string}
+        registration_client_uri: {type: string}
+        registration_contact_user: {type: string}
+        registration_outbound_proxy: {type: string}
+        registration_status: {type: string, example: Registered}
+        registration_state: {type: string}
+        registration_apply_error: {type: boolean}
+        apply_stage: {type: string}
+        apply_error_class: {type: string}
+        apply_error_summary: {type: string}
+        registration_capture_implemented: {type: boolean, example: true}
+        registration_initial_request_present: {type: boolean}
+        registration_first_response: {type: [string, "null"], example: "401"}
+        registration_first_reason: {type: [string, "null"], example: Unauthorized}
+        registration_challenge_received: {type: boolean}
+        registration_challenge_type: {type: string, example: "401"}
+        registration_realm: {type: string, example: 96678.falepaco.com.br}
+        registration_algorithm: {type: string, example: MD5}
+        registration_qop: {type: string, example: auth}
+        registration_authenticated_request_sent: {type: boolean}
+        registration_auth_username: {type: string, example: "100"}
+        registration_auth_realm: {type: string, example: 96678.falepaco.com.br}
+        registration_auth_uri: {type: string}
+        registration_digest_matches_runtime_secret: {type: [boolean, "null"]}
+        registration_final_response: {type: string, example: "200"}
+        registration_final_reason: {type: string, example: OK}
+        provider_server_or_user_agent: {type: string}
+        secrets_redacted: {type: boolean, enum: [true]}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
   /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
@@ -58,7 +92,7 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
       responses: {"200": {description: JWT issued}, "400": {description: Missing credentials}, "401": {description: Invalid credentials}, "429": {description: Rate limit}}
   /v1/auth/me:
-    get: {tags: [Authentication], security: [{BearerAuth: []}], responses: {"200": {description: Authenticated}, "401": {description: Unauthorized}}}
+    get: {tags: [Authentication], summary: Validate login, security: [{BearerAuth: []}], responses: {"200": {description: Authenticated}, "401": {description: Unauthorized}}}
   /v1/falepaco/config:
     get: {tags: [Fale Paco Configuration], summary: Get Fale Paco configuration, security: [{BearerAuth: []}], responses: {"200": {description: Sanitized configuration, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigResponse'}}}}, "401": {description: Unauthorized}}}
     put:
@@ -99,7 +133,10 @@ paths:
       summary: Test SIP REGISTER
       description: Captures TCP port 5060 wire traffic, applies the saved registration configuration and validates the REGISTER challenge/final response. Does not place a call.
       security: [{BearerAuth: []}]
-      responses: {"200": {description: Registered}, "401": {description: Unauthorized}, "502": {description: Registration rejected or unavailable}}
+      responses:
+        "200": {description: Registered, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}
+        "401": {description: Unauthorized}
+        "502": {description: Registration rejected or unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}
   /v1/test/falepaco/call:
     post:
       tags: [Fale Paco Test]

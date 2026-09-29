@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -135,7 +136,7 @@ func probeTCPAddresses(port int, dial func(context.Context, string, string) (net
 
 func inspectHostEgressPolicy() (string, bool, string) {
 	policy := "unknown"
-	if out, err := exec.Command("iptables", "-S", "OUTPUT").Output(); err == nil {
+	if out, err := exec.Command("iptables", "-S").Output(); err == nil {
 		policy = iptablesEgressState(string(out))
 	}
 	nftDetected := false
@@ -162,14 +163,31 @@ func inspectHostEgressPolicy() (string, bool, string) {
 }
 
 func nftBlocksFalePaco(rules string) bool {
-	if !strings.Contains(rules, "hook output") {
-		return false
-	}
-	for _, ip := range falePacoProviderIPs {
-		if strings.Contains(rules, "ip daddr "+ip) || strings.Contains(rules, "ip daddr 177.11.49.0/24") {
+	for _, line := range strings.Split(rules, "\n") {
+		if !strings.Contains(line, "hook output") && !strings.Contains(line, "output_") {
 			continue
 		}
-		if strings.Contains(rules, "policy drop") || strings.Contains(rules, "reject") || strings.Contains(rules, "drop") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "drop") && !strings.Contains(lower, "reject") {
+			continue
+		}
+		if strings.Contains(lower, "policy drop") || strings.Contains(lower, "policy reject") {
+			return true
+		}
+		var allowed bool
+		for _, ip := range falePacoProviderIPs {
+			prefix, _ := netip.ParsePrefix(ip + "/32")
+			if strings.Contains(line, ip) {
+				allowed = true
+				break
+			}
+			if strings.Contains(line, "177.11.49.0/24") {
+				allowed = true
+				break
+			}
+			_ = prefix
+		}
+		if !allowed {
 			return true
 		}
 	}
@@ -199,10 +217,18 @@ func summarizeFirewallRule(line string) (action, proto, destination string) {
 
 func iptablesEgressState(rules string) string {
 	policy := "unknown"
+	chains := make(map[string]string)
+	outputRules := []string{}
 	for _, line := range strings.Split(rules, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == "-P" && fields[1] == "OUTPUT" {
-			policy = fields[2]
+		if len(fields) >= 3 && fields[0] == "-P" {
+			chains[fields[1]] = fields[2]
+			if fields[1] == "OUTPUT" {
+				policy = fields[2]
+			}
+		}
+		if len(fields) >= 3 && fields[0] == "-A" && fields[1] == "OUTPUT" {
+			outputRules = append(outputRules, line)
 		}
 	}
 	if policy == "DROP" || policy == "REJECT" {
@@ -211,15 +237,32 @@ func iptablesEgressState(rules string) string {
 	if policy != "ACCEPT" {
 		return "unknown"
 	}
-	if strings.Contains(rules, "-A OUTPUT -j ") {
-		return "unknown"
-	}
-	for _, line := range strings.Split(rules, "\n") {
+	for _, line := range outputRules {
+		fields := strings.Fields(line)
+		jump := ""
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "-j" {
+				jump = fields[i+1]
+				break
+			}
+		}
+		if jump != "" && (chains[jump] == "DROP" || chains[jump] == "REJECT") {
+			return "blocked"
+		}
+		if jump == "DROP" || jump == "REJECT" {
+			return "blocked"
+		}
+		if jump != "" && jump != "ACCEPT" && chains[jump] == "" {
+			return "unknown"
+		}
+		if jump == "ACCEPT" || (jump != "" && chains[jump] == "ACCEPT") {
+			continue
+		}
 		action, proto, dst := summarizeFirewallRule(line)
 		if action != "DROP" && action != "REJECT" {
 			continue
 		}
-		if dst == "177.11.49.0/24" {
+		if dst == "177.11.49.0/24" || dst == "177.11.49.0/255.255.255.0" {
 			return "blocked"
 		}
 		for _, ip := range falePacoProviderIPs {

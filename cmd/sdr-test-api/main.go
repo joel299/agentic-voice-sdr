@@ -342,7 +342,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 	if pcapExists {
 		pcapSize = stat.Size()
 	}
-	diag := map[string]any{"selected_transport": protocol, "pcap_path": filepath.Base(pcap), "pcap_exists": pcapExists, "pcap_size_bytes": pcapSize, "capture_exit_clean": captureExitClean, "capture_packets_present": false, "originate_command_started": true, "originate_command_accepted": true, "originate_exit_code": 0, "secrets_redacted": true}
+	diag := map[string]any{"selected_transport": protocol, "pcap_path": filepath.Base(pcap), "pcap_exists": pcapExists, "pcap_size_bytes": pcapSize, "capture_exit_clean": captureExitClean, "capture_exit_code": 0, "capture_packets_present": false, "originate_command_started": true, "originate_command_accepted": true, "originate_exit_code": 0, "secrets_redacted": true}
 	if !pcapExists || pcapSize <= 24 {
 		diag["error"] = "capture_empty_or_invalid"
 		diag["pcap_decode_probe"] = "not_run"

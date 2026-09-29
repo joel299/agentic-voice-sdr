@@ -135,10 +135,12 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, response)
 }
 
+var falepacoResolver = &net.Resolver{PreferGo: true}
+
 func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := falepacoResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "timeout", []string{}, false

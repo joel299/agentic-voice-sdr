@@ -20,6 +20,25 @@ func TestSafeApplyErrorReportsStageAndRedactsSecrets(t *testing.T) {
 		t.Fatalf("unsafe or incomplete apply diagnostics: stage=%q class=%q summary=%q", stage, class, summary)
 	}
 }
+func TestResolveFalePacoHostChecksAllAnswersAgainstOfficialAllowlist(t *testing.T) {
+	original := lookupFalePacoIPs
+	defer func() { lookupFalePacoIPs = original }()
+	lookupFalePacoIPs = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("177.11.49.36")}, {IP: net.ParseIP("177.11.49.97")}}, nil
+	}
+	state, ips, allowed := resolveFalePacoHost("example-controlled-host", time.Second)
+	if state != "resolved" || !allowed || len(ips) != 2 {
+		t.Fatalf("state=%s ips=%v allowed=%v", state, ips, allowed)
+	}
+	lookupFalePacoIPs = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("177.11.49.36")}, {IP: net.ParseIP("192.168.1.10")}}, nil
+	}
+	state, ips, allowed = resolveFalePacoHost("example-controlled-host", time.Second)
+	if state != "outside_allowlist" || allowed || len(ips) != 2 {
+		t.Fatalf("mixed answer must fail closed: state=%s ips=%v allowed=%v", state, ips, allowed)
+	}
+}
+
 func TestFalePacoSaveValidationIsDNSIndependentAndStrictlyAllowlisted(t *testing.T) {
 	cfg := falepacoConfigRequest{ProviderAddress: "98034.falepaco.com.br", RequestURIHost: "96678.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", Username: "100", Extension: "100", CallerID: "551155200455", Transport: "tcp", Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: "sip:96678.falepaco.com.br:5060", ClientURI: "sip:100@96678.falepaco.com.br:5060", ContactUser: "100", Realm: "96678.falepaco.com.br", RetryIntervalSeconds: 60, MaxRetries: 3}}
 	if got := validateFalePacoSave(cfg); got != nil {

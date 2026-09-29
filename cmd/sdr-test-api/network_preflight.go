@@ -138,11 +138,14 @@ func (s *server) networkPreflight(w http.ResponseWriter, r *http.Request) {
 }
 
 var falepacoResolver = &net.Resolver{PreferGo: true}
+var lookupFalePacoIPs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return falepacoResolver.LookupIPAddr(ctx, host)
+}
 
 func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	ips, err := falepacoResolver.LookupIPAddr(ctx, host)
+	ips, err := lookupFalePacoIPs(ctx, host)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "timeout", []string{}, false

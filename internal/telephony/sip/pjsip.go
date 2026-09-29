@@ -39,7 +39,7 @@ password={{ .Secret }}
 {{ end }}
 [trunk-{{ .Name }}-aor]
 type=aor
-contact=sip:{{ .HostNetworkAddressOrHost }}\;transport={{ .Transport }}
+contact=sip:{{ .HostURI }}\;transport={{ .Transport }}
 
 [trunk-{{ .Name }}]
 type=endpoint
@@ -52,7 +52,7 @@ aors=trunk-{{ .Name }}-aor
 {{ if eq .Provider "falepaco" }}direct_media=no{{ end }}
 {{ if .FromUser }}from_user={{ .FromUser }}{{ end }}
 {{ if .FromDomain }}from_domain={{ .FromDomain }}{{ end }}
-{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
+{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyURI }}\;transport={{ .Transport }}\;lr{{ end }}
 {{ if .CallerID }}callerid={{ .CallerID }}{{ end }}
 {{ if eq .Provider "falepaco" }}send_pai={{ if .SendPAI }}yes{{ else }}no{{ end }}
 send_rpid={{ if .SendRPID }}yes{{ else }}no{{ end }}{{ end }}
@@ -65,14 +65,14 @@ server_uri={{ if .RegistrationServerURI }}{{ .RegistrationServerURI }}{{ else }}
 {{ if .RegistrationClientURI }}client_uri={{ .RegistrationClientURI }}
 {{ else }}client_uri=sip:{{ .RegistrationIdentity }}@{{ .RegistrarOrHost }}
 {{ end }}{{ if .RegistrationContactUser }}contact_user={{ .RegistrationContactUser }}
-{{ end }}{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyNetworkAddressOrProxy }}\;transport={{ .Transport }}\;lr{{ end }}
+{{ end }}{{ if .OutboundProxy }}outbound_proxy=sip:{{ .OutboundProxyURI }}\;transport={{ .Transport }}\;lr{{ end }}
 retry_interval={{ if .RegistrationRetryInterval }}{{ .RegistrationRetryInterval }}{{ else }}60{{ end }}
 max_retries={{ if .RegistrationMaxRetries }}{{ .RegistrationMaxRetries }}{{ else }}3{{ end }}
 {{ end }}
 ; gru83-pin host={{ .Host }} address={{ .HostNetworkAddress }}
 {{ if .Registrar }}; gru83-pin host={{ .Registrar }} address={{ .RegistrarNetworkAddress }}
 {{ end }}
-{{ if .OutboundProxy }}; gru83-pin host={{ .OutboundProxy }} address={{ .OutboundProxyNetworkAddress }}
+{{ if .OutboundProxy }}; gru83-pin host={{ .OutboundProxyHost }} address={{ .OutboundProxyNetworkAddress }}
 {{ end }}
 `
 
@@ -104,12 +104,12 @@ func sipURIHostPort(value string, fallbackPort int) string {
 
 type pjsipTemplateData struct {
 	TrunkConfig
-	CodecsString                       string
-	RegistrarOrHost                    string
-	RegistrarNetworkAddressOrHost      string
-	HostNetworkAddressOrHost           string
-	OutboundProxyNetworkAddressOrProxy string
-	RegistrationIdentity               string
+	CodecsString         string
+	RegistrarOrHost      string
+	HostURI              string
+	OutboundProxyURI     string
+	OutboundProxyHost    string
+	RegistrationIdentity string
 }
 
 // GeneratePJSIPConfig renders an Asterisk pjsip.conf snippet for the trunk.
@@ -144,32 +144,18 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regIdentity = cfg.FromUser
 	}
 
-	hostNetwork := cfg.HostNetworkAddress
-	if hostNetwork == "" {
-		hostNetwork = cfg.Host
-	}
-	regNetwork := cfg.RegistrarNetworkAddress
-	if regNetwork == "" {
-		regNetwork = regHost
-	}
-	proxyNetwork := cfg.OutboundProxyNetworkAddress
-	if proxyNetwork == "" {
-		proxyNetwork = cfg.OutboundProxy
-	}
-
 	if cfg.Realm == "" {
 		cfg.Realm = cfg.RegistrationRealm
 	}
 	data := pjsipTemplateData{
-		TrunkConfig:                        cfg,
-		CodecsString:                       codecsStr,
-		RegistrarOrHost:                    sipHostPort(regHost, cfg.Port),
-		RegistrarNetworkAddressOrHost:      sipURIHostPort(regNetwork, cfg.Port),
-		HostNetworkAddressOrHost:           sipURIHostPort(hostNetwork, cfg.Port),
-		OutboundProxyNetworkAddressOrProxy: sipURIHostPort(proxyNetwork, cfg.Port),
-		RegistrationIdentity:               regIdentity,
+		TrunkConfig:          cfg,
+		CodecsString:         codecsStr,
+		RegistrarOrHost:      sipHostPort(regHost, cfg.Port),
+		HostURI:              sipURIHostPort(cfg.Host, cfg.Port),
+		OutboundProxyURI:     sipURIHostPort(cfg.OutboundProxy, cfg.Port),
+		OutboundProxyHost:    pinnedResolverHost(cfg.OutboundProxy),
+		RegistrationIdentity: regIdentity,
 	}
-	data.OutboundProxy = pinnedResolverHost(cfg.OutboundProxy)
 
 	var buf bytes.Buffer
 	if err := pjsipTemplate.Execute(&buf, data); err != nil {

@@ -135,11 +135,11 @@ func TestPinnedSIPDestinationPreservesLogicalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(config, "contact=sip:93.184.216.34:5061") {
+	if !strings.Contains(config, `contact=sip:sip.provider.test:5061\;transport=tls`) {
 		t.Fatalf("AOR contact lost pinned network destination:\n%s", config)
 	}
 	registration := config[strings.Index(config, "[trunk-provider_tls-reg]"):]
-	for _, want := range []string{"server_uri=sip:registrar.provider.test:5061", "client_uri=sip:user@registrar.provider.test:5061", "outbound_proxy=sip:93.184.216.36:5061"} {
+	for _, want := range []string{`server_uri=sip:registrar.provider.test:5061`, `client_uri=sip:user@registrar.provider.test:5061`, `outbound_proxy=sip:proxy.provider.test:5061\;transport=tls\;lr`} {
 		if !strings.Contains(registration, want) {
 			t.Fatalf("registration config missing %q:\n%s", want, registration)
 		}

@@ -297,6 +297,20 @@ func falepacoEnv(in falepacoConfigRequest, password string) map[string]string {
 	return map[string]string{"FALEPACO_SIP_DOMAIN": in.ProviderAddress, "FALEPACO_SIP_OUTBOUND_HOST": in.RequestURIHost, "FALEPACO_SIP_OUTBOUND_PROXY": in.OutboundProxy, "FALEPACO_SIP_USERNAME": in.Username, "FALEPACO_SIP_EXTENSION": in.Extension, "FALEPACO_SIP_PASSWORD": password, "FALEPACO_SIP_CALLER_ID": in.CallerID, "FALEPACO_SIP_TRANSPORT": in.Transport, "FALEPACO_SIP_PORT": fmt.Sprint(in.Port), "FALEPACO_SIP_REGISTRATION_REQUIRED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_ENABLED": fmt.Sprint(in.Registration.Enabled), "FALEPACO_SIP_REGISTRATION_SERVER_URI": in.Registration.ServerURI, "FALEPACO_SIP_REGISTRATION_CLIENT_URI": in.Registration.ClientURI, "FALEPACO_SIP_CONTACT_USER": in.Registration.ContactUser, "FALEPACO_SIP_REALM": in.Registration.Realm, "FALEPACO_SIP_RETRY_INTERVAL": fmt.Sprint(in.Registration.RetryIntervalSeconds), "FALEPACO_SIP_MAX_RETRIES": fmt.Sprint(in.Registration.MaxRetries)}
 }
 
+func falepacoPassword(in falepacoConfigRequest, old map[string]string) (string, error) {
+	password := old["FALEPACO_SIP_PASSWORD"]
+	if in.Password != nil {
+		if *in.Password == "" {
+			return "", errors.New("password_must_not_be_empty")
+		}
+		password = *in.Password
+	}
+	if password == "" {
+		return "", errors.New("password_required")
+	}
+	return password, nil
+}
+
 func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 	if _, ok := bearer(r); !ok {
 		jsonOut(w, 401, map[string]string{"error": "unauthorized"})
@@ -332,13 +346,10 @@ func (s *server) falepacoPut(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 500, map[string]string{"error": "credential_source_unavailable"})
 		return
 	}
-	password := old["FALEPACO_SIP_PASSWORD"]
-	if in.Password != nil {
-		if *in.Password == "" {
-			jsonOut(w, 400, map[string]string{"error": "password_must_not_be_empty"})
-			return
-		}
-		password = *in.Password
+	password, err := falepacoPassword(in, old)
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
 	}
 	if in.ProviderAddress == "" || in.RequestURIHost == "" || in.OutboundProxy == "" || in.Username == "" || in.Extension == "" || password == "" || in.CallerID == "" || (strings.ToLower(in.Transport) != "tcp" && strings.ToLower(in.Transport) != "udp") {
 		jsonOut(w, 400, map[string]string{"error": "invalid_configuration"})

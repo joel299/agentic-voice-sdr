@@ -288,3 +288,42 @@ func TestAsteriskAuthReadbackParsesSemanticFields(t *testing.T) {
 		t.Fatal("auth readback fields were not parsed")
 	}
 }
+
+func TestPersisted96678ConfigMigratesToCanonicalWithoutChangingPassword(t *testing.T) {
+	const priorPassword = "test-only-preserved-password"
+	old := map[string]string{
+		"FALEPACO_SIP_DOMAIN": "98034.falepaco.com.br", "FALEPACO_SIP_OUTBOUND_HOST": "96678.falepaco.com.br",
+		"FALEPACO_SIP_OUTBOUND_PROXY": "98034.falepaco.com.br:5060", "FALEPACO_SIP_USERNAME": "100",
+		"FALEPACO_SIP_EXTENSION": "100", "FALEPACO_SIP_PASSWORD": priorPassword, "FALEPACO_SIP_CALLER_ID": "551155200455",
+		"FALEPACO_SIP_TRANSPORT": "tcp", "FALEPACO_SIP_PORT": "5060", "FALEPACO_SIP_REGISTRATION_REQUIRED": "true",
+		"FALEPACO_SIP_REGISTRATION_ENABLED": "true", "FALEPACO_SIP_REGISTRATION_SERVER_URI": "sip:96678.falepaco.com.br:5060",
+		"FALEPACO_SIP_REGISTRATION_CLIENT_URI": "sip:100@96678.falepaco.com.br:5060", "FALEPACO_SIP_CONTACT_USER": "100",
+		"FALEPACO_SIP_REALM": "96678.falepaco.com.br", "FALEPACO_SIP_RETRY_INTERVAL": "60", "FALEPACO_SIP_MAX_RETRIES": "3",
+	}
+	in := falepacoConfigRequest{ProviderAddress: "98034.falepaco.com.br", RequestURIHost: "98034.falepaco.com.br", OutboundProxy: "98034.falepaco.com.br:5060", Username: "100", Extension: "100", CallerID: "551155200455", Transport: "tcp", Port: 5060, Registration: RegistrationConfig{Enabled: true, ServerURI: "sip:98034.falepaco.com.br:5060", ClientURI: "sip:100@98034.falepaco.com.br:5060", ContactUser: "100", Realm: "98034.falepaco.com.br", RetryIntervalSeconds: 60, MaxRetries: 3}}
+	password, err := falepacoPassword(in, old)
+	if err != nil || password != priorPassword {
+		t.Fatal("password was not preserved when omitted")
+	}
+	if _, err = falepacoPassword(falepacoConfigRequest{Password: ptrString("")}, old); err == nil || err.Error() != "password_must_not_be_empty" {
+		t.Fatal("explicit empty password must fail")
+	}
+	migrated := falepacoEnv(in, password)
+	if migrated["FALEPACO_SIP_PASSWORD"] != priorPassword {
+		t.Fatal("migration changed password")
+	}
+	readback, err := savedFalepaco(migrated)
+	if err != nil {
+		t.Fatalf("savedFalepaco rejected migrated config: %v", err)
+	}
+	if readback.Host != "98034.falepaco.com.br" || readback.RegistrationServerURI != "sip:98034.falepaco.com.br:5060" || readback.RegistrationClientURI != "sip:100@98034.falepaco.com.br:5060" || readback.RegistrationRealm != "98034.falepaco.com.br" || readback.Transport != "tcp" {
+		t.Fatalf("migrated canonical configuration is incorrect: %+v", readback)
+	}
+	response := falepacoConfigResponse{Configured: true, ProviderAddress: migrated["FALEPACO_SIP_DOMAIN"], RequestURIHost: migrated["FALEPACO_SIP_OUTBOUND_HOST"], OutboundProxy: readback.OutboundProxy, Username: readback.Auth.Username, Extension: readback.FromUser, PasswordConfigured: migrated["FALEPACO_SIP_PASSWORD"] != "", Transport: readback.Transport, Port: readback.Port, Registration: RegistrationConfig{Enabled: readback.RegistrationRequired, ServerURI: readback.RegistrationServerURI, ClientURI: readback.RegistrationClientURI, ContactUser: readback.RegistrationContactUser, Realm: readback.RegistrationRealm, RetryIntervalSeconds: readback.RegistrationRetryInterval, MaxRetries: readback.RegistrationMaxRetries}}
+	encoded, err := json.Marshal(response)
+	if err != nil || strings.Contains(string(encoded), "96678.falepaco.com.br") || strings.Contains(string(encoded), priorPassword) || strings.Contains(string(encoded), `"password"`) {
+		t.Fatal("GET round-trip emitted stale host or secret")
+	}
+}
+
+func ptrString(v string) *string { return &v }

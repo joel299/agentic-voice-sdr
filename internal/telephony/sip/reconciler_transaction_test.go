@@ -228,7 +228,7 @@ func TestGeneratePJSIPConfigIPv6UsesBrackets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"contact=sip:[2001:db8::10]:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:[2001:db8::12]:5090"} {
+	for _, want := range []string{"contact=sip:sip.provider.test:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:proxy.provider.test:5061"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("IPv6 rendering missing %q:\n%s", want, rendered)
 		}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -163,35 +162,29 @@ func inspectHostEgressPolicy() (string, bool, string) {
 }
 
 func nftBlocksFalePaco(rules string) bool {
+	var inOutputChain, sawOutputBase, outputPolicyDrop bool
 	for _, line := range strings.Split(rules, "\n") {
-		if !strings.Contains(line, "hook output") && !strings.Contains(line, "output_") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "chain ") {
+			inOutputChain = false
+			if strings.Contains(trimmed, "hook output") {
+				inOutputChain = true
+				sawOutputBase = true
+				if strings.Contains(trimmed, "policy drop") || strings.Contains(trimmed, "policy reject") {
+					outputPolicyDrop = true
+				}
+			}
 			continue
 		}
-		lower := strings.ToLower(line)
-		if !strings.Contains(lower, "drop") && !strings.Contains(lower, "reject") {
+		if !inOutputChain {
 			continue
 		}
-		if strings.Contains(lower, "policy drop") || strings.Contains(lower, "policy reject") {
-			return true
-		}
-		var allowed bool
-		for _, ip := range falePacoProviderIPs {
-			prefix, _ := netip.ParsePrefix(ip + "/32")
-			if strings.Contains(line, ip) {
-				allowed = true
-				break
-			}
-			if strings.Contains(line, "177.11.49.0/24") {
-				allowed = true
-				break
-			}
-			_ = prefix
-		}
-		if !allowed {
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "drop") || strings.Contains(lower, "reject") {
 			return true
 		}
 	}
-	return false
+	return sawOutputBase && outputPolicyDrop
 }
 
 func summarizeFirewallRule(line string) (action, proto, destination string) {

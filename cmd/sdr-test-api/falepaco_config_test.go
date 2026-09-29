@@ -69,6 +69,20 @@ func TestCloudFirewallIsWarningNotBlocker(t *testing.T) {
 		t.Fatalf("response=%+v", response)
 	}
 }
+func TestNFTOutputInspectionIgnoresDropsOutsideOutputChain(t *testing.T) {
+	rules := "table ip filter {\nchain INPUT { type filter hook input priority filter; policy accept; drop }\nchain OUTPUT { type filter hook output priority filter; policy accept; }\n}"
+	if nftBlocksFalePaco(rules) {
+		t.Fatal("input-chain drops must not be interpreted as egress blocks")
+	}
+}
+
+func TestNFTOutputInspectionDetectsOutputDrops(t *testing.T) {
+	rules := "table ip filter {\nchain OUTPUT { type filter hook output priority filter; policy accept;\nip daddr 177.11.49.223 tcp dport 5060 drop\n}\n}"
+	if !nftBlocksFalePaco(rules) {
+		t.Fatal("output-chain drop must be detected")
+	}
+}
+
 func TestRTPRangeRequiresExactGeneralValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rtp.conf")
 	if err := os.WriteFile(path, []byte("[general]\nrtpstart=10000\nrtpend=65000\n[other]\nrtpstart=1\n"), 0600); err != nil {

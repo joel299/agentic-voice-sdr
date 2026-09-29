@@ -20,7 +20,10 @@ type resolverTxnRunner struct {
 
 func (r *resolverTxnRunner) RunCommand(_ context.Context, _ string, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
-	if strings.Contains(cmd, "res_resolver_unbound") {
+	if strings.Contains(cmd, "module show like res_resolver_unbound.so") {
+		return "res_resolver_unbound.so Running", nil
+	}
+	if strings.Contains(cmd, "module reload res_resolver_unbound.so") {
 		r.resolverReloads++
 		if r.resolverFailures > 0 {
 			r.resolverFailures--
@@ -275,6 +278,14 @@ type removeRollbackRunner struct {
 func (r *removeRollbackRunner) RunCommand(_ context.Context, _ string, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	switch {
+	case strings.Contains(cmd, "module show like res_resolver_unbound.so"):
+		return "res_resolver_unbound.so Running", nil
+	case strings.Contains(cmd, "module reload res_resolver_unbound.so"):
+		r.resolverCalls++
+		if r.failResolverAt == r.resolverCalls {
+			return "resolver reload failed", errors.New("resolver reload failed")
+		}
+		return "resolver reload ok", nil
 	case strings.Contains(cmd, "res_resolver_unbound"):
 		r.resolverCalls++
 		if r.failResolverAt == r.resolverCalls {

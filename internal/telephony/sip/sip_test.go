@@ -595,6 +595,12 @@ func (r *mockRunner) RunCommand(ctx context.Context, name string, args ...string
 		}
 		return "Asterisk 20.5.0", nil
 	}
+	if strings.Contains(cmdStr, "module show like res_resolver_unbound.so") {
+		return "res_resolver_unbound.so Running", nil
+	}
+	if strings.Contains(cmdStr, "module reload res_resolver_unbound.so") {
+		return "Module reload succeeded", nil
+	}
 	if strings.Contains(cmdStr, "pjsip show transport") {
 		return "Transport: transport-udp/udp", nil
 	}

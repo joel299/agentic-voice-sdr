@@ -384,10 +384,18 @@ func (r *RealAsteriskReloader) restoreResolver(s resolverSnapshot) error {
 }
 
 func (r *RealAsteriskReloader) reloadResolver(ctx context.Context) error {
-	if _, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_resolver_unbound.so"); err != nil {
-		return err
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module show like res_resolver_unbound.so")
+	if err != nil {
+		return fmt.Errorf("resolver module status unavailable: %w", err)
 	}
-	return nil
+	if strings.Contains(out, "res_resolver_unbound.so") && strings.Contains(out, "Running") {
+		out, err = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_resolver_unbound.so")
+		if err != nil {
+			return fmt.Errorf("resolver reload failed: %w (output: %s)", err, out)
+		}
+		return nil
+	}
+	return errors.New("resolver module res_resolver_unbound.so is not loaded; pinned DNS validation unavailable")
 }
 
 func compoundRollback(primary error, failures ...error) error {

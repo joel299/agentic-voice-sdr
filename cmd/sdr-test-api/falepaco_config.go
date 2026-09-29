@@ -383,13 +383,10 @@ func (s *server) falepacoApply(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]any{"error": "configuration_invalid", "apply_stage": stage, "apply_error_class": class, "apply_error_summary": summary, "secrets_redacted": true})
 		return
 	}
-	proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
-	for _, item := range []struct{ host, field string }{{m["FALEPACO_SIP_DOMAIN"], "provider_address"}, {m["FALEPACO_SIP_OUTBOUND_HOST"], "request_uri_host"}, {proxyHost, "outbound_proxy"}} {
-		class, summary := verifyFalePacoDNS(item.host, 4*time.Second)
-		if class != "" {
-			jsonOut(w, 502, map[string]any{"error": "sip_apply_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": item.field, "apply_error_summary": summary, "secrets_redacted": true})
-			return
-		}
+	cfg, field, class, summary := pinFalePacoTrunkConfig(cfg, m["FALEPACO_SIP_DOMAIN"], m["FALEPACO_SIP_OUTBOUND_HOST"], req.OutboundProxy, 4*time.Second)
+	if class != "" {
+		jsonOut(w, 502, map[string]any{"error": "sip_apply_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": field, "apply_error_summary": summary, "secrets_redacted": true})
+		return
 	}
 	cfg.DeferRegistrationCheck = true
 	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))

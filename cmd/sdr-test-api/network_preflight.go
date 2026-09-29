@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 )
 
 var falePacoProviderIPs = []string{
@@ -176,21 +178,40 @@ func resolveFalePacoHost(host string, timeout time.Duration) (string, []string, 
 	return "resolved", result, true
 }
 
-func verifyFalePacoDNS(host string, timeout time.Duration) (string, string) {
-	state, _, allowed := resolveFalePacoHost(host, timeout)
+func verifyFalePacoDNS(host string, timeout time.Duration) (string, string, string) {
+	state, addresses, allowed := resolveFalePacoHost(host, timeout)
 	if allowed {
-		return "", ""
+		return "", "", addresses[0]
 	}
 	switch state {
 	case "timeout":
-		return "provider_dns_timeout", "DNS resolution timed out"
+		return "provider_dns_timeout", "DNS resolution timed out", ""
 	case "no_answer":
-		return "provider_dns_no_answer", "DNS returned no addresses"
+		return "provider_dns_no_answer", "DNS returned no addresses", ""
 	case "outside_allowlist":
-		return "provider_dns_outside_allowlist", "DNS answer is outside the Fale Paco allowlist"
+		return "provider_dns_outside_allowlist", "DNS answer is outside the Fale Paco allowlist", ""
 	default:
-		return "provider_dns_error", "DNS resolver failed"
+		return "provider_dns_error", "DNS resolver failed", ""
 	}
+}
+
+func pinFalePacoTrunkConfig(cfg sip.TrunkConfig, providerHost, requestHost, proxy string, timeout time.Duration) (sip.TrunkConfig, string, string, string) {
+	proxyHost, proxyPort, err := net.SplitHostPort(proxy)
+	if err != nil {
+		return cfg, "outbound_proxy", "provider_dns_error", "Outbound proxy format was invalid"
+	}
+	resolved := map[string]string{}
+	for _, item := range []struct{ host, field string }{{providerHost, "provider_address"}, {requestHost, "request_uri_host"}, {proxyHost, "outbound_proxy"}} {
+		class, summary, ip := verifyFalePacoDNS(item.host, timeout)
+		if class != "" {
+			return cfg, item.field, class, summary
+		}
+		resolved[item.field] = ip
+	}
+	cfg.HostNetworkAddress = resolved["request_uri_host"]
+	cfg.RegistrarNetworkAddress = resolved["request_uri_host"]
+	cfg.OutboundProxyNetworkAddress = net.JoinHostPort(resolved["outbound_proxy"], proxyPort)
+	return cfg, "", "", ""
 }
 
 func providerTCPReachable(port int) (tested, reachable int) {

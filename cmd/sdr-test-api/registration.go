@@ -8,7 +8,6 @@ import (
 	"errors"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -200,14 +199,6 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "registration.enabled must be true before REGISTER testing", "secrets_redacted": true})
 		return
 	}
-	proxyHost, _, _ := net.SplitHostPort(req.OutboundProxy)
-	for _, item := range []struct{ host, field string }{{m["FALEPACO_SIP_DOMAIN"], "provider_address"}, {m["FALEPACO_SIP_OUTBOUND_HOST"], "request_uri_host"}, {proxyHost, "outbound_proxy"}} {
-		class, summary := verifyFalePacoDNS(item.host, 4*time.Second)
-		if class != "" {
-			jsonOut(w, 502, map[string]any{"error": "registration_test_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": item.field, "apply_error_summary": summary, "secrets_redacted": true})
-			return
-		}
-	}
 	if (req.Transport != "tcp" && req.Transport != "udp") || req.Port != 5060 {
 		jsonOut(w, 400, map[string]any{"error": "invalid_registration_configuration", "apply_error_summary": "REGISTER test requires configured TCP or UDP transport on port 5060", "secrets_redacted": true})
 		return
@@ -215,6 +206,11 @@ func (s *server) registrationTest(w http.ResponseWriter, r *http.Request) {
 	cfg, e := req.ToCanonical()
 	if e != nil {
 		jsonOut(w, 400, map[string]string{"error": "configuration_invalid"})
+		return
+	}
+	cfg, field, class, summary := pinFalePacoTrunkConfig(cfg, m["FALEPACO_SIP_DOMAIN"], m["FALEPACO_SIP_OUTBOUND_HOST"], req.OutboundProxy, 4*time.Second)
+	if class != "" {
+		jsonOut(w, 502, map[string]any{"error": "registration_test_failed", "apply_stage": "dns", "apply_error_class": class, "apply_error_field": field, "apply_error_summary": summary, "secrets_redacted": true})
 		return
 	}
 	cfg.DeferRegistrationCheck = true

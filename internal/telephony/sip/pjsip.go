@@ -153,9 +153,6 @@ func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 		regNetwork = regHost
 	}
 	proxyNetwork := cfg.OutboundProxyNetworkAddress
-	if cfg.Provider == "falepaco" {
-		proxyNetwork = ""
-	}
 	if proxyNetwork == "" {
 		proxyNetwork = cfg.OutboundProxy
 	}

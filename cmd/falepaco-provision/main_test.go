@@ -11,13 +11,13 @@ import (
 )
 
 func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
-	credentials := runtimeCredentials{domain: canonicalDomain, username: "auth-user", extension: "100", password: "test-only-secret"}
+	credentials := runtimeCredentials{domain: canonicalDomain, username: "auth-user", extension: "100", password: "test-only-secret", outboundHost: canonicalOutboundHost}
 	request := provisionRequest(credentials)
 	canonical, err := request.ToCanonical()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical.Provider != "falepaco" || canonical.Host != canonicalDomain || canonical.Registrar != canonicalDomain || canonical.Transport != sip.TransportTCP || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.Secret != credentials.password || canonical.RegistrationRequired {
+	if canonical.Provider != "falepaco" || canonical.Host != canonicalOutboundHost || canonical.Registrar != canonicalOutboundHost || canonical.Transport != sip.TransportTCP || canonical.AuthUsername != credentials.username || canonical.FromUser != credentials.extension || canonical.Secret != credentials.password || canonical.RegistrationRequired {
 		t.Fatalf("runtime credential fields were not mapped into canonical trunk configuration")
 	}
 	generated, err := sip.GeneratePJSIPConfig(canonical)
@@ -30,7 +30,7 @@ func TestProvisionRequestMapsRuntimeFields(t *testing.T) {
 	if canonical.HostNetworkAddress != "" || canonical.RegistrarNetworkAddress != "" || canonical.OutboundProxyNetworkAddress != "" {
 		t.Fatal("resolved IP was supplied as persistent SIP destination")
 	}
-	if !strings.Contains(generated, "contact=sip:"+canonicalDomain+":5060") || !strings.Contains(generated, "outbound_auth=trunk-falepaco-auth") || !strings.Contains(generated, "transport=transport-tcp") {
+	if !strings.Contains(generated, "contact=sip:"+canonicalOutboundHost+":5060") || !strings.Contains(generated, "outbound_auth=trunk-falepaco-auth") || !strings.Contains(generated, "transport=transport-tcp") {
 		t.Fatal("direct TCP trunk lost canonical destination, digest auth, or TCP transport")
 	}
 	if strings.Contains(generated, "transport=transport-udp") {

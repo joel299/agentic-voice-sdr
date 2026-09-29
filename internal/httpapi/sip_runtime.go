@@ -39,8 +39,14 @@ func newSIPDestinationPolicy() *sipDestinationPolicy {
 // with the validated IP. This removes the Go-validation/Asterisk-resolution TOCTOU.
 func (p *sipDestinationPolicy) PinConfig(ctx context.Context, cfg sip.TrunkConfig) (sip.TrunkConfig, error) {
 	var err error
-	if cfg.HostNetworkAddress, err = p.pinHost(ctx, cfg.Host); err != nil {
-		return sip.TrunkConfig{}, fmt.Errorf("host destination rejected: %w", err)
+	resolvedHost, resolveErr := p.pinHost(ctx, cfg.Host)
+	if resolveErr != nil {
+		return sip.TrunkConfig{}, fmt.Errorf("host destination rejected: %w", resolveErr)
+	}
+	if cfg.Provider == "falepaco" {
+		cfg.HostNetworkAddress = ""
+	} else {
+		cfg.HostNetworkAddress = resolvedHost
 	}
 	if cfg.Transport == sip.TransportTLS {
 		cfg.TLSServiceName = cfg.Host

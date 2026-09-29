@@ -165,3 +165,24 @@ func TestSafeSIPTLSKeepsLogicalServerName(t *testing.T) {
 		t.Fatalf("TLS identity/destination mixed: network=%q address=%q serverName=%q", gotNetwork, gotAddress, gotServerName)
 	}
 }
+
+func TestFalePacoKeepsLogicalOutboundRouteHostname(t *testing.T) {
+	resolver := &sequenceSIPResolver{answers: [][]string{{"177.11.49.36"}}}
+	policy := &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+	policy.dialer.resolver = resolver
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", Enabled: true}
+	pinned, err := policy.PinConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Host != "96678.falepaco.com.br" || pinned.HostNetworkAddress != "" {
+		t.Fatalf("route hostname was replaced: %#v", pinned)
+	}
+	rendered, err := sip.GeneratePJSIPConfig(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "contact=sip:96678.falepaco.com.br:5060") {
+		t.Fatalf("hostname missing from contact: %s", rendered)
+	}
+}

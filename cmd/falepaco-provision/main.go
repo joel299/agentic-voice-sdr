@@ -17,10 +17,11 @@ import (
 
 const runtimeEnvPath = "/root/agentic-voice-sdr/.runtime-secrets/falepaco.env"
 const canonicalDomain = "98034.falepaco.com.br"
+const canonicalOutboundHost = "96678.falepaco.com.br"
 const canonicalTransport = "tcp"
 
 type runtimeCredentials struct {
-	domain, username, extension, password string
+	domain, username, extension, password, outboundHost string
 }
 
 func loadRuntimeCredentials(ctx context.Context, path string) (runtimeCredentials, error) {
@@ -34,7 +35,7 @@ func loadRuntimeCredentials(ctx context.Context, path string) (runtimeCredential
 	}
 	// Source the owner-managed shell env file without ever logging its output.
 	// Values are transferred to this process only through a private pipe.
-	const script = `set -a; . "$1" >/dev/null 2>&1 || exit 10; printf '%s\0' "$FALEPACO_SIP_DOMAIN" "$FALEPACO_SIP_USERNAME" "$FALEPACO_SIP_EXTENSION" "$FALEPACO_SIP_PASSWORD"`
+	const script = `set -a; . "$1" >/dev/null 2>&1 || exit 10; printf '%s\0' "$FALEPACO_SIP_DOMAIN" "$FALEPACO_SIP_USERNAME" "$FALEPACO_SIP_EXTENSION" "$FALEPACO_SIP_PASSWORD" "${FALEPACO_SIP_OUTBOUND_HOST:-}"`
 	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-c", script, "falepaco-runtime", path)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -43,16 +44,20 @@ func loadRuntimeCredentials(ctx context.Context, path string) (runtimeCredential
 		return runtimeCredentials{}, fmt.Errorf("failed to load runtime credential file")
 	}
 	parts := strings.Split(stdout.String(), "\x00")
-	if len(parts) != 5 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+	if len(parts) != 6 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
 		return runtimeCredentials{}, fmt.Errorf("runtime credential file is missing required fields")
 	}
-	return runtimeCredentials{domain: parts[0], username: parts[1], extension: parts[2], password: parts[3]}, nil
+	return runtimeCredentials{domain: parts[0], username: parts[1], extension: parts[2], password: parts[3], outboundHost: parts[4]}, nil
 }
 
 func provisionRequest(c runtimeCredentials) httpapi.SIPConfigRequest {
+	outboundHost := c.outboundHost
+	if outboundHost == "" {
+		outboundHost = canonicalOutboundHost
+	}
 	return httpapi.SIPConfigRequest{
-		Provider: "falepaco", Name: "falepaco", Host: c.domain, Port: 5060, Transport: canonicalTransport,
-		Registrar: c.domain,
+		Provider: "falepaco", Name: "falepaco", Host: outboundHost, Port: 5060, Transport: canonicalTransport,
+		Registrar: outboundHost,
 		Auth:      httpapi.SIPAuthRequest{Type: "userpass", Username: c.username, Secret: c.password},
 		FromUser:  c.extension, RegistrationRequired: false, Enabled: true,
 	}
@@ -105,7 +110,7 @@ func run() int {
 		fmt.Println("pjsip_generation=failed")
 		return 2
 	}
-	domainMatch := credentials.domain == canonicalDomain && canonical.Host == credentials.domain && canonical.Registrar == credentials.domain
+	domainMatch := credentials.domain == canonicalDomain && canonical.Host == canonicalOutboundHost && canonical.Registrar == canonicalOutboundHost
 	usernameMatch := configValue(generated, "trunk-falepaco-auth", "username") == credentials.username
 	extensionMatch := configValue(generated, "trunk-falepaco", "from_user") == credentials.extension
 	password := configValue(generated, "trunk-falepaco-auth", "password")
@@ -156,6 +161,7 @@ func run() int {
 			class = "asterisk_readback"
 		}
 		fmt.Println("manager_error_class=" + class)
+		fmt.Println("manager_error_detail=" + strings.ReplaceAll(strings.ReplaceAll(err.Error(), credentials.password, "[REDACTED]"), "\n", " "))
 		fmt.Println("manager_apply=failed")
 		return 1
 	}

@@ -107,6 +107,17 @@ type pjsipTemplateData struct {
 }
 
 // GeneratePJSIPConfig renders an Asterisk pjsip.conf snippet for the trunk.
+func BuildOutboundURI(cfg TrunkConfig, destination string) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", fmt.Errorf("invalid trunk: %w", err)
+	}
+	destination = strings.TrimSpace(destination)
+	if destination == "" || strings.ContainsAny(destination, "@;") || strings.ContainsAny(destination, "\r\n") {
+		return "", fmt.Errorf("invalid destination number")
+	}
+	return fmt.Sprintf("sip:%s@%s:%d;transport=%s", destination, cfg.Host, cfg.Port, cfg.Transport), nil
+}
+
 func GeneratePJSIPConfig(cfg TrunkConfig) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", fmt.Errorf("cannot generate PJSIP config for invalid trunk: %w", err)

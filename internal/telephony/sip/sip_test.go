@@ -1296,3 +1296,17 @@ func TestRemovePJSIPConfigPropagatesBackupCleanupFailure(t *testing.T) {
 		t.Fatalf("backup should remain observable after cleanup failure: %v", err)
 	}
 }
+
+func TestBuildOutboundURIDoesNotUseAuthExtension(t *testing.T) {
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100"}
+	uri, err := sip.BuildOutboundURI(cfg, "67992466329")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uri != "sip:67992466329@96678.falepaco.com.br:5060;transport=tcp" {
+		t.Fatalf("unexpected outbound URI: %s", uri)
+	}
+	if strings.Contains(uri, "@100") {
+		t.Fatal("auth extension was used as destination")
+	}
+}

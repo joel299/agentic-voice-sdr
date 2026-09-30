@@ -293,6 +293,7 @@ func TestRoleDefaultsAndExplicitModalities(t *testing.T) {
 func TestTranscriberDropsEveryModelResponseAndPreservesInterimFinal(t *testing.T) {
 	fake := newRoleTestServer(t)
 	transcriber := fake.connectInput(t)
+	transcriber = WithLeadTurnIdentity(transcriber, NewLeadTurnSequencer(41))
 	defer transcriber.Close()
 	peer := nextRolePeer(t, fake.peers)
 	sendProviderJSON(t, peer, `{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]}}}`)
@@ -304,17 +305,82 @@ func TestTranscriberDropsEveryModelResponseAndPreservesInterimFinal(t *testing.T
 	sendProviderJSON(t, peer, `{"serverContent":{"inputTranscription":{"text":"final words"}}}`)
 
 	interim, err := transcriber.Receive(context.Background())
-	if err != nil || interim.State != TranscriptInterim || interim.Text != "partial words" {
+	if err != nil || interim.State != TranscriptInterim || interim.Text != "partial words" || interim.TurnID != "lead-000042" {
 		t.Fatalf("interim transcript = %+v, %v", interim, err)
 	}
 	final, err := transcriber.Receive(context.Background())
-	if err != nil || final.State != TranscriptFinal || final.Text != "final words" {
+	if err != nil || final.State != TranscriptFinal || final.Text != "final words" || final.TurnID != interim.TurnID {
 		t.Fatalf("final transcript = %+v, %v", final, err)
 	}
 	for _, field := range []string{"Audio", "AudioMimeType", "ToolCalls", "TurnComplete"} {
 		if _, ok := reflect.TypeOf(TranscriptEvent{}).FieldByName(field); ok {
 			t.Fatalf("transcription boundary leaks response field %q", field)
 		}
+	}
+}
+
+func TestInputTurnIdentityIsCallScopedAcrossProviderReconnect(t *testing.T) {
+	fake := newRoleTestServer(t)
+	owner := NewLeadTurnSequencer(0)
+	connect := func() (InputTranscriberSession, rolePeer) {
+		session, err := ConnectInputTranscriberWithTurnSequencer(context.Background(), Config{APIKey: "synthetic-key", Endpoint: fake.endpoint(), Model: "injected-live-model"}, owner)
+		if err != nil {
+			t.Fatalf("connect input session: %v", err)
+		}
+		return session, nextRolePeer(t, fake.peers)
+	}
+	first, peer := connect()
+	for _, raw := range []string{
+		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
+		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
+	} {
+		sendProviderJSON(t, peer, raw)
+	}
+	firstInterim, err := first.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFinal, err := first.Receive(context.Background())
+	if err != nil || firstFinal.EventID != "receive-1" || firstInterim.TurnID != "lead-000001" || firstFinal.TurnID != firstInterim.TurnID {
+		t.Fatalf("first logical turn interim=%+v final=%+v err=%v", firstInterim, firstFinal, err)
+	}
+	// Replaying the final in the same logical turn retains its ID.
+	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`)
+	replay, err := first.Receive(context.Background())
+	if err != nil || replay.TurnID != firstFinal.TurnID {
+		t.Fatalf("replayed final=%+v err=%v", replay, err)
+	}
+	for _, raw := range []string{
+		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
+		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
+	} {
+		sendProviderJSON(t, peer, raw)
+	}
+	secondLogicalInterim, err := first.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLogicalFinal, err := first.Receive(context.Background())
+	if err != nil || secondLogicalFinal.EventID != "receive-1" || secondLogicalInterim.TurnID != "lead-000002" || secondLogicalFinal.TurnID != secondLogicalInterim.TurnID {
+		t.Fatalf("second logical turn interim=%+v final=%+v err=%v", secondLogicalInterim, secondLogicalFinal, err)
+	}
+	_ = first.Close()
+
+	second, peer := connect()
+	defer second.Close()
+	for _, raw := range []string{
+		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
+		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
+	} {
+		sendProviderJSON(t, peer, raw)
+	}
+	secondInterim, err := second.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFinal, err := second.Receive(context.Background())
+	if err != nil || secondFinal.EventID != "receive-1" || secondInterim.TurnID != "lead-000003" || secondFinal.TurnID != secondInterim.TurnID {
+		t.Fatalf("reconnected logical turn interim=%+v final=%+v err=%v", secondInterim, secondFinal, err)
 	}
 }
 

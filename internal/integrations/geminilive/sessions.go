@@ -40,7 +40,15 @@ type ControlledResponseSession interface {
 }
 
 type inputTranscriber struct {
-	provider *providerSession
+	provider  *providerSession
+	sequencer *LeadTurnSequencer
+}
+
+func (*inputTranscriber) ownsLeadTurnIdentity() {}
+func (s *inputTranscriber) attachLeadTurnSequencer(sequencer *LeadTurnSequencer) {
+	if sequencer != nil {
+		s.sequencer = sequencer
+	}
 }
 
 type controlledResponder struct {
@@ -56,12 +64,22 @@ var (
 // audio and input transcription. Its configured model remains caller-injected
 // via Config.Model. Tools are withheld; any model/output events are discarded.
 func ConnectInputTranscriber(ctx context.Context, cfg Config) (InputTranscriberSession, error) {
+	return ConnectInputTranscriberWithTurnSequencer(ctx, cfg, NewLeadTurnSequencer(0))
+}
+
+// ConnectInputTranscriberWithTurnSequencer connects a Gemini input session
+// using a call-scoped turn owner. Reuse the same sequencer when reconnecting a
+// provider session during the same call.
+func ConnectInputTranscriberWithTurnSequencer(ctx context.Context, cfg Config, sequencer *LeadTurnSequencer) (InputTranscriberSession, error) {
+	if sequencer == nil {
+		sequencer = NewLeadTurnSequencer(0)
+	}
 	cfg.Tools = nil
 	provider, err := connect(ctx, cfg, roleInputTranscription)
 	if err != nil {
 		return nil, err
 	}
-	return &inputTranscriber{provider: provider}, nil
+	return &inputTranscriber{provider: provider, sequencer: sequencer}, nil
 }
 
 // ConnectControlledResponse opens a separate Gemini Live session for controlled
@@ -107,7 +125,8 @@ func (s *inputTranscriber) Receive(ctx context.Context) (TranscriptEvent, error)
 		switch event.Kind {
 		case EventInputTranscription:
 			if event.InputTranscriptState == TranscriptInterim || event.InputTranscriptState == TranscriptFinal {
-				return TranscriptEvent{State: event.InputTranscriptState, Text: event.Text, EventID: event.EventID}, nil
+				transcript := TranscriptEvent{State: event.InputTranscriptState, Text: event.Text, EventID: event.EventID}
+				return s.sequencer.assign(transcript), nil
 			}
 		case EventAPIError:
 			return TranscriptEvent{}, ErrTranscriptionAPI

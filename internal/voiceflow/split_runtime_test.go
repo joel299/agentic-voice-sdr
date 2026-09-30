@@ -172,6 +172,53 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	}
 }
 
+func TestProductionInputBoundaryDeduplicatesReplayedFinalTurn(t *testing.T) {
+	state, err := conversation.NewConversationState("call_X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := &e2eProcessor{}
+	response := &e2eResponse{sendCalled: make(chan struct{}), events: make(chan geminilive.Event, 4)}
+	input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 4), seen: make(chan geminilive.TranscriptEvent, 4)}
+	repo := &transcriptRepoFake{}
+	runtime, err := NewSplitRuntimeWithTranscriptPersistence(&e2eAudio{}, &e2eAudio{}, input, response, state, processor, conversation.NewResponseGate(), nil, nil, "call_X", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(context.Background()) }()
+
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptInterim, Text: "Sim", EventID: "receive-1"}
+	<-input.seen
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	<-response.sendCalled
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	<-input.seen
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "Entendi."}
+	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	turns := state.Turns()
+	if len(turns) != 1 || turns[0].ID != "lead-000001" || turns[0].Text != "Sim" {
+		t.Fatalf("conversation lead turns after replay: %+v", turns)
+	}
+	leadRows := 0
+	for _, turn := range repo.turns {
+		if turn.Role == "lead" {
+			leadRows++
+			if turn.IdempotencyKey != "lead:call_X:lead-000001" {
+				t.Fatalf("lead business identity depends on provider event: %+v", turn)
+			}
+		}
+	}
+	if leadRows != 1 || processor.calls != 1 {
+		t.Fatalf("lead DB rows=%d, JEV/TurnRuntime begins=%d; want 1 each; rows=%+v", leadRows, processor.calls, repo.turns)
+	}
+}
+
 func TestBaresipTranscriptRuntimeUsesCanonicalAPICallID(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

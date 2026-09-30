@@ -3,6 +3,7 @@ package voiceflow
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
@@ -11,11 +12,14 @@ import (
 )
 
 type transcriptRepoFake struct {
+	mu    sync.Mutex
 	turns []voicecalldomain.Turn
 	err   error
 }
 
 func (r *transcriptRepoFake) AppendFinalTurn(_ context.Context, callID, role, text, source, key string) (voicecalldomain.Turn, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.err != nil {
 		return voicecalldomain.Turn{}, false, r.err
 	}
@@ -28,8 +32,10 @@ func (r *transcriptRepoFake) AppendFinalTurn(_ context.Context, callID, role, te
 	r.turns = append(r.turns, t)
 	return t, true, nil
 }
-func (*transcriptRepoFake) ListFinalTurns(context.Context, string) ([]voicecalldomain.Turn, error) {
-	return nil, nil
+func (r *transcriptRepoFake) ListFinalTurns(context.Context, string) ([]voicecalldomain.Turn, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]voicecalldomain.Turn(nil), r.turns...), nil
 }
 
 func TestLeadTranscriptPersistenceIgnoresInterimAndSurfacesFailure(t *testing.T) {
@@ -63,13 +69,28 @@ func TestLeadTranscriptPersistenceIgnoresInterimAndSurfacesFailure(t *testing.T)
 	}
 }
 
+func TestFinalTranscriptHandlerRejectsMissingApplicationTurnID(t *testing.T) {
+	h, _, processor := newTestHandler(t, nil)
+	repo := &transcriptRepoFake{}
+	if err := h.WithTranscriptPersistence("call_X", repo); err != nil {
+		t.Fatal(err)
+	}
+	err := h.HandleTranscript(context.Background(), geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"})
+	if !errors.Is(err, ErrMissingLeadTurnID) {
+		t.Fatalf("missing application turn identity error=%v", err)
+	}
+	if len(repo.turns) != 0 || len(h.state.Turns()) != 0 || processor.calls != 0 {
+		t.Fatalf("missing ID caused effects: rows=%+v turns=%+v begins=%d", repo.turns, h.state.Turns(), processor.calls)
+	}
+}
+
 func TestLeadTurnIdentityIsApplicationOwnedAcrossGeminiSessionRestart(t *testing.T) {
 	repo := &transcriptRepoFake{}
 	h1, state, _ := newTestHandler(t, nil)
 	if err := h1.WithTranscriptPersistence("call_X", repo); err != nil {
 		t.Fatal(err)
 	}
-	first := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	first := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1", TurnID: "lead-000001"}
 	if err := h1.HandleTranscript(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
@@ -77,11 +98,10 @@ func TestLeadTurnIdentityIsApplicationOwnedAcrossGeminiSessionRestart(t *testing
 	// application state owns the next call-scoped lead turn ID.
 	h2, _, _ := newTestHandler(t, nil)
 	h2.state = state
-	h2.nextLead = seedLeadSequence(state.Turns())
 	if err := h2.WithTranscriptPersistence("call_X", repo); err != nil {
 		t.Fatal(err)
 	}
-	second := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	second := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1", TurnID: "lead-000002"}
 	if err := h2.HandleTranscript(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}

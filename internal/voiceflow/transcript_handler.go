@@ -17,6 +17,7 @@ import (
 var (
 	ErrInvalidHandler        = errors.New("voiceflow: invalid transcript handler")
 	ErrTranscriptPersistence = errors.New("voiceflow: final transcript persistence failed")
+	ErrMissingLeadTurnID     = errors.New("voiceflow: final transcript is missing its application turn ID")
 )
 
 // EventHandler is the subset of bridge.EventHandler needed by the driver.
@@ -31,7 +32,6 @@ type FinalTranscriptHandler struct {
 	capability  *turnruntime.CapabilityContext
 	downstream  bridge.EventHandler
 	lifecycle   *ResponseLifecycleAdapter
-	nextLead    uint64
 	transcripts voicecalldomain.TranscriptRepository
 	callID      string
 }
@@ -49,7 +49,6 @@ func NewFinalTranscriptHandler(state *conversation.ConversationState, coordinato
 	return &FinalTranscriptHandler{
 		state: state, coordinator: coordinator, capability: capability,
 		downstream: next, lifecycle: NewResponseLifecycleAdapter(coordinator),
-		nextLead: seedLeadSequence(state.Turns()),
 	}, nil
 }
 
@@ -60,7 +59,7 @@ func seedLeadSequence(turns []conversation.Turn) uint64 {
 			continue
 		}
 		suffix := strings.TrimPrefix(turn.ID, "lead-")
-		if len(suffix) != 6 {
+		if len(suffix) < 6 {
 			continue
 		}
 		var value uint64
@@ -134,7 +133,7 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, t
 		return nil
 	}
 	if turnID == "" {
-		turnID = fmt.Sprintf("lead-%06d", h.nextLead+1)
+		return ErrMissingLeadTurnID
 	}
 	if h.transcripts != nil {
 		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+h.callID+":"+turnID)
@@ -146,7 +145,6 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, t
 		}
 	}
 
-	h.nextLead++
 	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, text, conversation.TranscriptFinal)
 	if err != nil {
 		return err

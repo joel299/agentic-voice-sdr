@@ -88,8 +88,12 @@ func newTestHandler(t *testing.T, processorErr error) (*FinalTranscriptHandler, 
 	return handler, state, processor
 }
 
-func finalEvent(text string) geminilive.Event {
-	return geminilive.Event{Kind: geminilive.EventInputTranscription, InputTranscriptState: geminilive.TranscriptFinal, Text: text}
+func finalEvent(text string, turnIDs ...string) geminilive.Event {
+	turnID := ""
+	if len(turnIDs) > 0 {
+		turnID = turnIDs[0]
+	}
+	return geminilive.Event{Kind: geminilive.EventInputTranscription, InputTranscriptState: geminilive.TranscriptFinal, Text: text, TurnID: turnID}
 }
 
 func recordTurn(t *testing.T, state *conversation.ConversationState, id, text string) {
@@ -112,7 +116,7 @@ func TestInterimAndBlankFinalDoNotBegin(t *testing.T) {
 	if err := h.HandleEvent(context.Background(), interimEvent("partial")); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.HandleEvent(context.Background(), finalEvent("   ")); err != nil {
+	if err := h.HandleEvent(context.Background(), finalEvent("   ", "")); err != nil {
 		t.Fatal(err)
 	}
 	if processor.calls != 0 || len(state.Turns()) != 0 {
@@ -122,7 +126,7 @@ func TestInterimAndBlankFinalDoNotBegin(t *testing.T) {
 
 func TestFinalTranscriptCreatesSequentialLeadTurnsIncludingDuplicates(t *testing.T) {
 	h, state, processor := newTestHandler(t, nil)
-	if err := h.HandleEvent(context.Background(), finalEvent("same phrase")); err != nil {
+	if err := h.HandleEvent(context.Background(), finalEvent("same phrase", "lead-000001")); err != nil {
 		t.Fatal(err)
 	}
 	lease := h.Lifecycle().CaptureActive()
@@ -132,7 +136,7 @@ func TestFinalTranscriptCreatesSequentialLeadTurnsIncludingDuplicates(t *testing
 	if err := lease.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.HandleEvent(context.Background(), finalEvent("same phrase")); err != nil {
+	if err := h.HandleEvent(context.Background(), finalEvent("same phrase", "lead-000002")); err != nil {
 		t.Fatal(err)
 	}
 	turns := state.Turns()
@@ -167,21 +171,12 @@ func TestRestoredLeadSequenceSeedsNextID(t *testing.T) {
 			for _, id := range test.ids {
 				recordTurn(t, state, id, "restored")
 			}
-			processor := &testProcessor{directive: conversation.TurnDirective{Kind: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}}
-			coordinator, err := turnloop.New(processor, &testResponder{}, conversation.NewResponseGate())
-			if err != nil {
-				t.Fatal(err)
-			}
-			h, err := NewFinalTranscriptHandler(state, coordinator, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := h.HandleEvent(context.Background(), finalEvent("new turn")); err != nil {
-				t.Fatal(err)
-			}
-			turns := state.Turns()
-			if turns[len(turns)-1].ID != test.want {
-				t.Fatalf("new ID=%q, want %q; turns=%#v", turns[len(turns)-1].ID, test.want, turns)
+			input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 1), seen: make(chan geminilive.TranscriptEvent, 1)}
+			input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "new turn", EventID: "receive-1"}
+			owned := geminilive.WithLeadTurnIdentity(input, geminilive.NewLeadTurnSequencer(seedLeadSequence(state.Turns())))
+			event, err := owned.Receive(context.Background())
+			if err != nil || event.TurnID != test.want {
+				t.Fatalf("new ID=%q, want %q; event=%+v err=%v", event.TurnID, test.want, event, err)
 			}
 		})
 	}
@@ -194,7 +189,7 @@ func TestFinalTranscriptIsConsumedAndNormalized(t *testing.T) {
 		downstreamCalls++
 		return nil
 	}
-	if err := h.HandleEvent(context.Background(), finalEvent("   hello world   ")); err != nil {
+	if err := h.HandleEvent(context.Background(), finalEvent("   hello world   ", "lead-000001")); err != nil {
 		t.Fatal(err)
 	}
 	turns := state.Turns()
@@ -230,7 +225,7 @@ func TestBlankFinalIsConsumedWithoutDownstream(t *testing.T) {
 func TestBeginErrorLeavesNoActiveLifecycle(t *testing.T) {
 	beginErr := errors.New("processor failed")
 	h, state, processor := newTestHandler(t, beginErr)
-	if err := h.HandleEvent(context.Background(), finalEvent("hello")); !errors.Is(err, beginErr) {
+	if err := h.HandleEvent(context.Background(), finalEvent("hello", "lead-000001")); !errors.Is(err, beginErr) {
 		t.Fatalf("error=%v, want %v", err, beginErr)
 	}
 	if processor.calls != 1 || len(state.Turns()) != 1 {

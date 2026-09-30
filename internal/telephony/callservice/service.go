@@ -110,11 +110,13 @@ type Service struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 
-	mu        sync.RWMutex
-	calls     map[string]Call
-	activeID  string
-	starting  bool
-	requested map[string]bool
+	mu              sync.RWMutex
+	calls           map[string]Call
+	activeID        string
+	starting        bool
+	requested       map[string]bool
+	uncertain       map[string]bool
+	hangupUncertain map[string]bool
 }
 
 func New(provider control.Provider, policy DestinationPolicy) (*Service, error) {
@@ -122,7 +124,7 @@ func New(provider control.Provider, policy DestinationPolicy) (*Service, error) 
 		return nil, errors.New("call service dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), requested: make(map[string]bool)}
+	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), requested: make(map[string]bool), uncertain: make(map[string]bool), hangupUncertain: make(map[string]bool)}
 	go s.consumeEvents()
 	return s, nil
 }
@@ -136,12 +138,44 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		return Call{}, ErrDestinationDenied
 	}
 	s.mu.Lock()
-	if s.starting || s.activeID != "" {
+	if s.starting {
+		s.mu.Unlock()
+		return Call{}, ErrCallActive
+	}
+	activeID := s.activeID
+	needsReconcile := activeID != "" && (s.uncertain[activeID] || s.hangupUncertain[activeID])
+	if activeID != "" && !needsReconcile {
 		s.mu.Unlock()
 		return Call{}, ErrCallActive
 	}
 	s.starting = true
 	s.mu.Unlock()
+	if needsReconcile {
+		var reconcileErr error
+		s.mu.RLock()
+		dialUncertain := s.uncertain[activeID]
+		s.mu.RUnlock()
+		if dialUncertain {
+			reconcileErr = s.Reconcile(ctx, activeID)
+		} else {
+			reconcileErr = s.reconcileHangup(ctx, activeID)
+		}
+		if reconcileErr != nil {
+			s.mu.Lock()
+			s.starting = false
+			s.mu.Unlock()
+			return Call{}, ErrCallActive
+		}
+		s.mu.Lock()
+		stillActive := s.activeID != ""
+		if stillActive {
+			s.starting = false
+		}
+		s.mu.Unlock()
+		if stillActive {
+			return Call{}, ErrCallActive
+		}
+	}
 
 	registration, err := s.provider.RegistrationStatus(ctx)
 	if err != nil {
@@ -155,6 +189,19 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		s.starting = false
 		s.mu.Unlock()
 		return Call{}, ErrNotRegistered
+	}
+	providerCalls, err := s.provider.ActiveCalls(ctx)
+	if err != nil {
+		s.mu.Lock()
+		s.starting = false
+		s.mu.Unlock()
+		return Call{}, ErrProviderFailure
+	}
+	if len(providerCalls) != 0 {
+		s.mu.Lock()
+		s.starting = false
+		s.mu.Unlock()
+		return Call{}, ErrCallActive
 	}
 	callID, err := newID()
 	if err != nil {
@@ -173,12 +220,20 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 	if _, err := s.provider.Dial(ctx, canonical); err != nil {
 		s.mu.Lock()
 		call := s.calls[callID]
-		call.Status = StatusFailed
-		s.calls[callID] = call
-		if s.activeID == callID {
-			s.activeID = ""
+		certainty := control.DispatchCertaintyOf(err)
+		if certainty == control.DispatchMaybeDispatched {
+			s.uncertain[callID] = true
+		} else {
+			call.Status = StatusFailed
+			s.calls[callID] = call
+			if s.activeID == callID {
+				s.activeID = ""
+			}
 		}
 		s.mu.Unlock()
+		if certainty == control.DispatchMaybeDispatched {
+			_ = s.Reconcile(ctx, callID)
+		}
 		return Call{}, ErrProviderFailure
 	}
 	return s.Get(callID)
@@ -205,17 +260,121 @@ func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 		s.mu.Unlock()
 		return Call{}, ErrCallNotActive
 	}
-	if s.requested[callID] {
+	if s.requested[callID] && !s.hangupUncertain[callID] {
 		s.mu.Unlock()
 		return Call{}, ErrHangupRequested
+	}
+	if s.requested[callID] && s.hangupUncertain[callID] {
+		s.mu.Unlock()
+		if err := s.reconcileHangup(ctx, callID); err != nil {
+			return Call{}, ErrProviderFailure
+		}
+		s.mu.RLock()
+		stillActive := s.activeID == callID
+		call = s.calls[callID]
+		s.mu.RUnlock()
+		if stillActive {
+			return call, ErrHangupRequested
+		}
+		return call, nil
 	}
 	// Mark before I/O so concurrent retries cannot issue a second command.
 	s.requested[callID] = true
 	s.mu.Unlock()
 	if _, err := s.provider.Hangup(ctx); err != nil {
+		certainty := control.DispatchCertaintyOf(err)
+		s.mu.Lock()
+		if certainty == control.DispatchNotDispatched || certainty == control.DispatchRejected {
+			delete(s.requested, callID)
+		} else {
+			s.hangupUncertain[callID] = true
+		}
+		s.mu.Unlock()
+		if certainty == control.DispatchMaybeDispatched {
+			_ = s.reconcileHangup(ctx, callID)
+		}
 		return Call{}, ErrProviderFailure
 	}
 	return s.Get(callID)
+}
+
+// Reconcile compares an uncertain dial outcome with the provider's current
+// inventory. An unreadable or nonmatching nonempty inventory keeps the gate.
+func (s *Service) Reconcile(ctx context.Context, callID string) error {
+	inventory, err := s.provider.ActiveCalls(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call, ok := s.calls[callID]
+	if !ok || s.activeID != callID || !s.uncertain[callID] {
+		return nil
+	}
+	if len(inventory) == 0 {
+		call.Status = StatusFailed
+		s.calls[callID] = call
+		s.activeID = ""
+		delete(s.uncertain, callID)
+		return nil
+	}
+	for _, active := range inventory {
+		if !inventoryMatches(active, call) {
+			continue
+		}
+		call.ProviderCallID = active.ProviderCallID
+		switch active.State {
+		case control.CallStateConnected:
+			call.Status = StatusConnected
+		case control.CallStateRinging:
+			call.Status = StatusRinging
+		case control.CallStateOutgoing:
+			call.Status = StatusDialing
+		}
+		s.calls[callID] = call
+		delete(s.uncertain, callID)
+		return nil
+	}
+	return nil
+}
+
+func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
+	inventory, err := s.provider.ActiveCalls(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call, ok := s.calls[callID]
+	if !ok || s.activeID != callID || !s.hangupUncertain[callID] {
+		return nil
+	}
+	if len(inventory) != 0 {
+		return nil
+	}
+	if call.Status == StatusConnected {
+		call.Status = StatusCompleted
+	} else {
+		call.Status = StatusCanceled
+	}
+	s.calls[callID] = call
+	s.activeID = ""
+	delete(s.hangupUncertain, callID)
+	return nil
+}
+
+func inventoryMatches(active control.ActiveCall, call Call) bool {
+	if active.ProviderCallID != "" && call.ProviderCallID != "" {
+		return active.ProviderCallID == call.ProviderCallID
+	}
+	if active.PeerURI == "" {
+		return false
+	}
+	peer := strings.TrimPrefix(strings.TrimSpace(active.PeerURI), "sip:")
+	peer = strings.TrimPrefix(peer, "sips:")
+	user := strings.SplitN(peer, "@", 2)[0]
+	user = strings.TrimPrefix(user, "+")
+	return user == strings.TrimPrefix(call.To, "+")
 }
 
 func (s *Service) Close() { s.cancel() }
@@ -249,6 +408,7 @@ func (s *Service) applyEvent(event control.Event) {
 			return
 		}
 		call.ProviderCallID = event.CallID
+		delete(s.uncertain, call.CallID)
 	} else if event.CallID != call.ProviderCallID {
 		return
 	}
@@ -263,6 +423,8 @@ func (s *Service) applyEvent(event control.Event) {
 		call.Status = statusFromEvent(event)
 		if call.Status.terminal() {
 			s.activeID = ""
+			delete(s.uncertain, call.CallID)
+			delete(s.hangupUncertain, call.CallID)
 		}
 	default:
 		return

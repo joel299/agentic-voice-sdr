@@ -116,7 +116,7 @@ components:
     BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     Unauthorized: { description: Missing or invalid owner bearer token, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     ProviderFailure: { description: Safe provider failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-    RuntimeFailure: { description: Safe SIP/Asterisk runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    RuntimeFailure: { description: Safe telephony runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Error: { type: object, required: [error], properties: { error: { type: string } } }
     CallCreateRequest:

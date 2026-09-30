@@ -11,14 +11,18 @@ import (
 )
 
 type fakeProvider struct {
-	mu              sync.Mutex
-	registration    control.RegistrationStatus
-	registrationErr error
-	dialErr         error
-	hangupErr       error
-	dialCalls       int
-	hangupCalls     int
-	events          chan control.Event
+	mu                sync.Mutex
+	registration      control.RegistrationStatus
+	registrationErr   error
+	dialErr           error
+	hangupErr         error
+	activeCalls       []control.ActiveCall
+	activeCallsErr    error
+	dialHook          func(*fakeProvider)
+	dialCalls         int
+	hangupCalls       int
+	dispatchedHangups int
+	events            chan control.Event
 }
 
 func newFakeProvider() *fakeProvider {
@@ -33,13 +37,24 @@ func (p *fakeProvider) Dial(context.Context, string) (control.CommandResult, err
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dialCalls++
+	if p.dialHook != nil {
+		p.dialHook(p)
+	}
 	return control.CommandResult{OK: true}, p.dialErr
 }
 func (p *fakeProvider) Hangup(context.Context) (control.CommandResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.hangupCalls++
+	if certainty := control.DispatchCertaintyOf(p.hangupErr); certainty != control.DispatchNotDispatched {
+		p.dispatchedHangups++
+	}
 	return control.CommandResult{OK: true}, p.hangupErr
+}
+func (p *fakeProvider) ActiveCalls(context.Context) ([]control.ActiveCall, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]control.ActiveCall(nil), p.activeCalls...), p.activeCallsErr
 }
 func (*fakeProvider) ListCalls(context.Context) (control.CommandResult, error) {
 	return control.CommandResult{OK: true}, nil
@@ -50,6 +65,12 @@ func (p *fakeProvider) counts() (int, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.dialCalls, p.hangupCalls
+}
+func (p *fakeProvider) setInventory(calls []control.ActiveCall, err error) {
+	p.mu.Lock()
+	p.activeCalls = append([]control.ActiveCall(nil), calls...)
+	p.activeCallsErr = err
+	p.mu.Unlock()
 }
 
 func testService(t *testing.T, provider *fakeProvider) *Service {
@@ -197,6 +218,142 @@ func TestRegistrationProviderErrorIsSafe(t *testing.T) {
 	service := testService(t, provider)
 	if _, err := service.Start(context.Background(), "+5567981340687"); err != ErrProviderFailure {
 		t.Fatalf("provider error exposed: %v", err)
+	}
+}
+
+func TestProviderActiveCallBlocksNewServiceStart(t *testing.T) {
+	provider := newFakeProvider()
+	provider.activeCalls = []control.ActiveCall{{ProviderCallID: "existing", PeerURI: "sip:+5567981340687@example"}}
+	service := testService(t, provider)
+	if _, err := service.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrCallActive) {
+		t.Fatalf("Start error=%v, want ErrCallActive", err)
+	}
+	dials, _ := provider.counts()
+	if dials != 0 {
+		t.Fatalf("Dial calls=%d, want 0", dials)
+	}
+}
+
+func TestProviderZeroCallsAllowsStart(t *testing.T) {
+	provider := newFakeProvider()
+	service := testService(t, provider)
+	if _, err := service.Start(context.Background(), "+5567981340687"); err != nil {
+		t.Fatal(err)
+	}
+	dials, _ := provider.counts()
+	if dials != 1 {
+		t.Fatalf("Dial calls=%d, want 1", dials)
+	}
+}
+
+func TestAmbiguousDialKeepsGateUntilInventoryProvesNoCall(t *testing.T) {
+	provider := newFakeProvider()
+	provider.dialErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
+	provider.dialHook = func(p *fakeProvider) { p.activeCallsErr = errors.New("inventory unavailable") }
+	service := testService(t, provider)
+	if _, err := service.Start(context.Background(), "+5567981340687"); err != ErrProviderFailure {
+		t.Fatalf("Start error=%v, want safe provider failure", err)
+	}
+	if _, err := service.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrCallActive) {
+		t.Fatalf("second Start error=%v, want active gate", err)
+	}
+	dials, _ := provider.counts()
+	if dials != 1 {
+		t.Fatalf("Dial calls=%d, want 1", dials)
+	}
+	service.mu.RLock()
+	callID := service.activeID
+	service.mu.RUnlock()
+	provider.setInventory(nil, nil)
+	if err := service.Reconcile(context.Background(), callID); err != nil {
+		t.Fatal(err)
+	}
+	provider.mu.Lock()
+	provider.dialErr = nil
+	provider.dialHook = nil
+	provider.mu.Unlock()
+	if _, err := service.Start(context.Background(), "+5567981340687"); err != nil {
+		t.Fatalf("Start after zero-call reconciliation: %v", err)
+	}
+}
+
+func TestAmbiguousDialMatchingInventoryCorrelatesAndKeepsGate(t *testing.T) {
+	provider := newFakeProvider()
+	provider.dialErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
+	provider.dialHook = func(p *fakeProvider) { p.activeCallsErr = errors.New("inventory unavailable") }
+	service := testService(t, provider)
+	_, _ = service.Start(context.Background(), "+5567981340687")
+	service.mu.RLock()
+	callID := service.activeID
+	service.mu.RUnlock()
+	provider.setInventory([]control.ActiveCall{{ProviderCallID: "baresip-7", PeerURI: "sip:+5567981340687@example", State: control.CallStateRinging}}, nil)
+	if err := service.Reconcile(context.Background(), callID); err != nil {
+		t.Fatal(err)
+	}
+	call, _ := service.Get(callID)
+	if call.ProviderCallID != "baresip-7" || call.Status != StatusRinging {
+		t.Fatalf("call was not reconciled: %+v", call)
+	}
+	if _, err := service.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrCallActive) {
+		t.Fatalf("Start error=%v, want active gate", err)
+	}
+	dials, _ := provider.counts()
+	if dials != 1 {
+		t.Fatalf("Dial calls=%d, want 1", dials)
+	}
+}
+
+func TestHangupNotDispatchedCanRetry(t *testing.T) {
+	provider := newFakeProvider()
+	service := testService(t, provider)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.hangupErr = &control.CommandError{Certainty: control.DispatchNotDispatched, Cause: errors.New("disconnected")}
+	if _, err := service.Hangup(context.Background(), call.CallID); err != ErrProviderFailure {
+		t.Fatalf("first Hangup error=%v", err)
+	}
+	provider.hangupErr = nil
+	if _, err := service.Hangup(context.Background(), call.CallID); err != nil {
+		t.Fatalf("retry Hangup error=%v", err)
+	}
+	provider.mu.Lock()
+	attempts, dispatched := provider.hangupCalls, provider.dispatchedHangups
+	provider.mu.Unlock()
+	if attempts != 2 || dispatched != 1 {
+		t.Fatalf("hangup attempts=%d dispatched=%d, want 2 and 1", attempts, dispatched)
+	}
+}
+
+func TestAmbiguousHangupDoesNotDuplicateAndReconciles(t *testing.T) {
+	provider := newFakeProvider()
+	service := testService(t, provider)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "baresip-established", PeerURI: "sip:+5567981340687@example"}
+	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
+	provider.hangupErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
+	provider.activeCalls = []control.ActiveCall{{PeerURI: "sip:+5567981340687@example", State: control.CallStateConnected}}
+	if _, err := service.Hangup(context.Background(), call.CallID); err != ErrProviderFailure {
+		t.Fatalf("Hangup error=%v", err)
+	}
+	if _, err := service.Hangup(context.Background(), call.CallID); !errors.Is(err, ErrHangupRequested) {
+		t.Fatalf("duplicate Hangup error=%v", err)
+	}
+	_, sent := provider.counts()
+	if sent != 1 {
+		t.Fatalf("Hangup calls=%d, want 1", sent)
+	}
+	provider.setInventory(nil, nil)
+	if _, err := service.Hangup(context.Background(), call.CallID); err != nil {
+		t.Fatalf("terminal reconciliation=%v", err)
+	}
+	got, _ := service.Get(call.CallID)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed", got.Status)
 	}
 }
 

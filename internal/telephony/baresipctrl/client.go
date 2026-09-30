@@ -385,40 +385,47 @@ func (c *Client) Do(ctx context.Context, command, params string) (control.Comman
 		ctx = context.Background()
 	}
 	command = strings.TrimSpace(command)
+	stateChanging := command == "dial" || command == "hangup"
+	commandError := func(err error, certainty control.DispatchCertainty) error {
+		if err == nil || !stateChanging {
+			return err
+		}
+		return &control.CommandError{Certainty: certainty, Cause: err}
+	}
 	if command == "" || strings.ContainsAny(command+params, "\r\n\x00") {
-		return control.CommandResult{}, ErrInvalidMessage
+		return control.CommandResult{}, commandError(ErrInvalidMessage, control.DispatchNotDispatched)
 	}
 	switch command {
 	case "reginfo", "dial", "hangup", "listcalls":
 	default:
-		return control.CommandResult{}, ErrUnsupportedCommand
+		return control.CommandResult{}, commandError(ErrUnsupportedCommand, control.DispatchNotDispatched)
 	}
 	conn, err := c.waitConn(ctx)
 	if err != nil {
-		return control.CommandResult{}, err
+		return control.CommandResult{}, commandError(err, control.DispatchNotDispatched)
 	}
 	token := strconv.FormatUint(c.tokenCounter.Add(1), 10)
 	request := wireRequest{Command: command, Params: params, Token: token}
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return control.CommandResult{}, ErrInvalidMessage
+		return control.CommandResult{}, commandError(ErrInvalidMessage, control.DispatchNotDispatched)
 	}
 	if len(payload) > c.maxFrameSize {
-		return control.CommandResult{}, ErrFrameTooLarge
+		return control.CommandResult{}, commandError(ErrFrameTooLarge, control.DispatchNotDispatched)
 	}
 	response := make(chan commandOutcome, 1)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return control.CommandResult{}, ErrClientClosed
+		return control.CommandResult{}, commandError(ErrClientClosed, control.DispatchNotDispatched)
 	}
 	if c.conn != conn {
 		c.mu.Unlock()
-		return control.CommandResult{}, ErrDisconnected
+		return control.CommandResult{}, commandError(ErrDisconnected, control.DispatchNotDispatched)
 	}
 	if len(c.pending) >= c.maxPending {
 		c.mu.Unlock()
-		return control.CommandResult{}, ErrPendingLimit
+		return control.CommandResult{}, commandError(ErrPendingLimit, control.DispatchNotDispatched)
 	}
 	c.pending[token] = response
 	c.mu.Unlock()
@@ -427,25 +434,30 @@ func (c *Client) Do(ctx context.Context, command, params string) (control.Comman
 	if !c.isCurrentConn(conn) {
 		c.writeMu.Unlock()
 		c.removePending(token)
-		return control.CommandResult{}, ErrDisconnected
+		return control.CommandResult{}, commandError(ErrDisconnected, control.DispatchNotDispatched)
 	}
-	if err := c.writeCommand(ctx, conn, payload); err != nil {
+	written, err := c.writeCommand(ctx, conn, payload)
+	if err != nil {
 		c.writeMu.Unlock()
 		c.removePending(token)
 		_ = conn.Close()
-		return control.CommandResult{}, err
+		certainty := control.DispatchNotDispatched
+		if written > 0 {
+			certainty = control.DispatchMaybeDispatched
+		}
+		return control.CommandResult{}, commandError(err, certainty)
 	}
 	c.writeMu.Unlock()
 
 	select {
 	case outcome := <-response:
-		return outcome.result, outcome.err
+		return outcome.result, commandError(outcome.err, control.DispatchMaybeDispatched)
 	case <-ctx.Done():
 		c.removePending(token)
-		return control.CommandResult{}, ctx.Err()
+		return control.CommandResult{}, commandError(ctx.Err(), control.DispatchMaybeDispatched)
 	case <-c.runDone:
 		c.removePending(token)
-		return control.CommandResult{}, ErrClientClosed
+		return control.CommandResult{}, commandError(ErrClientClosed, control.DispatchMaybeDispatched)
 	}
 }
 
@@ -477,31 +489,31 @@ func (c *Client) waitConn(ctx context.Context) (net.Conn, error) {
 	}
 }
 
-func (c *Client) writeCommand(ctx context.Context, conn net.Conn, payload []byte) error {
+func (c *Client) writeCommand(ctx context.Context, conn net.Conn, payload []byte) (int, error) {
 	deadline := time.Now().Add(c.writeTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
 	if err := conn.SetWriteDeadline(deadline); err != nil {
-		return ErrDisconnected
+		return 0, ErrDisconnected
 	}
 	callbackDone := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		_ = conn.SetWriteDeadline(time.Now())
 		close(callbackDone)
 	})
-	err := writeNetstring(conn, payload)
+	written, err := writeNetstring(conn, payload)
 	if !stop() {
 		<-callbackDone
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return written, ctx.Err()
 		}
-		return ErrDisconnected
+		return written, ErrDisconnected
 	}
-	return nil
+	return written, nil
 }
 
 func (c *Client) isCurrentConn(conn net.Conn) bool {
@@ -611,7 +623,7 @@ func registrationStateDetail(state control.RegistrationState) string {
 
 func (c *Client) Dial(ctx context.Context, destination string) (control.CommandResult, error) {
 	if strings.TrimSpace(destination) == "" {
-		return control.CommandResult{}, ErrInvalidMessage
+		return control.CommandResult{}, &control.CommandError{Certainty: control.DispatchNotDispatched, Cause: ErrInvalidMessage}
 	}
 	return c.command(ctx, "dial", destination)
 }
@@ -624,13 +636,25 @@ func (c *Client) ListCalls(ctx context.Context) (control.CommandResult, error) {
 	return c.command(ctx, "listcalls", "")
 }
 
+func (c *Client) ActiveCalls(ctx context.Context) ([]control.ActiveCall, error) {
+	result, err := c.ListCalls(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ParseActiveCalls(result.Data)
+}
+
 func (c *Client) command(ctx context.Context, name, params string) (control.CommandResult, error) {
 	result, err := c.Do(ctx, name, params)
 	if err != nil {
 		return control.CommandResult{}, err
 	}
 	if !result.OK {
-		return result, ErrCommandRejected
+		certainty := control.DispatchMaybeDispatched
+		if name == "dial" || name == "hangup" {
+			certainty = control.DispatchRejected
+		}
+		return result, &control.CommandError{Certainty: certainty, Cause: ErrCommandRejected}
 	}
 	return result, nil
 }
@@ -865,23 +889,25 @@ func readNetstring(reader *bufio.Reader, maxSize int) ([]byte, error) {
 	return payload, nil
 }
 
-func writeNetstring(writer io.Writer, payload []byte) error {
+func writeNetstring(writer io.Writer, payload []byte) (int, error) {
 	frame := []byte(strconv.Itoa(len(payload)) + ":")
 	frame = append(frame, payload...)
 	frame = append(frame, ',')
+	written := 0
 	for len(frame) > 0 {
 		n, err := writer.Write(frame)
 		if n > 0 {
+			written += n
 			frame = frame[n:]
 		}
 		if err != nil {
-			return err
+			return written, err
 		}
 		if n == 0 {
-			return io.ErrShortWrite
+			return written, io.ErrShortWrite
 		}
 	}
-	return nil
+	return written, nil
 }
 
 func waitContext(ctx context.Context, delay time.Duration) bool {

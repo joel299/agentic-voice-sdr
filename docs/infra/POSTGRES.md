@@ -1,6 +1,6 @@
 # PostgreSQL Dev Infrastructure & Transactional Outbox
 
-This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical schemas are defined only by ordered migrations `db/migrations/*.sql`; these files are the source of truth, and documentation must not maintain a parallel DDL contract. `0001`–`0003` define the Transactional Outbox; `0004_agent_prompt_versions.sql` defines versioned editable business/conversational prompt content in `agent_prompt_versions`.
+This guide covers the PostgreSQL 16 development service and its operational scripts. The canonical schemas are defined only by ordered migrations `db/migrations/*.sql`; these files are the source of truth, and documentation must not maintain a parallel DDL contract. `0001`–`0003` define the Transactional Outbox; `0004_agent_prompt_versions.sql` defines versioned editable business/conversational prompt content in `agent_prompt_versions`; `0005_voice_calls_and_transcript_turns.sql` defines call lifecycle and final transcript storage.
 
 ## Prerequisites and environment
 
@@ -50,6 +50,8 @@ The migration runner records each applied filename and SHA-256 checksum in `sche
 Migration `0004_agent_prompt_versions.sql` stores only owner-editable business/conversational prompt content. It is not the immutable system core and does not contain safety rules, Tool Policy, opt-out/ownership rules, canonical tools, credentials, or provider lifecycle instructions. The migration has no seed: zero active prompt versions is valid until the owner configures the first one. PostgreSQL enforces at most one active version. Existing versions are historical records whose name, prompt, creation time, and version cannot be edited; changes require inserting a new version. Future activation is intended for new sessions. The migration is the schema source of truth.
 
 Run `scripts/db/test-agent-prompt-versions.sh` against a PostgreSQL database via the standard `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, and `PGDATABASE` variables to validate the contract. The PostgreSQL smoke orchestrates this harness on its isolated PostgreSQL 16 instance.
+
+Migration `0005` stores only normalized call lifecycle fields and final transcript text. `voice_call_transcript_turns` enforces one idempotency key per call and a unique per-call sequence; the repository serializes sequence assignment by locking the parent call row inside the insert transaction. The application uses the PostgreSQL voice-call repository for outbound call creation and lifecycle updates. Transcript runtime boundaries require an explicit durable `call_id` and Gemini event identity; they do not infer associations from transcript text, timestamps, or media payloads. Run `go test -count=1 ./internal/integrations/postgres/voicecall` with the standard PostgreSQL environment to execute the real migration/repository contract (also included in the PostgreSQL smoke and CI).
 
 ## Development-only reset
 

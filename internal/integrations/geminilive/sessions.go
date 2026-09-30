@@ -16,8 +16,9 @@ var (
 // TranscriptEvent contains only recognized phone-input transcription. It has
 // no audio or model-response fields by construction.
 type TranscriptEvent struct {
-	State InputTranscriptState
-	Text  string
+	State   InputTranscriptState
+	Text    string
+	EventID string
 }
 
 // InputTranscriberSession is the only public capability that accepts raw phone
@@ -105,7 +106,7 @@ func (s *inputTranscriber) Receive(ctx context.Context) (TranscriptEvent, error)
 		switch event.Kind {
 		case EventInputTranscription:
 			if event.InputTranscriptState == TranscriptInterim || event.InputTranscriptState == TranscriptFinal {
-				return TranscriptEvent{State: event.InputTranscriptState, Text: event.Text}, nil
+				return TranscriptEvent{State: event.InputTranscriptState, Text: event.Text, EventID: event.EventID}, nil
 			}
 		case EventAPIError:
 			return TranscriptEvent{}, ErrTranscriptionAPI

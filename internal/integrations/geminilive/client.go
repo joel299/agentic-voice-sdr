@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -119,6 +120,7 @@ type Event struct {
 	InputTranscriptState InputTranscriptState
 	ToolCalls            []ToolCall
 	Error                string
+	EventID              string
 }
 
 type InputTranscriptState string
@@ -166,6 +168,7 @@ type providerSession struct {
 	closeOnce     sync.Once
 	done          chan struct{}
 	receiveActive atomic.Bool
+	eventSequence atomic.Uint64
 }
 
 func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
@@ -389,7 +392,18 @@ func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
-	return parseEvent(msg), nil
+	event := parseEvent(msg)
+	for _, key := range []string{"eventId", "event_id"} {
+		var id string
+		if json.Unmarshal(msg[key], &id) == nil && id != "" {
+			event.EventID = id
+			break
+		}
+	}
+	if event.EventID == "" {
+		event.EventID = fmt.Sprintf("receive-%d", s.eventSequence.Add(1))
+	}
+	return event, nil
 }
 func parseAPIError(msg map[string]json.RawMessage) string {
 	if raw, ok := msg["error"]; ok {

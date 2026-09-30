@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 	"github.com/joel299/agentic-voice-sdr/internal/turnloop"
@@ -14,7 +15,8 @@ import (
 )
 
 var (
-	ErrInvalidHandler = errors.New("voiceflow: invalid transcript handler")
+	ErrInvalidHandler        = errors.New("voiceflow: invalid transcript handler")
+	ErrTranscriptPersistence = errors.New("voiceflow: final transcript persistence failed")
 )
 
 // EventHandler is the subset of bridge.EventHandler needed by the driver.
@@ -30,6 +32,8 @@ type FinalTranscriptHandler struct {
 	downstream  bridge.EventHandler
 	lifecycle   *ResponseLifecycleAdapter
 	nextLead    uint64
+	transcripts voicecalldomain.TranscriptRepository
+	callID      string
 }
 
 // NewFinalTranscriptHandler creates a handler with a fixed capability context.
@@ -101,7 +105,7 @@ func (h *FinalTranscriptHandler) HandleTranscript(ctx context.Context, event gem
 	if event.State != geminilive.TranscriptFinal {
 		return nil
 	}
-	return h.handleFinalText(ctx, event.Text)
+	return h.handleFinalText(ctx, event.Text, event.EventID)
 }
 
 func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminilive.Event) error {
@@ -111,13 +115,35 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if event.Kind != geminilive.EventInputTranscription || event.InputTranscriptState != geminilive.TranscriptFinal {
 		return h.forward(ctx, event)
 	}
-	return h.handleFinalText(ctx, event.Text)
+	return h.handleFinalText(ctx, event.Text, event.EventID)
 }
 
-func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText string) error {
+// WithTranscriptPersistence enables durable storage for this call. event IDs
+// come from the Gemini session and are namespaced by role/source in storage.
+func (h *FinalTranscriptHandler) WithTranscriptPersistence(callID string, repository voicecalldomain.TranscriptRepository) error {
+	if h == nil || callID == "" || repository == nil {
+		return ErrInvalidHandler
+	}
+	h.callID, h.transcripts = callID, repository
+	return nil
+}
+
+func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, eventID string) error {
 	text := strings.TrimSpace(rawText)
 	if text == "" {
 		return nil
+	}
+	if h.transcripts != nil {
+		if eventID == "" {
+			return ErrTranscriptPersistence
+		}
+		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+eventID)
+		if err != nil {
+			return fmt.Errorf("%w", ErrTranscriptPersistence)
+		}
+		if !created {
+			return nil
+		}
 	}
 
 	h.nextLead++

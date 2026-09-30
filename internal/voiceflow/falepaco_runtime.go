@@ -15,6 +15,7 @@ import (
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
 	"github.com/joel299/agentic-voice-sdr/internal/domain/tools"
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/openrouterjev"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
@@ -35,6 +36,7 @@ type FalePacoLogger interface {
 	Log(event, callID, errorClass string)
 	Close() error
 }
+type FalePacoCallIDResolver func(context.Context, string) (string, error)
 
 type fileFalePacoLogger struct {
 	mu     sync.Mutex
@@ -85,6 +87,8 @@ type FalePacoRuntimeConfig struct {
 	Sessions        FalePacoSessionFactory
 	State           FalePacoStateFactory
 	Logger          FalePacoLogger
+	Transcripts     voicecalldomain.TranscriptRepository
+	ResolveCallID   FalePacoCallIDResolver
 }
 
 type FalePacoRuntime struct {
@@ -96,6 +100,9 @@ type FalePacoRuntime struct {
 func NewFalePacoRuntime(cfg FalePacoRuntimeConfig) (*FalePacoRuntime, error) {
 	if strings.TrimSpace(cfg.AudioSocketAddr) == "" || cfg.Processor == nil || cfg.Sessions == nil {
 		return nil, fmt.Errorf("%w: address, processor, and session factory are required", ErrInvalidFalePacoRuntime)
+	}
+	if (cfg.Transcripts == nil) != (cfg.ResolveCallID == nil) {
+		return nil, fmt.Errorf("%w: transcript repository and call ID resolver must be configured together", ErrInvalidFalePacoRuntime)
 	}
 	if cfg.State == nil {
 		cfg.State = conversation.NewConversationState
@@ -135,7 +142,23 @@ func NewFalePacoRuntime(cfg FalePacoRuntimeConfig) (*FalePacoRuntime, error) {
 		cfg.Logger.Log("gemini_response_open", callID, "")
 		gate := conversation.NewResponseGate()
 		audio := &falePacoAudio{stream: stream}
-		split, err := NewSplitRuntime(audio, audio, transcriber, responder, state, cfg.Processor, gate, nil, nil)
+		var split *bridge.SplitBridge
+		if cfg.Transcripts != nil {
+			if cfg.ResolveCallID == nil {
+				_ = transcriber.Close()
+				_ = responder.Close()
+				return ErrInvalidFalePacoRuntime
+			}
+			persistentCallID, resolveErr := cfg.ResolveCallID(ctx, sessionID)
+			if resolveErr != nil || persistentCallID == "" {
+				_ = transcriber.Close()
+				_ = responder.Close()
+				return ErrInvalidFalePacoRuntime
+			}
+			split, err = NewSplitRuntimeWithTranscriptPersistence(audio, audio, transcriber, responder, state, cfg.Processor, gate, nil, nil, persistentCallID, cfg.Transcripts)
+		} else {
+			split, err = NewSplitRuntime(audio, audio, transcriber, responder, state, cfg.Processor, gate, nil, nil)
+		}
 		if err != nil {
 			_ = transcriber.Close()
 			_ = responder.Close()
@@ -192,6 +215,16 @@ func NewProductionFalePacoRuntime(addr string, geminiConfig geminilive.Config) (
 }
 
 func NewProductionFalePacoRuntimeWithLogger(addr string, geminiConfig geminilive.Config, logger FalePacoLogger) (*FalePacoRuntime, error) {
+	return NewProductionFalePacoRuntimeWithPersistence(addr, geminiConfig, logger, nil, nil)
+}
+
+// NewProductionFalePacoRuntimeWithPersistence exposes the durable transcript
+// integration boundary. The resolver must map the AudioSocket UUID to an
+// existing canonical call record; the runtime deliberately does not guess.
+func NewProductionFalePacoRuntimeWithPersistence(addr string, geminiConfig geminilive.Config, logger FalePacoLogger, transcripts voicecalldomain.TranscriptRepository, resolveCallID FalePacoCallIDResolver) (*FalePacoRuntime, error) {
+	if (transcripts == nil) != (resolveCallID == nil) {
+		return nil, ErrInvalidFalePacoRuntime
+	}
 	provider, err := openrouterjev.ConfigFromEnv()
 	if err != nil {
 		return nil, err
@@ -217,7 +250,7 @@ func NewProductionFalePacoRuntimeWithLogger(addr string, geminiConfig geminilive
 		}
 		return input, response, nil
 	}
-	return NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: addr, Processor: processor, Sessions: sessions, Logger: logger})
+	return NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: addr, Processor: processor, Sessions: sessions, Logger: logger, Transcripts: transcripts, ResolveCallID: resolveCallID})
 }
 
 func sanitizeFalePacoCallID(payload []byte) string {

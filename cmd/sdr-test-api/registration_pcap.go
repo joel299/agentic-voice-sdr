@@ -25,7 +25,9 @@ const maxRegistrationTCPPackets = 30000
 type sipPCAPMessage struct {
 	startLine  string
 	headers    map[string]string
+	method     string
 	requestURI string
+	body       []byte
 	offset     int
 	firstSeen  time.Time
 	seen       time.Time
@@ -140,7 +142,7 @@ func takeSIPMessage(data []byte) (sipPCAPMessage, []byte, bool) {
 		}
 		headerBlock := string(data[:headerEnd])
 		lines := strings.Split(headerBlock, "\r\n")
-		if len(lines) == 0 || !(strings.HasPrefix(lines[0], "REGISTER ") || strings.HasPrefix(lines[0], "SIP/2.0 ")) {
+		if len(lines) == 0 || !(isSIPRequestLine(lines[0]) || strings.HasPrefix(lines[0], "SIP/2.0 ")) {
 			data = data[1:]
 			startOffset++
 			continue
@@ -172,19 +174,18 @@ func takeSIPMessage(data []byte) (sipPCAPMessage, []byte, bool) {
 			return empty, data, false
 		}
 		message := sipPCAPMessage{startLine: lines[0], headers: headers, offset: startOffset}
-		if strings.HasPrefix(lines[0], "REGISTER ") {
+		if isSIPRequestLine(lines[0]) {
 			parts := strings.Fields(lines[0])
-			if len(parts) > 1 {
-				message.requestURI = parts[1]
-			}
+			message.method, message.requestURI = strings.ToUpper(parts[0]), parts[1]
 		}
+		message.body = append([]byte(nil), data[headerEnd+4:total]...)
 		return message, append([]byte(nil), data[total:]...), true
 	}
 	return empty, data, false
 }
 
 func hasSIPStartPrefix(data []byte) bool {
-	for _, prefix := range [][]byte{[]byte("REGISTER "), []byte("SIP/2.0 ")} {
+	for _, prefix := range sipStartPrefixes() {
 		if bytes.HasPrefix(data, prefix) || bytes.HasPrefix(prefix, data) {
 			return true
 		}
@@ -193,20 +194,20 @@ func hasSIPStartPrefix(data []byte) bool {
 }
 
 func nextSIPStart(data []byte) int {
-	register := bytes.Index(data, []byte("REGISTER "))
-	response := bytes.Index(data, []byte("SIP/2.0 "))
-	if register < 0 {
-		return response
+	best := -1
+	for _, prefix := range sipStartPrefixes() {
+		index := bytes.Index(data, prefix)
+		if index >= 0 && (best < 0 || index < best) {
+			best = index
+		}
 	}
-	if response < 0 || register < response {
-		return register
-	}
-	return response
+	return best
 }
 
 func possibleSIPPrefixSuffix(data []byte) int {
 	maxKeep := 0
-	for _, prefix := range []string{"REGISTER ", "SIP/2.0 "} {
+	for _, rawPrefix := range sipStartPrefixes() {
+		prefix := string(rawPrefix)
 		limit := len(prefix) - 1
 		if limit > len(data) {
 			limit = len(data)
@@ -218,6 +219,27 @@ func possibleSIPPrefixSuffix(data []byte) int {
 		}
 	}
 	return maxKeep
+}
+
+func sipStartPrefixes() [][]byte {
+	prefixes := [][]byte{[]byte("SIP/2.0 ")}
+	for _, method := range []string{"REGISTER", "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "PRACK", "UPDATE", "INFO", "MESSAGE", "REFER", "SUBSCRIBE", "NOTIFY", "PUBLISH"} {
+		prefixes = append(prefixes, []byte(method+" "))
+	}
+	return prefixes
+}
+
+func isSIPRequestLine(line string) bool {
+	parts := strings.Fields(line)
+	if len(parts) < 3 || !strings.EqualFold(parts[len(parts)-1], "SIP/2.0") {
+		return false
+	}
+	for _, method := range []string{"REGISTER", "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "PRACK", "UPDATE", "INFO", "MESSAGE", "REFER", "SUBSCRIBE", "NOTIFY", "PUBLISH"} {
+		if strings.EqualFold(parts[0], method) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUDPSIPMessages(factory *sipTCPStreamFactory, payload []byte, stamp time.Time) {
@@ -304,6 +326,10 @@ func pcapLinkType(data []byte) (uint32, error) {
 }
 
 func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) (sipWireEvidence, error) {
+	return parseSIPPCAPWithMessages(path, attemptStart, username, secret, nil)
+}
+
+func parseSIPPCAPWithMessages(path string, attemptStart time.Time, username, secret string, messagesOut *[]sipPCAPMessage) (sipWireEvidence, error) {
 	var evidence sipWireEvidence
 	if attemptStart.IsZero() {
 		return evidence, errors.New("attempt start time missing")
@@ -360,6 +386,9 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 		if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 			udp := udpLayer.(*layers.UDP)
 			sawUDP = true
+			if !ci.Timestamp.Before(captureMarker) && isRTPDatagram(udp) {
+				evidence.RTPActivityPresent = true
+			}
 			if !ci.Timestamp.Before(captureMarker) && len(udp.Payload) > 0 {
 				capturePacketsPresent = true
 				if firstWireActivity.IsZero() || ci.Timestamp.Before(firstWireActivity) {
@@ -429,7 +458,7 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 			continue
 		}
 		line := strings.TrimSpace(message.startLine)
-		if strings.HasPrefix(line, "REGISTER ") {
+		if message.method == "REGISTER" {
 			callID := strings.TrimSpace(message.headers["call-id"])
 			cseq := sipCSeqSequence(message.headers["cseq"])
 			if currentCallID == "" {
@@ -506,7 +535,15 @@ func parseSIPPCAP(path string, attemptStart time.Time, username, secret string) 
 			evidence.Server = userAgent
 		}
 	}
+	if messagesOut != nil {
+		*messagesOut = messages
+	}
 	return evidence, nil
+}
+
+func isRTPDatagram(udp *layers.UDP) bool {
+	return udp != nil && len(udp.Payload) >= 12 && udp.Payload[0]>>6 == 2 &&
+		(udp.SrcPort >= 10000 && udp.SrcPort <= 65000 || udp.DstPort >= 10000 && udp.DstPort <= 65000)
 }
 
 func sipHeaderURI(value string) string {
@@ -571,6 +608,23 @@ func readSIPPCAPAndRemove(path string, attemptStart time.Time, username, secret 
 		evidence.CaptureErrorClass = classifyRegistrationPCAPError(err)
 	}
 	return evidence, err
+}
+
+func readSIPCallPCAPAndRemove(path string, attemptStart time.Time, username, secret string) (evidence sipWireEvidence, messages []sipPCAPMessage, err error) {
+	defer func() {
+		removeErr := os.Remove(path)
+		evidence.TemporaryPCAPDeleted = removeErr == nil || errors.Is(removeErr, os.ErrNotExist)
+		if err == nil && !evidence.TemporaryPCAPDeleted {
+			err = errors.New("temporary pcap cleanup failed")
+		}
+	}()
+	evidence, err = parseSIPPCAPWithMessages(path, attemptStart, username, secret, &messages)
+	if err != nil {
+		evidence.CaptureMode = "pcap"
+		evidence.TCPReassembly = "FAIL"
+		evidence.CaptureErrorClass = classifyRegistrationPCAPError(err)
+	}
+	return evidence, messages, err
 }
 
 func classifyRegistrationPCAPError(err error) string {

@@ -3,8 +3,8 @@ info:
   title: SDR Fale Paco Test API
   version: 1.2.0
   description: >-
-    Test-only outbound-only API. Login, authorize, configure Fale Paco, apply, then run a controlled REGISTER test; calls remain gated.
-    SIP credentials are server-side and the SIP password is write-only.
+    Test-only outbound-only API. Owner flow: login and authorize, PUT config, GET config, POST apply, GET registration, POST registration/test, confirm Registered, then POST call.
+    The call endpoint requires Registered state and a matching active PJSIP profile. SIP credentials are server-side and the SIP password is write-only.
 servers:
   - url: https://sdr.iainfinito.com.br
 tags:
@@ -163,6 +163,34 @@ components:
         apply_error_class: {type: string}
         apply_error_summary: {type: string}
         secrets_redacted: {type: boolean, enum: [true]}
+    FalePacoCallResponse:
+      type: object
+      required: [ok, destination, registration_status, selected_transport, request_uri_host, request_uri, outbound_proxy_host, auth_username, originate_accepted, invite_sent, digest_challenge_received, authenticated_invite_sent, digest_response_matches_runtime_secret, sip_progress, sip_final_status, sip_final_reason, call_established, sdp_negotiated, codec, rtp_activity_present, q850_cause, q850_reason, duration_seconds, secrets_redacted]
+      properties:
+        ok: {type: boolean}
+        destination: {type: string, example: "+5567981340687"}
+        registration_status: {type: string, example: Registered}
+        selected_transport: {type: string, enum: [tcp], example: tcp}
+        request_uri_host: {type: string, example: 98034.falepaco.com.br}
+        request_uri: {type: string, example: "sip:+5567981340687@98034.falepaco.com.br:5060;transport=tcp"}
+        outbound_proxy_host: {type: string, example: "98034.falepaco.com.br:5060"}
+        auth_username: {type: string, example: "100"}
+        originate_accepted: {type: boolean}
+        invite_sent: {type: boolean}
+        digest_challenge_received: {type: boolean}
+        authenticated_invite_sent: {type: boolean}
+        digest_response_matches_runtime_secret: {type: boolean}
+        sip_progress: {type: array, items: {type: integer}, example: [183]}
+        sip_final_status: {type: integer, example: 200}
+        sip_final_reason: {type: string, example: OK}
+        call_established: {type: boolean}
+        sdp_negotiated: {type: boolean}
+        codec: {type: string, example: PCMU/8000}
+        rtp_activity_present: {type: boolean}
+        q850_cause: {type: integer, example: 16}
+        q850_reason: {type: string, example: NORMAL_CLEARING}
+        duration_seconds: {type: number, format: float}
+        secrets_redacted: {type: boolean, enum: [true]}
 paths:
   /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
   /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
@@ -220,7 +248,7 @@ paths:
   /v1/falepaco/registration/test:
     post:
       tags: [Fale Paco Registration]
-      summary: Test SIP REGISTER
+      summary: Test SIP REGISTER once
       description: Captures the saved TCP or UDP transport on port 5060 to a mode-0600 temporary PCAP, applies the saved registration configuration, reads the registration object and pre-state, then explicitly runs one `pjsip send register trunk-falepaco-reg` trigger. TCP SIP is decoded only after in-process TCP stream reassembly and correlated by Call-ID/CSeq; no tshark dependency or packet-oriented text fallback is used. The PCAP is removed after parsing. A stale Rejected state without current-attempt wire evidence is not provider rejection. Does not place a call.
       security: [{BearerAuth: []}]
       responses:
@@ -230,8 +258,13 @@ paths:
   /v1/test/falepaco/call:
     post:
       tags: [Fale Paco Test]
-      summary: Execute one controlled outbound test
-      description: Uses the saved Fale Paco configuration and only allows +556****0687.
+      summary: Call the allowed destination after registration
+      description: Requires registration_status=Registered and a saved configuration matching the active PJSIP endpoint, AOR, auth, registration and TCP transport. It does not reapply or reload the trunk after the registration gate. Uses the canonical 98034 profile and only allows +5567981340687.
       security: [{BearerAuth: []}]
-      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+556****0687"}}}}}}
-      responses: {"200": {description: Sanitized SIP result}, "400": {description: Destination not allowed}, "401": {description: Unauthorized}, "409": {description: Another call active}, "502": {description: SIP failure}}
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+5567981340687"}}}}}}
+      responses:
+        "200": {description: Sanitized INVITE, SDP, RTP and Q.850 result, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoCallResponse'}}}}
+        "400": {description: Destination not allowed}
+        "401": {description: Unauthorized}
+        "409": {description: Registration or active PJSIP profile gate failed}
+        "502": {description: SIP capture, originate or readback failure}

@@ -40,6 +40,7 @@ type sipWireEvidence struct {
 	AuthenticatedRequestMS                              *int64
 	FinalResponseMS                                     *int64
 	TemporaryPCAPDeleted                                bool
+	RTPActivityPresent                                  bool
 }
 
 var digestValue = regexp.MustCompile(`(?i)(cnonce|username|algorithm|response|realm|nonce|uri|qop|nc)\s*=\s*(?:"([^"]*)"|([^,\s]+))`)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -15,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -56,22 +54,31 @@ type tokenClaims struct {
 	JTI string `json:"jti"`
 }
 type callResponse struct {
-	OK                                 bool   `json:"ok"`
-	Destination                        string `json:"destination"`
-	CredentialSource                   string `json:"credential_source"`
-	CredentialFileLoadedFresh          bool   `json:"credential_file_loaded_fresh"`
-	AuthUsername                       string `json:"auth_username"`
-	Transport                          string `json:"transport"`
-	RequestURI                         string `json:"request_uri"`
-	OutboundProxyHost                  string `json:"outbound_proxy_host"`
-	DigestChallengeReceived            bool   `json:"digest_challenge_received"`
-	AuthenticatedInviteSent            bool   `json:"authenticated_invite_sent"`
-	DigestResponseMatchesRuntimeSecret bool   `json:"digest_response_matches_runtime_secret"`
-	SIPStatus                          int    `json:"sip_status"`
-	SIPReason                          string `json:"sip_reason"`
-	SecretsRedacted                    bool   `json:"secrets_redacted"`
-	SelectedTransport                  string `json:"selected_transport"`
-	NetworkProtocolObserved            string `json:"network_protocol_observed"`
+	OK                                 bool    `json:"ok"`
+	Destination                        string  `json:"destination"`
+	RegistrationStatus                 string  `json:"registration_status"`
+	SelectedTransport                  string  `json:"selected_transport"`
+	RequestURIHost                     string  `json:"request_uri_host"`
+	RequestURI                         string  `json:"request_uri"`
+	OutboundProxyHost                  string  `json:"outbound_proxy_host"`
+	AuthUsername                       string  `json:"auth_username"`
+	OriginateAccepted                  bool    `json:"originate_accepted"`
+	InviteSent                         bool    `json:"invite_sent"`
+	DigestChallengeReceived            bool    `json:"digest_challenge_received"`
+	AuthenticatedInviteSent            bool    `json:"authenticated_invite_sent"`
+	DigestResponseMatchesRuntimeSecret bool    `json:"digest_response_matches_runtime_secret"`
+	SIPProgress                        []int   `json:"sip_progress"`
+	SIPFinalStatus                     int     `json:"sip_final_status"`
+	SIPFinalReason                     string  `json:"sip_final_reason"`
+	CallEstablished                    bool    `json:"call_established"`
+	SDPNegotiated                      bool    `json:"sdp_negotiated"`
+	Codec                              string  `json:"codec"`
+	RTPActivityPresent                 bool    `json:"rtp_activity_present"`
+	Q850Cause                          int     `json:"q850_cause"`
+	Q850Reason                         string  `json:"q850_reason"`
+	DurationSeconds                    float64 `json:"duration_seconds"`
+	SecretsRedacted                    bool    `json:"secrets_redacted"`
+	NetworkProtocolObserved            string  `json:"network_protocol_observed"`
 }
 
 func dotenv(path string) (map[string]string, error) {
@@ -213,21 +220,38 @@ func health(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"ok": true, "service": "sdr-test-api", "mode": "outbound-only"})
 }
 
-var headerRE = regexp.MustCompile(`(?i)(?:^|\n)(Proxy-Authenticate|Proxy-Authorization):[^\n]*`)
+var headerRE = regexp.MustCompile(`(?im)^(WWW-Authenticate|Proxy-Authenticate|Authorization|Proxy-Authorization):[^\r\n]*`)
 var fieldRE = regexp.MustCompile(`(?i)([a-z-]+)="?([^",\s]+)"?`)
 
 func parseDigest(wire, password string) (bool, bool, bool, int) {
 	lines := headerRE.FindAllString(wire, -1)
-	challenge, auth := "", ""
+	wwwChallenge, proxyChallenge, authorization, proxyAuthorization := "", "", "", ""
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if strings.HasPrefix(strings.ToLower(line), "proxy-authenticate:") && challenge == "" {
-			challenge = line
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "www-authenticate:") && wwwChallenge == "" {
+			wwwChallenge = line
 		}
-		if strings.HasPrefix(strings.ToLower(line), "proxy-authorization:") {
-			auth = line
+		if strings.HasPrefix(lower, "proxy-authenticate:") && proxyChallenge == "" {
+			proxyChallenge = line
+		}
+		if strings.HasPrefix(lower, "authorization:") && authorization == "" {
+			authorization = line
+		}
+		if strings.HasPrefix(lower, "proxy-authorization:") && proxyAuthorization == "" {
+			proxyAuthorization = line
 		}
 	}
+	challenge, auth := wwwChallenge, authorization
+	if proxyChallenge != "" && proxyAuthorization != "" {
+		challenge, auth = proxyChallenge, proxyAuthorization
+	} else if wwwChallenge == "" && proxyChallenge != "" {
+		challenge = proxyChallenge
+	} else if authorization == "" && proxyAuthorization != "" {
+		auth = proxyAuthorization
+	}
+	hasChallenge := wwwChallenge != "" || proxyChallenge != ""
+	hasAuth := authorization != "" || proxyAuthorization != ""
 	status := 0
 	for _, m := range regexp.MustCompile(`SIP/2.0 (\d{3})`).FindAllStringSubmatch(wire, -1) {
 		if len(m) == 2 {
@@ -235,7 +259,7 @@ func parseDigest(wire, password string) (bool, bool, bool, int) {
 		}
 	}
 	if challenge == "" || auth == "" {
-		return challenge != "", auth != "", false, status
+		return hasChallenge, hasAuth, false, status
 	}
 	get := func(line, key string) string {
 		for _, m := range fieldRE.FindAllStringSubmatch(line, -1) {
@@ -250,7 +274,10 @@ func parseDigest(wire, password string) (bool, bool, bool, int) {
 	if (algorithm != "" && !strings.EqualFold(algorithm, "MD5")) || realm == "" || nonce == "" || qop == "" || username == "" || uri == "" || nc == "" || cnonce == "" || response == "" {
 		return true, true, false, status
 	}
-	return true, true, sip.VerifyDigestResponse(username, password, realm, nonce, "INVITE", uri, qop, nc, cnonce, response), status
+	challengeRealm := get(challenge, "realm")
+	pairedHeaders := (strings.HasPrefix(strings.ToLower(challenge), "www-authenticate:") && strings.HasPrefix(strings.ToLower(auth), "authorization:")) ||
+		(strings.HasPrefix(strings.ToLower(challenge), "proxy-authenticate:") && strings.HasPrefix(strings.ToLower(auth), "proxy-authorization:"))
+	return hasChallenge, hasAuth, pairedHeaders && strings.EqualFold(challengeRealm, realm) && sip.VerifyDigestResponse(username, password, realm, nonce, "INVITE", uri, qop, nc, cnonce, response), status
 }
 func classifyCaptureError(text string) string {
 	t := strings.ToLower(text)
@@ -273,7 +300,7 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in callRequest
-	if json.NewDecoder(r.Body).Decode(&in) != nil || in.Destination != allowedDestination {
+	if json.NewDecoder(r.Body).Decode(&in) != nil || !callDestinationAllowed(in.Destination) {
 		jsonOut(w, 400, map[string]string{"error": "destination_not_allowed"})
 		return
 	}
@@ -298,112 +325,92 @@ func (s *server) call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.RegistrationRequired {
-		stateOut, _ := exec.Command("asterisk", "-rx", "pjsip show registration trunk-falepaco-reg").CombinedOutput()
-		if !callRegistrationReady(registrationStateFromOutput(string(stateOut))) {
-			jsonOut(w, 409, map[string]any{"error": "provider_not_registered", "registration_status": "Unregistered", "secrets_redacted": true})
+		state, mismatch := activePJSIPProfileStatus(r.Context(), req, runAsteriskCommand)
+		if !callRegistrationReady(state) {
+			jsonOut(w, 409, map[string]any{"error": "provider_not_registered", "registration_status": state, "secrets_redacted": true})
+			return
+		}
+		if mismatch != "" {
+			jsonOut(w, 409, map[string]any{"error": "active_profile_mismatch", "active_profile_mismatch": mismatch, "registration_status": state, "secrets_redacted": true})
 			return
 		}
 	}
-	mgr, e := sip.NewManager(sip.DefaultNetworkDialer{}, sip.NewRealAsteriskReloader("/etc/asterisk/pjsip.d", nil))
+	if !canonicalFalePacoProfile(req, m) {
+		jsonOut(w, 409, map[string]any{"error": "configuration_not_canonical", "secrets_redacted": true})
+		return
+	}
+	requestURI, e := sip.BuildOutboundURI(cfg, allowedDestination)
 	if e != nil {
-		jsonOut(w, 502, map[string]string{"error": "asterisk_manager_unavailable"})
+		jsonOut(w, 502, map[string]any{"error": "sip_config_invalid", "secrets_redacted": true})
+		return
+	}
+	dnsState, providerIPs, allowed := resolveFalePacoHost(req.Host, 4*time.Second)
+	if dnsState != "resolved" || !allowed || len(providerIPs) == 0 {
+		jsonOut(w, 502, map[string]any{"error": "provider_dns_not_allowed", "secrets_redacted": true})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	if _, e = mgr.ApplyTrunk(ctx, cfg); e != nil {
-		jsonOut(w, 502, map[string]string{"error": "sip_apply_failed"})
-		return
-	}
-	if out, e := exec.CommandContext(ctx, "asterisk", "-rx", "pjsip show endpoint trunk-falepaco").CombinedOutput(); e != nil || !strings.Contains(string(out), "trunk-falepaco") {
-		jsonOut(w, 502, map[string]string{"error": "asterisk_readback_failed"})
-		return
-	}
-	callID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
-	pcap := "/tmp/gru142-sip-" + callID + ".pcap"
 	protocol := strings.ToLower(req.Transport)
 	if protocol != "tcp" && protocol != "udp" {
 		jsonOut(w, 400, map[string]string{"error": "transport_not_supported"})
 		return
 	}
-	_ = os.Remove(pcap)
-	tcp := exec.Command("tcpdump", "-U", "-i", "any", "-s0", "-w", pcap, protocol+" port 5060")
-	if e = tcp.Start(); e != nil {
-		jsonOut(w, 502, map[string]string{"error": "sip_capture_setup_failed"})
-		return
-	}
-	if _, e = exec.CommandContext(ctx, "asterisk", "-rx", "channel originate PJSIP/"+allowedDestination+"@trunk-falepaco application Wait 15").CombinedOutput(); e != nil {
-		_ = tcp.Process.Signal(os.Interrupt)
-		_ = tcp.Wait()
-		jsonOut(w, 502, map[string]string{"error": "originate_failed"})
-		return
-	}
-	time.Sleep(18 * time.Second)
-	captureSignalErr := tcp.Process.Signal(os.Interrupt)
-	captureWaitErr := tcp.Wait()
-	captureExitClean := captureSignalErr == nil && captureWaitErr == nil
-	defer os.Remove(pcap)
-	stat, statErr := os.Stat(pcap)
-	pcapExists := statErr == nil
-	var pcapSize int64
-	if pcapExists {
-		pcapSize = stat.Size()
-	}
-	diag := map[string]any{"selected_transport": protocol, "pcap_path": filepath.Base(pcap), "pcap_exists": pcapExists, "pcap_size_bytes": pcapSize, "capture_exit_clean": captureExitClean, "capture_exit_code": 0, "capture_packets_present": false, "originate_command_started": true, "originate_command_accepted": true, "originate_exit_code": 0, "secrets_redacted": true}
-	if !pcapExists || pcapSize <= 24 {
-		diag["error"] = "capture_empty_or_invalid"
-		diag["pcap_decode_probe"] = "not_run"
-		jsonOut(w, 502, diag)
-		return
-	}
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer probeCancel()
-	var probeErrBuf bytes.Buffer
-	probeCmd := exec.CommandContext(probeCtx, "tcpdump", "-nn", "-r", pcap, "-c", "1")
-	probeCmd.Stderr = &probeErrBuf
-	probeErr := probeCmd.Run()
-	if probeErr != nil {
-		diag["error"] = "sip_capture_decode_failed"
-		diag["pcap_decode_probe"] = "FAIL"
-		diag["decode_exit_code"] = 1
-		diag["decode_error_class"] = classifyCaptureError(probeErrBuf.String())
-		jsonOut(w, 502, diag)
-		return
-	}
-	diag["pcap_decode_probe"] = "PASS"
-	diag["capture_packets_present"] = true
-	decodeCtx, decodeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer decodeCancel()
-	var decodeStderr bytes.Buffer
-	decodeCmd := exec.CommandContext(decodeCtx, "tcpdump", "-nn", "-A", "-r", pcap)
-	decodeCmd.Stderr = &decodeStderr
-	dump, e := decodeCmd.Output()
-	observedProtocol := "unknown"
-	if packet, packetErr := exec.CommandContext(decodeCtx, "tcpdump", "-nn", "-r", pcap, protocol+" port 5060").Output(); packetErr == nil && len(packet) > 0 {
-		observedProtocol = strings.ToUpper(protocol)
-	}
+	capture, pcap, e := startSIPCallPCAPCapture(providerIPs)
 	if e != nil {
-		diag["error"] = "sip_capture_decode_failed"
-		diag["pcap_decode"] = false
-		diag["decode_exit_code"] = 1
-		diag["decode_error_class"] = classifyCaptureError(decodeStderr.String())
-		jsonOut(w, 502, diag)
+		jsonOut(w, 502, map[string]any{"error": "sip_capture_setup_failed", "secrets_redacted": true})
 		return
 	}
-	diag["pcap_decode"] = true
-	challenge, auth, digestOK, status := parseDigest(string(dump), req.Auth.Secret)
-	if !challenge || !auth || !digestOK {
-		jsonOut(w, 502, map[string]string{"error": "digest_proof_failed"})
+	started := time.Now().UTC()
+	originateOut, e := exec.CommandContext(ctx, "asterisk", "-rx", "channel originate PJSIP/"+allowedDestination+"@trunk-falepaco application Wait 15").CombinedOutput()
+	originateAccepted := e == nil && !strings.Contains(strings.ToLower(string(originateOut)), "failed")
+	if !originateAccepted {
+		_ = stopSIPPCAPCapture(capture)
+		_ = os.Remove(pcap)
+		jsonOut(w, 502, map[string]any{"error": "originate_failed", "registration_status": "Registered", "originate_accepted": false, "secrets_redacted": true})
 		return
 	}
-	reason := ""
-	if status == 403 {
-		reason = "Forbidden"
+	if waitErr := waitForCallCapture(ctx, time.Until(started.Add(18*time.Second))); waitErr != nil {
+		_ = stopSIPPCAPCapture(capture)
+		_ = os.Remove(pcap)
+		jsonOut(w, 502, map[string]any{"error": "call_capture_interrupted", "originate_accepted": true, "secrets_redacted": true})
+		return
 	}
-	if status == 200 {
-		reason = "OK"
+	if stopErr := stopSIPPCAPCapture(capture); stopErr != nil {
+		_ = os.Remove(pcap)
+		jsonOut(w, 502, map[string]any{"error": "sip_capture_stop_failed", "originate_accepted": true, "secrets_redacted": true})
+		return
 	}
-	jsonOut(w, 200, callResponse{OK: status >= 200 && status < 300, Destination: allowedDestination, CredentialSource: "runtime_env_file", CredentialFileLoadedFresh: true, AuthUsername: req.Auth.Username, Transport: protocol, RequestURI: "sip:" + allowedDestination + "@" + req.Host + ":" + fmt.Sprint(req.Port) + ";transport=" + req.Transport, OutboundProxyHost: req.OutboundProxy, DigestChallengeReceived: challenge, AuthenticatedInviteSent: auth, DigestResponseMatchesRuntimeSecret: digestOK, SIPStatus: status, SIPReason: reason, SecretsRedacted: true, SelectedTransport: protocol, NetworkProtocolObserved: observedProtocol})
+	evidence, messages, parseErr := readSIPCallPCAPAndRemove(pcap, started, req.Auth.Username, req.Auth.Secret)
+	if parseErr != nil {
+		jsonOut(w, 502, map[string]any{"error": "sip_capture_decode_failed", "originate_accepted": true, "secrets_redacted": true})
+		return
+	}
+	callEvidence := summarizeSIPCall(evidence, messages, req.Auth.Username, req.Auth.Secret, req.RegistrationRealm)
+	jsonOut(w, 200, callResponse{
+		OK:          callEvidence.Established && callEvidence.SDPNegotiated && evidence.RTPActivityPresent,
+		Destination: allowedDestination, RegistrationStatus: "Registered", SelectedTransport: protocol,
+		RequestURIHost: req.Host, RequestURI: requestURI, OutboundProxyHost: req.OutboundProxy,
+		AuthUsername: req.Auth.Username, OriginateAccepted: true, InviteSent: callEvidence.InviteSent,
+		DigestChallengeReceived: callEvidence.Challenge, AuthenticatedInviteSent: callEvidence.Authenticated,
+		DigestResponseMatchesRuntimeSecret: callEvidence.DigestMatches,
+		SIPProgress:                        callEvidence.Progress, SIPFinalStatus: callEvidence.FinalStatus,
+		SIPFinalReason: callEvidence.FinalReason, CallEstablished: callEvidence.Established,
+		SDPNegotiated: callEvidence.SDPNegotiated, Codec: callEvidence.Codec,
+		RTPActivityPresent: evidence.RTPActivityPresent, Q850Cause: callEvidence.Q850Cause,
+		Q850Reason: callEvidence.Q850Reason, DurationSeconds: callEvidence.DurationSeconds,
+		SecretsRedacted: true, NetworkProtocolObserved: observedProtocolFromCapture(evidence.CaptureMode),
+	})
+}
+
+func observedProtocolFromCapture(mode string) string {
+	if strings.Contains(mode, "tcp") {
+		return "TCP"
+	}
+	if strings.Contains(mode, "udp") {
+		return "UDP"
+	}
+	return ""
 }
 func (s *server) docs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

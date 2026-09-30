@@ -35,7 +35,6 @@ type FalePacoLogger interface {
 	Log(event, callID, errorClass string)
 	Close() error
 }
-
 type fileFalePacoLogger struct {
 	mu     sync.Mutex
 	file   *os.File
@@ -90,7 +89,6 @@ type FalePacoRuntimeConfig struct {
 type FalePacoRuntime struct {
 	server *audiosocket.Server
 	logger FalePacoLogger
-	nextID atomic.Uint64
 }
 
 func NewFalePacoRuntime(cfg FalePacoRuntimeConfig) (*FalePacoRuntime, error) {

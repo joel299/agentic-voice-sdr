@@ -22,7 +22,7 @@ func (s *runtimeTestInput) Receive(ctx context.Context) (geminilive.TranscriptEv
 	sent := false
 	s.once.Do(func() { sent = true })
 	if sent {
-		return geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "  hello from Paco  "}, nil
+		return geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "  hello from Paco  ", EventID: "lead-event"}, nil
 	}
 	<-ctx.Done()
 	return geminilive.TranscriptEvent{}, ctx.Err()
@@ -71,8 +71,8 @@ func (runtimeTestProcessor) ProcessTurn(context.Context, turnruntime.TurnInput) 
 	return conversation.TurnDirective{Kind: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}, nil
 }
 
-func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
-	response := &runtimeTestResponse{ready: make(chan struct{}), events: []geminilive.Event{{Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000", Audio: []byte{1, 2}}, {Kind: geminilive.EventTurnComplete}}}
+func TestFalePacoRuntimeUsesLegacyAudioSocketComposition(t *testing.T) {
+	response := &runtimeTestResponse{ready: make(chan struct{}), events: []geminilive.Event{{Kind: geminilive.EventOutputTranscription, Text: "Agent reply", EventID: "agent-event"}, {Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000", Audio: []byte{1, 2}}, {Kind: geminilive.EventTurnComplete}}}
 	var gotID string
 	runtime, err := NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: "127.0.0.1:0", Processor: runtimeTestProcessor{}, Sessions: func(_ context.Context, id string) (geminilive.InputTranscriberSession, geminilive.ControlledResponseSession, error) {
 		gotID = id

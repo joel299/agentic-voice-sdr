@@ -11,8 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
+	voicecallpostgres "github.com/joel299/agentic-voice-sdr/internal/integrations/postgres/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
@@ -53,6 +56,22 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 func serve(ctx context.Context, cfg config.Config) error {
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	pgConfig, err := pgxpool.ParseConfig("")
+	if err != nil {
+		return fmt.Errorf("configure PostgreSQL: %w", err)
+	}
+	pgPool, err := pgxpool.NewWithConfig(signalCtx, pgConfig)
+	if err != nil {
+		return fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	defer pgPool.Close()
+	if err := pgPool.Ping(signalCtx); err != nil {
+		return fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	callRepository, err := voicecallpostgres.NewRepository(pgPool)
+	if err != nil {
+		return fmt.Errorf("configure call persistence: %w", err)
+	}
 	provider, err := baresipctrl.New(baresipctrl.Options{Address: cfg.BaresipCtrlTCPAddress})
 	if err != nil {
 		return fmt.Errorf("configure local Baresip control: %w", err)
@@ -62,7 +81,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		_ = provider.Close()
 		return fmt.Errorf("configure outbound call destination policy: %w", err)
 	}
-	calls, err := callservice.New(provider, policy)
+	calls, err := callservice.NewWithRepository(provider, policy, callRepository)
 	if err != nil {
 		_ = provider.Close()
 		return fmt.Errorf("configure outbound call service: %w", err)

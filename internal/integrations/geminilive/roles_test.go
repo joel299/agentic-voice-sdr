@@ -293,6 +293,7 @@ func TestRoleDefaultsAndExplicitModalities(t *testing.T) {
 func TestTranscriberDropsEveryModelResponseAndPreservesInterimFinal(t *testing.T) {
 	fake := newRoleTestServer(t)
 	transcriber := fake.connectInput(t)
+	transcriber = WithLeadTurnIdentity(transcriber, NewLeadTurnSequencer(41))
 	defer transcriber.Close()
 	peer := nextRolePeer(t, fake.peers)
 	sendProviderJSON(t, peer, `{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]}}}`)
@@ -301,19 +302,81 @@ func TestTranscriberDropsEveryModelResponseAndPreservesInterimFinal(t *testing.T
 	sendProviderJSON(t, peer, `{"serverContent":{"turnComplete":true}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"interrupted":true}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"interimInputTranscription":{"text":"partial words"}}}`)
+	sendProviderJSON(t, peer, `{"serverContent":{"interimInputTranscription":{"text":"partial words continue"}}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"inputTranscription":{"text":"final words"}}}`)
 
 	interim, err := transcriber.Receive(context.Background())
-	if err != nil || interim.State != TranscriptInterim || interim.Text != "partial words" {
+	if err != nil || interim.State != TranscriptInterim || interim.Text != "partial words" || interim.TurnID != "lead-000042" {
 		t.Fatalf("interim transcript = %+v, %v", interim, err)
 	}
+	interimUpdate, err := transcriber.Receive(context.Background())
+	if err != nil || interimUpdate.State != TranscriptInterim || interimUpdate.Text != "partial words continue" || interimUpdate.TurnID != interim.TurnID {
+		t.Fatalf("interim update = %+v, %v", interimUpdate, err)
+	}
 	final, err := transcriber.Receive(context.Background())
-	if err != nil || final.State != TranscriptFinal || final.Text != "final words" {
+	if err != nil || final.State != TranscriptFinal || final.Text != "final words" || final.TurnID != interimUpdate.TurnID {
 		t.Fatalf("final transcript = %+v, %v", final, err)
 	}
 	for _, field := range []string{"Audio", "AudioMimeType", "ToolCalls", "TurnComplete"} {
 		if _, ok := reflect.TypeOf(TranscriptEvent{}).FieldByName(field); ok {
 			t.Fatalf("transcription boundary leaks response field %q", field)
+		}
+	}
+}
+
+func TestInputTurnIdentityIsCallScopedAcrossProviderReconnect(t *testing.T) {
+	fake := newRoleTestServer(t)
+	owner := NewLeadTurnSequencer(0)
+	connect := func() (InputTranscriberSession, rolePeer) {
+		session, err := ConnectInputTranscriberWithTurnSequencer(context.Background(), Config{APIKey: "synthetic-key", Endpoint: fake.endpoint(), Model: "injected-live-model"}, owner)
+		if err != nil {
+			t.Fatalf("connect input session: %v", err)
+		}
+		return session, nextRolePeer(t, fake.peers)
+	}
+	first, peer := connect()
+	for _, raw := range []string{
+		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
+		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
+	} {
+		sendProviderJSON(t, peer, raw)
+	}
+	firstInterim, err := first.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFinal, err := first.Receive(context.Background())
+	if err != nil || firstFinal.EventID != "receive-1" || firstInterim.TurnID != "lead-000001" || firstFinal.TurnID != firstInterim.TurnID {
+		t.Fatalf("first logical turn interim=%+v final=%+v err=%v", firstInterim, firstFinal, err)
+	}
+	// A final-only utterance gets a new application identity even without an
+	// interim. Reused provider receive ordinals are not replay evidence.
+	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Não"}}}`)
+	secondFinal, err := first.Receive(context.Background())
+	if err != nil || secondFinal.Text != "Não" || secondFinal.EventID != "receive-1" || secondFinal.TurnID != "lead-000002" {
+		t.Fatalf("second final-only turn=%+v err=%v", secondFinal, err)
+	}
+	_ = first.Close()
+
+	second, peer := connect()
+	defer second.Close()
+	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`)
+	reconnectedFinal, err := second.Receive(context.Background())
+	if err != nil || reconnectedFinal.EventID != "receive-1" || reconnectedFinal.TurnID != "lead-000003" {
+		t.Fatalf("reconnected final-only turn=%+v err=%v", reconnectedFinal, err)
+	}
+}
+
+func TestFinalOnlyUtterancesAlwaysGetFreshIDsIncludingIdenticalText(t *testing.T) {
+	owner := NewLeadTurnSequencer(0)
+	for i, test := range []struct{ text, want string }{
+		{text: "Sim", want: "lead-000001"},
+		{text: "Não", want: "lead-000002"},
+		{text: "Sim", want: "lead-000003"},
+	} {
+		event := owner.assign(TranscriptEvent{State: TranscriptFinal, Text: test.text, EventID: "receive-1"})
+		if event.TurnID != test.want {
+			t.Fatalf("final %d (%q) TurnID=%q, want %q", i+1, test.text, event.TurnID, test.want)
 		}
 	}
 }

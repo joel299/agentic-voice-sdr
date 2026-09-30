@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/control"
 )
 
@@ -23,6 +24,29 @@ type fakeProvider struct {
 	hangupCalls       int
 	dispatchedHangups int
 	events            chan control.Event
+}
+
+type callRepositoryFake struct {
+	mu      sync.Mutex
+	created []voicecalldomain.Call
+	updates []struct{ id, status, providerID, reason string }
+	err     error
+}
+
+func (r *callRepositoryFake) CreateCall(_ context.Context, c voicecalldomain.Call) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.created = append(r.created, c)
+	return r.err
+}
+func (r *callRepositoryFake) UpdateLifecycle(_ context.Context, id, status, providerID, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updates = append(r.updates, struct{ id, status, providerID, reason string }{id, status, providerID, reason})
+	return r.err
+}
+func (*callRepositoryFake) GetCall(context.Context, string) (voicecalldomain.Call, error) {
+	return voicecalldomain.Call{}, nil
 }
 
 func newFakeProvider() *fakeProvider {
@@ -106,6 +130,77 @@ func TestStartNormalizesAllowedDestinationAndCorrelatesProviderCallID(t *testing
 	dials, _ := provider.counts()
 	if dials != 1 {
 		t.Fatalf("Dial calls=%d, want exactly one", dials)
+	}
+}
+
+func TestCallLifecycleUsesRepositoryAndSurfacesWriteFailure(t *testing.T) {
+	provider := newFakeProvider()
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.mu.Lock()
+	if len(repo.created) != 1 || repo.created[0].Status != "dialing" || repo.created[0].Provider != "baresip" {
+		t.Fatalf("create persistence: %+v", repo.created)
+	}
+	repo.mu.Unlock()
+	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", State: control.CallStateConnected, CallID: "b-1", PeerURI: "sip:+5567981340687@example.test"}
+	waitFor(t, func() bool { repo.mu.Lock(); defer repo.mu.Unlock(); return len(repo.updates) > 0 })
+	if _, err := service.Get(call.CallID); err != nil {
+		t.Fatal(err)
+	}
+	repo.mu.Lock()
+	last := repo.updates[len(repo.updates)-1]
+	repo.mu.Unlock()
+	if last.status != "connected" || last.providerID != "b-1" {
+		t.Fatalf("lifecycle update=%+v", last)
+	}
+	provider2 := newFakeProvider()
+	repo2 := &callRepositoryFake{err: errors.New("database detail")}
+	service2, err := NewWithRepository(provider2, policy, repo2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service2.Close()
+	if _, err := service2.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrPersistenceFailure) {
+		t.Fatalf("persistence error=%v", err)
+	}
+	dials, _ := provider2.counts()
+	if dials != 0 {
+		t.Fatalf("dialed after failed persistence: %d", dials)
+	}
+}
+
+func TestUncertainDialReconciliationPersistsTerminalFailure(t *testing.T) {
+	provider := newFakeProvider()
+	provider.dialErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("dispatch outcome unknown")}
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrProviderFailure) {
+		t.Fatalf("Start error=%v", err)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.updates) != 1 || repo.updates[0].status != "failed" {
+		t.Fatalf("reconciled lifecycle was not persisted: %+v", repo.updates)
 	}
 }
 

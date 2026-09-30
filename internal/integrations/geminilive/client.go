@@ -119,6 +119,9 @@ type Event struct {
 	InputTranscriptState InputTranscriptState
 	ToolCalls            []ToolCall
 	Error                string
+	EventID              string
+	TurnID               string
+	TurnComplete         bool
 }
 
 type InputTranscriptState string
@@ -389,7 +392,15 @@ func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
-	return parseEvent(msg), nil
+	event := parseEvent(msg)
+	for _, key := range []string{"eventId", "event_id"} {
+		var id string
+		if json.Unmarshal(msg[key], &id) == nil && id != "" {
+			event.EventID = id
+			break
+		}
+	}
+	return event, nil
 }
 func parseAPIError(msg map[string]json.RawMessage) string {
 	if raw, ok := msg["error"]; ok {
@@ -456,12 +467,12 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}
 			}
 			if c.OutputTranscription.Text != "" {
-				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text}
+				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete}
 			}
 			if len(c.ModelTurn.Parts) > 0 && c.ModelTurn.Parts[0].InlineData.Data != "" {
 				b, err := base64.StdEncoding.DecodeString(c.ModelTurn.Parts[0].InlineData.Data)
 				if err == nil {
-					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType}
+					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType, TurnComplete: c.TurnComplete}
 				}
 			}
 			if c.TurnComplete {

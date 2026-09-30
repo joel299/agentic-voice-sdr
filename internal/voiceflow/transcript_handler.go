@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 	"github.com/joel299/agentic-voice-sdr/internal/turnloop"
@@ -14,7 +15,9 @@ import (
 )
 
 var (
-	ErrInvalidHandler = errors.New("voiceflow: invalid transcript handler")
+	ErrInvalidHandler        = errors.New("voiceflow: invalid transcript handler")
+	ErrTranscriptPersistence = errors.New("voiceflow: final transcript persistence failed")
+	ErrMissingLeadTurnID     = errors.New("voiceflow: final transcript is missing its application turn ID")
 )
 
 // EventHandler is the subset of bridge.EventHandler needed by the driver.
@@ -29,7 +32,8 @@ type FinalTranscriptHandler struct {
 	capability  *turnruntime.CapabilityContext
 	downstream  bridge.EventHandler
 	lifecycle   *ResponseLifecycleAdapter
-	nextLead    uint64
+	transcripts voicecalldomain.TranscriptRepository
+	callID      string
 }
 
 // NewFinalTranscriptHandler creates a handler with a fixed capability context.
@@ -45,7 +49,6 @@ func NewFinalTranscriptHandler(state *conversation.ConversationState, coordinato
 	return &FinalTranscriptHandler{
 		state: state, coordinator: coordinator, capability: capability,
 		downstream: next, lifecycle: NewResponseLifecycleAdapter(coordinator),
-		nextLead: seedLeadSequence(state.Turns()),
 	}, nil
 }
 
@@ -56,7 +59,7 @@ func seedLeadSequence(turns []conversation.Turn) uint64 {
 			continue
 		}
 		suffix := strings.TrimPrefix(turn.ID, "lead-")
-		if len(suffix) != 6 {
+		if len(suffix) < 6 {
 			continue
 		}
 		var value uint64
@@ -101,7 +104,7 @@ func (h *FinalTranscriptHandler) HandleTranscript(ctx context.Context, event gem
 	if event.State != geminilive.TranscriptFinal {
 		return nil
 	}
-	return h.handleFinalText(ctx, event.Text)
+	return h.handleFinalText(ctx, event.Text, event.TurnID)
 }
 
 func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminilive.Event) error {
@@ -111,17 +114,37 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if event.Kind != geminilive.EventInputTranscription || event.InputTranscriptState != geminilive.TranscriptFinal {
 		return h.forward(ctx, event)
 	}
-	return h.handleFinalText(ctx, event.Text)
+	return h.handleFinalText(ctx, event.Text, event.TurnID)
 }
 
-func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText string) error {
+// WithTranscriptPersistence enables durable storage for this call. Stable
+// application turn IDs, not provider receive ordinals, form idempotency keys.
+func (h *FinalTranscriptHandler) WithTranscriptPersistence(callID string, repository voicecalldomain.TranscriptRepository) error {
+	if h == nil || callID == "" || repository == nil {
+		return ErrInvalidHandler
+	}
+	h.callID, h.transcripts = callID, repository
+	return nil
+}
+
+func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, turnID string) error {
 	text := strings.TrimSpace(rawText)
 	if text == "" {
 		return nil
 	}
+	if turnID == "" {
+		return ErrMissingLeadTurnID
+	}
+	if h.transcripts != nil {
+		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+h.callID+":"+turnID)
+		if err != nil {
+			return fmt.Errorf("%w", ErrTranscriptPersistence)
+		}
+		if !created {
+			return nil
+		}
+	}
 
-	h.nextLead++
-	turnID := fmt.Sprintf("lead-%06d", h.nextLead)
 	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, text, conversation.TranscriptFinal)
 	if err != nil {
 		return err

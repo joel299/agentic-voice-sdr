@@ -52,6 +52,12 @@ type ResponseTurnLease interface {
 	Fail(context.Context, error) error
 }
 
+// ResponseTurnIdentity exposes the application-owned response turn ID carried
+// by an authorized lease. Provider receive-event ordinals are not business IDs.
+type ResponseTurnIdentity interface {
+	ResponseTurnID() string
+}
+
 type Bridge struct {
 	input     AudioReader
 	output    AudioWriter

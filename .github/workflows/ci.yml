@@ -234,3 +234,9 @@ jobs:
           PGPASSWORD="${POSTGRES_PASSWORD}" \
           PGDATABASE="${POSTGRES_DB}" \
             go test -count=1 ./internal/integrations/postgres/agentprompt
+          PGHOST=127.0.0.1 \
+          PGPORT="${POSTGRES_PORT:-5432}" \
+          PGUSER="${POSTGRES_USER}" \
+          PGPASSWORD="${POSTGRES_PASSWORD}" \
+          PGDATABASE="${POSTGRES_DB}" \
+            go test -count=1 ./internal/integrations/postgres/voicecall

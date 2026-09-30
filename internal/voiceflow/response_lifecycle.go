@@ -123,6 +123,13 @@ func (l *responseTurnLease) ModelAudioAuthorized() bool {
 	return key == l.key && generation == l.generation
 }
 
+func (l *responseTurnLease) ResponseTurnID() string {
+	if l == nil {
+		return ""
+	}
+	return l.key.SourceTurnID
+}
+
 func (l *responseTurnLease) Complete(_ context.Context) error {
 	if l == nil || l.owner == nil || !l.owner.beginOperation(l.key, l.generation) {
 		return nil

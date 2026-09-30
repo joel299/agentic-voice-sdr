@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/control"
 )
 
@@ -24,6 +25,7 @@ var (
 	ErrCallNotActive      = errors.New("call is not active")
 	ErrHangupRequested    = errors.New("hangup already requested")
 	ErrProviderFailure    = errors.New("telephony provider request failed")
+	ErrPersistenceFailure = errors.New("call persistence failed")
 )
 
 type Status string
@@ -117,19 +119,31 @@ type Service struct {
 	requested       map[string]bool
 	uncertain       map[string]bool
 	hangupUncertain map[string]bool
+	repository      voicecalldomain.CallRepository
+	persistenceErr  error
 }
 
 func New(provider control.Provider, policy DestinationPolicy) (*Service, error) {
+	return NewWithRepository(provider, policy, nil)
+}
+
+func NewWithRepository(provider control.Provider, policy DestinationPolicy, repository voicecalldomain.CallRepository) (*Service, error) {
 	if provider == nil || policy == nil {
 		return nil, errors.New("call service dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), requested: make(map[string]bool), uncertain: make(map[string]bool), hangupUncertain: make(map[string]bool)}
+	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), requested: make(map[string]bool), uncertain: make(map[string]bool), hangupUncertain: make(map[string]bool), repository: repository}
 	go s.consumeEvents()
 	return s, nil
 }
 
 func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
+	s.mu.RLock()
+	persistenceErr := s.persistenceErr
+	s.mu.RUnlock()
+	if persistenceErr != nil {
+		return Call{}, ErrPersistenceFailure
+	}
 	canonical, err := s.policy.Normalize(destination)
 	if err != nil {
 		return Call{}, ErrInvalidDestination
@@ -164,6 +178,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 			s.mu.Lock()
 			s.starting = false
 			s.mu.Unlock()
+			if errors.Is(reconcileErr, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 			return Call{}, ErrCallActive
 		}
 		s.mu.Lock()
@@ -211,6 +228,14 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		return Call{}, ErrProviderFailure
 	}
 	call := Call{CallID: callID, To: canonical, Status: StatusDialing}
+	if s.repository != nil {
+		if err := s.repository.CreateCall(ctx, voicecalldomain.Call{ID: callID, Destination: canonical, Status: string(StatusDialing), Provider: "baresip"}); err != nil {
+			s.mu.Lock()
+			s.starting = false
+			s.mu.Unlock()
+			return Call{}, ErrPersistenceFailure
+		}
+	}
 	s.mu.Lock()
 	s.starting = false
 	s.calls[callID] = call
@@ -231,8 +256,16 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 			}
 		}
 		s.mu.Unlock()
+		if certainty != control.DispatchMaybeDispatched && s.repository != nil {
+			if persistErr := s.repository.UpdateLifecycle(ctx, callID, string(StatusFailed), "", "provider_dial_failed"); persistErr != nil {
+				s.setPersistenceError(persistErr)
+				return Call{}, ErrPersistenceFailure
+			}
+		}
 		if certainty == control.DispatchMaybeDispatched {
-			_ = s.Reconcile(ctx, callID)
+			if reconcileErr := s.Reconcile(ctx, callID); errors.Is(reconcileErr, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 		}
 		return Call{}, ErrProviderFailure
 	}
@@ -242,6 +275,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 func (s *Service) Get(callID string) (Call, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.persistenceErr != nil {
+		return Call{}, ErrPersistenceFailure
+	}
 	call, ok := s.calls[callID]
 	if !ok {
 		return Call{}, ErrCallNotFound
@@ -251,6 +287,10 @@ func (s *Service) Get(callID string) (Call, error) {
 
 func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 	s.mu.Lock()
+	if s.persistenceErr != nil {
+		s.mu.Unlock()
+		return Call{}, ErrPersistenceFailure
+	}
 	call, ok := s.calls[callID]
 	if !ok {
 		s.mu.Unlock()
@@ -267,6 +307,9 @@ func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 	if s.requested[callID] && s.hangupUncertain[callID] {
 		s.mu.Unlock()
 		if err := s.reconcileHangup(ctx, callID); err != nil {
+			if errors.Is(err, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 			return Call{}, ErrProviderFailure
 		}
 		s.mu.RLock()
@@ -303,9 +346,9 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || s.activeID != callID || !s.uncertain[callID] {
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) == 0 {
@@ -313,7 +356,8 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		s.calls[callID] = call
 		s.activeID = ""
 		delete(s.uncertain, callID)
-		return nil
+		s.mu.Unlock()
+		return s.persistLifecycle(ctx, call, "failed")
 	}
 	for _, active := range inventory {
 		if !inventoryMatches(active, call) {
@@ -330,8 +374,10 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		}
 		s.calls[callID] = call
 		delete(s.uncertain, callID)
-		return nil
+		s.mu.Unlock()
+		return s.persistLifecycle(ctx, call, "")
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -341,9 +387,9 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || s.activeID != callID || !s.hangupUncertain[callID] {
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) == 1 && inventoryMatches(inventory[0], call) {
@@ -353,9 +399,11 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 		s.calls[callID] = call
 		delete(s.hangupUncertain, callID)
 		delete(s.requested, callID)
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) != 0 {
+		s.mu.Unlock()
 		return nil
 	}
 	if call.Status == StatusConnected {
@@ -366,6 +414,18 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 	s.calls[callID] = call
 	s.activeID = ""
 	delete(s.hangupUncertain, callID)
+	s.mu.Unlock()
+	return s.persistLifecycle(ctx, call, string(call.Status))
+}
+
+func (s *Service) persistLifecycle(ctx context.Context, call Call, reason string) error {
+	if s.repository == nil {
+		return nil
+	}
+	if err := s.repository.UpdateLifecycle(ctx, call.CallID, string(call.Status), call.ProviderCallID, reason); err != nil {
+		s.setPersistenceError(err)
+		return ErrPersistenceFailure
+	}
 	return nil
 }
 
@@ -404,18 +464,20 @@ func (s *Service) applyEvent(event control.Event) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.activeID == "" {
+		s.mu.Unlock()
 		return
 	}
 	call := s.calls[s.activeID]
 	if call.ProviderCallID == "" {
 		if !eventMatchesDestination(event, call.To) {
+			s.mu.Unlock()
 			return
 		}
 		call.ProviderCallID = event.CallID
 		delete(s.uncertain, call.CallID)
 	} else if event.CallID != call.ProviderCallID {
+		s.mu.Unlock()
 		return
 	}
 	switch strings.ToUpper(event.Type) {
@@ -433,9 +495,31 @@ func (s *Service) applyEvent(event control.Event) {
 			delete(s.hangupUncertain, call.CallID)
 		}
 	default:
+		s.mu.Unlock()
 		return
 	}
 	s.calls[call.CallID] = call
+	s.mu.Unlock()
+	if s.repository != nil {
+		reason := ""
+		if call.Status.terminal() {
+			reason = string(call.Status)
+		}
+		if err := s.repository.UpdateLifecycle(s.ctx, call.CallID, string(call.Status), call.ProviderCallID, reason); err != nil {
+			s.setPersistenceError(err)
+		}
+	}
+}
+
+func (s *Service) setPersistenceError(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.persistenceErr == nil {
+		s.persistenceErr = err
+	}
 }
 
 func eventMatchesDestination(event control.Event, destination string) bool {

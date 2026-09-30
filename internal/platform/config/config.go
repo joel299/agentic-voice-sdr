@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -18,6 +20,9 @@ type Config struct {
 	FalePacoAudioSocketEnabled bool
 	FalePacoAudioSocketAddr    string
 	FalePacoRuntimeLogPath     string
+	OwnerAPIToken              string
+	BaresipCtrlTCPAddress      string
+	OutboundCallAllowlist      []string
 }
 
 func Load() (Config, error) {
@@ -25,7 +30,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"), WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""), SIPConfigDir: envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, ShutdownGrace: 10 * time.Second, FalePacoAudioSocketEnabled: enabled, FalePacoAudioSocketAddr: envOrDefault("FALEPACO_AUDIOSOCKET_ADDR", "127.0.0.1:9092"), FalePacoRuntimeLogPath: envOrDefault("FALEPACO_RUNTIME_LOG_PATH", "/root/agentic-voice-sdr/.runtime-logs/falepaco/runtime.log")}
+	cfg := Config{HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"), WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""), SIPConfigDir: envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, ShutdownGrace: 10 * time.Second, FalePacoAudioSocketEnabled: enabled, FalePacoAudioSocketAddr: envOrDefault("FALEPACO_AUDIOSOCKET_ADDR", "127.0.0.1:9092"), FalePacoRuntimeLogPath: envOrDefault("FALEPACO_RUNTIME_LOG_PATH", "/root/agentic-voice-sdr/.runtime-logs/falepaco/runtime.log"), OwnerAPIToken: os.Getenv("OWNER_API_TOKEN"), BaresipCtrlTCPAddress: envOrDefault("BARESIP_CTRL_TCP_ADDR", "127.0.0.1:4444"), OutboundCallAllowlist: splitCSV(os.Getenv("OUTBOUND_CALL_DESTINATION_ALLOWLIST"))}
+	if strings.IndexFunc(cfg.OwnerAPIToken, unicode.IsSpace) >= 0 {
+		return Config{}, fmt.Errorf("OWNER_API_TOKEN must not contain whitespace")
+	}
 	for _, item := range []struct {
 		name   string
 		target *time.Duration
@@ -59,4 +67,18 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	items := strings.Split(value, ",")
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

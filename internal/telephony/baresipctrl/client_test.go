@@ -21,6 +21,30 @@ type testRequest struct {
 	Token   string `json:"token"`
 }
 
+type failAfterWriter struct{ remaining int }
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.remaining == 0 {
+		return 0, io.ErrClosedPipe
+	}
+	if len(p) > w.remaining {
+		p = p[:w.remaining]
+	}
+	w.remaining -= len(p)
+	return len(p), nil
+}
+
+func TestWriteNetstringReportsPartialDispatch(t *testing.T) {
+	writer := &failAfterWriter{remaining: 2}
+	written, err := writeNetstring(writer, []byte(`{"command":"dial"}`))
+	if err != io.ErrClosedPipe {
+		t.Fatalf("error=%v, want closed pipe", err)
+	}
+	if written != 2 {
+		t.Fatalf("written=%d, want 2", written)
+	}
+}
+
 func TestClientCorrelatesResponseAndNormalizesEvents(t *testing.T) {
 	listener := testListener(t)
 	defer listener.Close()
@@ -211,6 +235,14 @@ func TestCallClosedTerminalStatesByCallID(t *testing.T) {
 			want: control.CallStateBusy, wantParam: "busy",
 		},
 		{
+			name: "Q.850 cause 17 is busy before connect",
+			sequence: []wireMessage{
+				{Class: "call", Type: "CALL_OUTGOING", CallID: "cause-17"},
+				{Class: "call", Type: "CALL_CLOSED", CallID: "cause-17", Param: "cause=17"},
+			},
+			want: control.CallStateBusy, wantParam: "busy",
+		},
+		{
 			name: "no answer timeout",
 			sequence: []wireMessage{
 				{Class: "call", Type: "CALL_OUTGOING", CallID: "no-answer"},
@@ -396,6 +428,57 @@ func TestProviderCommandsAndRegistrationStatus(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRejectedDialHasExplicitDispatchCertainty(t *testing.T) {
+	listener := testListener(t)
+	defer listener.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		request, err := readTestRequest(conn)
+		if err == nil {
+			err = writeTestMessage(conn, fmt.Sprintf(`{"response":true,"ok":false,"data":"rejected","token":%q}`, request.Token))
+		}
+		serverErr <- err
+	}()
+	client := newTestClient(t, listener.Addr().String(), 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err := client.Dial(ctx, "+15551234567")
+	if !errors.Is(err, ErrCommandRejected) {
+		t.Fatalf("Dial error=%v", err)
+	}
+	if got := control.DispatchCertaintyOf(err); got != control.DispatchRejected {
+		t.Fatalf("certainty=%v, want rejected", got)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDialValidationFailureIsNotDispatched(t *testing.T) {
+	client, err := New(Options{Address: "127.0.0.1:4444"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err = client.Dial(context.Background(), "  ")
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("Dial error=%v", err)
+	}
+	if got := control.DispatchCertaintyOf(err); got != control.DispatchNotDispatched {
+		t.Fatalf("certainty=%v, want not dispatched", got)
 	}
 }
 

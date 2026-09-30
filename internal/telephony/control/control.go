@@ -3,6 +3,7 @@ package control
 
 import (
 	"context"
+	"errors"
 
 	callstate "github.com/joel299/agentic-voice-sdr/internal/domain/call"
 )
@@ -56,10 +57,56 @@ type CommandResult struct {
 	OK    bool
 }
 
+type ActiveCall struct {
+	ProviderCallID string
+	PeerURI        string
+	State          CallState
+}
+
+type DispatchCertainty uint8
+
+const (
+	DispatchNotDispatched DispatchCertainty = iota + 1
+	DispatchRejected
+	DispatchMaybeDispatched
+)
+
+// CommandError describes whether a state-changing command may have reached
+// the provider. Cause is retained for internal error matching and diagnostics;
+// API boundaries must map it to a safe fixed message.
+type CommandError struct {
+	Certainty DispatchCertainty
+	Cause     error
+}
+
+func (e *CommandError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "telephony command failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *CommandError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func DispatchCertaintyOf(err error) DispatchCertainty {
+	var commandErr *CommandError
+	if errors.As(err, &commandErr) && commandErr.Certainty != 0 {
+		return commandErr.Certainty
+	}
+	// Unknown provider errors fail closed: assume the command may have been sent.
+	return DispatchMaybeDispatched
+}
+
 // Provider is the outbound control surface shared by telephony engines.
 // Hangup targets the active call; the MVP permits one concurrent call.
 type Provider interface {
 	RegistrationStatus(context.Context) (RegistrationStatus, error)
+	ActiveCalls(context.Context) ([]ActiveCall, error)
 	Dial(context.Context, string) (CommandResult, error)
 	Hangup(context.Context) (CommandResult, error)
 	ListCalls(context.Context) (CommandResult, error)

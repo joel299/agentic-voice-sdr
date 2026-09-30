@@ -103,7 +103,9 @@ func (r *Repository) AppendFinalTurn(ctx context.Context, callID, role, text, so
 	var prior domain.Turn
 	err = tx.QueryRow(ctx, `SELECT id,call_id,sequence,role,text,transcript_state,source,idempotency_key,created_at FROM voice_call_transcript_turns WHERE call_id=$1 AND idempotency_key=$2`, callID, idempotencyKey).Scan(&prior.ID, &prior.CallID, &prior.Sequence, &prior.Role, &prior.Text, &prior.State, &prior.Source, &prior.IdempotencyKey, &prior.CreatedAt)
 	if err == nil {
-		if prior.Role != role || prior.Text != text || prior.Source != source { return domain.Turn{}, false, ErrInvalidRecord }
+		if prior.Role != role || prior.Text != text || prior.Source != source {
+			return domain.Turn{}, false, ErrInvalidRecord
+		}
 		if e := tx.Commit(ctx); e != nil {
 			return domain.Turn{}, false, ErrDatabaseOperation
 		}

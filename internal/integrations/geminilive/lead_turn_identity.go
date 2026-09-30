@@ -9,17 +9,15 @@ import (
 // LeadTurnSequencer owns monotonically increasing IDs for one application call.
 // Keep one instance across Gemini input-session reconnects.
 //
-// Interim events open the next logical utterance. Its FINAL and any immediate
-// replayed FINAL retain that ID. A later interim opens a distinct turn even if
-// the recognized text is identical. Without an interim or provider-supplied
-// stable utterance identity, a final-only new utterance cannot be distinguished
-// from replay of the preceding final; in that case this sequencer favors
-// idempotent replay handling.
+// Interim events open or continue an application utterance. Its first FINAL
+// closes that turn. Any subsequent FINAL without an explicit application
+// identity opens a fresh turn, even if its text is identical. The provider does
+// not supply a stable utterance identity here, so final-only delivery replay
+// cannot safely be distinguished from a legitimate new utterance.
 type LeadTurnSequencer struct {
 	mu         sync.Mutex
 	next       uint64
 	activeID   string
-	lastFinal  string
 	activeDone bool
 }
 
@@ -44,19 +42,10 @@ func (s *LeadTurnSequencer) assign(event TranscriptEvent) TranscriptEvent {
 		event.TurnID = s.activeID
 		return event
 	}
-	if s.activeID == "" {
-		if s.lastFinal != "" {
-			s.activeID = s.lastFinal
-			s.activeDone = true
-		} else {
-			s.activeID = s.nextIDLocked()
-			s.activeDone = true
-			s.lastFinal = s.activeID
-		}
-	} else if !s.activeDone {
-		s.activeDone = true
-		s.lastFinal = s.activeID
+	if s.activeID == "" || s.activeDone {
+		s.activeID = s.nextIDLocked()
 	}
+	s.activeDone = true
 	event.TurnID = s.activeID
 	return event
 }

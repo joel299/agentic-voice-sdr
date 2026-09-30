@@ -302,14 +302,19 @@ func TestTranscriberDropsEveryModelResponseAndPreservesInterimFinal(t *testing.T
 	sendProviderJSON(t, peer, `{"serverContent":{"turnComplete":true}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"interrupted":true}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"interimInputTranscription":{"text":"partial words"}}}`)
+	sendProviderJSON(t, peer, `{"serverContent":{"interimInputTranscription":{"text":"partial words continue"}}}`)
 	sendProviderJSON(t, peer, `{"serverContent":{"inputTranscription":{"text":"final words"}}}`)
 
 	interim, err := transcriber.Receive(context.Background())
 	if err != nil || interim.State != TranscriptInterim || interim.Text != "partial words" || interim.TurnID != "lead-000042" {
 		t.Fatalf("interim transcript = %+v, %v", interim, err)
 	}
+	interimUpdate, err := transcriber.Receive(context.Background())
+	if err != nil || interimUpdate.State != TranscriptInterim || interimUpdate.Text != "partial words continue" || interimUpdate.TurnID != interim.TurnID {
+		t.Fatalf("interim update = %+v, %v", interimUpdate, err)
+	}
 	final, err := transcriber.Receive(context.Background())
-	if err != nil || final.State != TranscriptFinal || final.Text != "final words" || final.TurnID != interim.TurnID {
+	if err != nil || final.State != TranscriptFinal || final.Text != "final words" || final.TurnID != interimUpdate.TurnID {
 		t.Fatalf("final transcript = %+v, %v", final, err)
 	}
 	for _, field := range []string{"Audio", "AudioMimeType", "ToolCalls", "TurnComplete"} {
@@ -344,43 +349,35 @@ func TestInputTurnIdentityIsCallScopedAcrossProviderReconnect(t *testing.T) {
 	if err != nil || firstFinal.EventID != "receive-1" || firstInterim.TurnID != "lead-000001" || firstFinal.TurnID != firstInterim.TurnID {
 		t.Fatalf("first logical turn interim=%+v final=%+v err=%v", firstInterim, firstFinal, err)
 	}
-	// Replaying the final in the same logical turn retains its ID.
-	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`)
-	replay, err := first.Receive(context.Background())
-	if err != nil || replay.TurnID != firstFinal.TurnID {
-		t.Fatalf("replayed final=%+v err=%v", replay, err)
-	}
-	for _, raw := range []string{
-		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
-		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
-	} {
-		sendProviderJSON(t, peer, raw)
-	}
-	secondLogicalInterim, err := first.Receive(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondLogicalFinal, err := first.Receive(context.Background())
-	if err != nil || secondLogicalFinal.EventID != "receive-1" || secondLogicalInterim.TurnID != "lead-000002" || secondLogicalFinal.TurnID != secondLogicalInterim.TurnID {
-		t.Fatalf("second logical turn interim=%+v final=%+v err=%v", secondLogicalInterim, secondLogicalFinal, err)
+	// A final-only utterance gets a new application identity even without an
+	// interim. Reused provider receive ordinals are not replay evidence.
+	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Não"}}}`)
+	secondFinal, err := first.Receive(context.Background())
+	if err != nil || secondFinal.Text != "Não" || secondFinal.EventID != "receive-1" || secondFinal.TurnID != "lead-000002" {
+		t.Fatalf("second final-only turn=%+v err=%v", secondFinal, err)
 	}
 	_ = first.Close()
 
 	second, peer := connect()
 	defer second.Close()
-	for _, raw := range []string{
-		`{"eventId":"receive-1","serverContent":{"interimInputTranscription":{"text":"Sim"}}}`,
-		`{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`,
+	sendProviderJSON(t, peer, `{"eventId":"receive-1","serverContent":{"inputTranscription":{"text":"Sim"}}}`)
+	reconnectedFinal, err := second.Receive(context.Background())
+	if err != nil || reconnectedFinal.EventID != "receive-1" || reconnectedFinal.TurnID != "lead-000003" {
+		t.Fatalf("reconnected final-only turn=%+v err=%v", reconnectedFinal, err)
+	}
+}
+
+func TestFinalOnlyUtterancesAlwaysGetFreshIDsIncludingIdenticalText(t *testing.T) {
+	owner := NewLeadTurnSequencer(0)
+	for i, test := range []struct{ text, want string }{
+		{text: "Sim", want: "lead-000001"},
+		{text: "Não", want: "lead-000002"},
+		{text: "Sim", want: "lead-000003"},
 	} {
-		sendProviderJSON(t, peer, raw)
-	}
-	secondInterim, err := second.Receive(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondFinal, err := second.Receive(context.Background())
-	if err != nil || secondFinal.EventID != "receive-1" || secondInterim.TurnID != "lead-000003" || secondFinal.TurnID != secondInterim.TurnID {
-		t.Fatalf("reconnected logical turn interim=%+v final=%+v err=%v", secondInterim, secondFinal, err)
+		event := owner.assign(TranscriptEvent{State: TranscriptFinal, Text: test.text, EventID: "receive-1"})
+		if event.TurnID != test.want {
+			t.Fatalf("final %d (%q) TurnID=%q, want %q", i+1, test.text, event.TurnID, test.want)
+		}
 	}
 }
 

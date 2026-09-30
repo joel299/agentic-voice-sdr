@@ -110,6 +110,46 @@ func TestLeadTurnIdentityIsApplicationOwnedAcrossGeminiSessionRestart(t *testing
 	}
 }
 
+func TestFinalOnlyUtterancesPersistAndBeginAsDistinctTurns(t *testing.T) {
+	handler, state, processor := newTestHandler(t, nil)
+	repo := &transcriptRepoFake{}
+	if err := handler.WithTranscriptPersistence("call_X", repo); err != nil {
+		t.Fatal(err)
+	}
+	input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 3), seen: make(chan geminilive.TranscriptEvent, 3)}
+	owned := geminilive.WithLeadTurnIdentity(input, geminilive.NewLeadTurnSequencer(0))
+	for i, test := range []struct{ text, want string }{
+		{text: "Sim", want: "lead-000001"},
+		{text: "Não", want: "lead-000002"},
+		{text: "Sim", want: "lead-000003"},
+	} {
+		input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: test.text, EventID: "receive-1"}
+		event, err := owned.Receive(context.Background())
+		if err != nil || event.TurnID != test.want {
+			t.Fatalf("turn %d identity=%q want %q; event=%+v err=%v", i+1, event.TurnID, test.want, event, err)
+		}
+		if err := handler.HandleTranscript(context.Background(), event); err != nil {
+			t.Fatalf("handle turn %d: %v", i+1, err)
+		}
+		lease := handler.Lifecycle().CaptureActive()
+		if lease == nil {
+			t.Fatalf("turn %d did not begin a response lifecycle", i+1)
+		}
+		if err := lease.Complete(context.Background()); err != nil {
+			t.Fatalf("complete turn %d before next utterance: %v", i+1, err)
+		}
+	}
+	turns := state.Turns()
+	if len(turns) != 3 || len(repo.turns) != 3 || processor.calls != 3 {
+		t.Fatalf("state turns=%+v persisted rows=%+v processor begins=%d; want 3 each", turns, repo.turns, processor.calls)
+	}
+	for i, want := range []string{"lead-000001", "lead-000002", "lead-000003"} {
+		if turns[i].ID != want || repo.turns[i].IdempotencyKey != "lead:call_X:"+want {
+			t.Fatalf("turn %d state=%+v row=%+v", i+1, turns[i], repo.turns[i])
+		}
+	}
+}
+
 type transcriptTestLifecycle struct {
 	active bool
 	turnID string

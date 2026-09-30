@@ -172,7 +172,7 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	}
 }
 
-func TestProductionInputBoundaryDeduplicatesReplayedFinalTurn(t *testing.T) {
+func TestProductionInputBoundaryPersistsFinalTurnWithApplicationIdentity(t *testing.T) {
 	state, err := conversation.NewConversationState("call_X")
 	if err != nil {
 		t.Fatal(err)
@@ -192,8 +192,6 @@ func TestProductionInputBoundaryDeduplicatesReplayedFinalTurn(t *testing.T) {
 	<-input.seen
 	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
 	<-response.sendCalled
-	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
-	<-input.seen
 	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "Entendi."}
 	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
 	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
@@ -203,7 +201,7 @@ func TestProductionInputBoundaryDeduplicatesReplayedFinalTurn(t *testing.T) {
 
 	turns := state.Turns()
 	if len(turns) != 1 || turns[0].ID != "lead-000001" || turns[0].Text != "Sim" {
-		t.Fatalf("conversation lead turns after replay: %+v", turns)
+		t.Fatalf("conversation lead turns: %+v", turns)
 	}
 	leadRows := 0
 	for _, turn := range repo.turns {

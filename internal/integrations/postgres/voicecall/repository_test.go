@@ -87,20 +87,24 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if err := repo.UpdateLifecycle(ctx, call.ID, "connected", "provider-1", ""); err != nil {
 		t.Fatalf("connected update: %v", err)
 	}
-	lead, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", " Olá, quero informações. ", "gemini_input", "lead:event-1")
+	lead, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", " Olá, quero informações. ", "gemini_input", "lead:"+call.ID+":lead-000001")
 	if err != nil || !created {
 		t.Fatalf("append lead: created=%v err=%v", created, err)
 	}
-	agent, created, err := repo.AppendFinalTurn(ctx, call.ID, "agent", "Claro, posso te explicar.", "gemini_output", "agent:event-1")
+	agent, created, err := repo.AppendFinalTurn(ctx, call.ID, "agent", "Claro, posso te explicar.", "gemini_output", "agent:"+call.ID+":lead-000001")
 	if err != nil || !created {
 		t.Fatalf("append agent: created=%v err=%v", created, err)
 	}
 	if lead.Sequence != 1 || agent.Sequence != 2 {
 		t.Fatalf("sequence lead=%d agent=%d", lead.Sequence, agent.Sequence)
 	}
-	dup, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", "Olá, quero informações.", "gemini_input", "lead:event-1")
+	dup, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", "Olá, quero informações.", "gemini_input", "lead:"+call.ID+":lead-000001")
 	if err != nil || created || dup.ID != lead.ID {
 		t.Fatalf("idempotency: created=%v err=%v", created, err)
+	}
+	secondSameText, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", "Sim", "gemini_input", "lead:"+call.ID+":lead-000002")
+	if err != nil || !created || secondSameText.Sequence != 3 {
+		t.Fatalf("same text in a distinct logical turn was not retained: %+v created=%v err=%v", secondSameText, created, err)
 	}
 	if _, _, err := repo.AppendFinalTurn(ctx, "missing-call", "lead", "x", "gemini_input", "e"); err == nil {
 		t.Fatal("foreign key/call existence was not enforced")
@@ -115,7 +119,7 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _, e := repo.AppendFinalTurn(ctx, call.ID, "lead", fmt.Sprintf("utterance %d", i), "gemini_input", fmt.Sprintf("lead:concurrent-%d", i))
+			_, _, e := repo.AppendFinalTurn(ctx, call.ID, "lead", fmt.Sprintf("utterance %d", i), "gemini_input", fmt.Sprintf("lead:%s:concurrent-%d", call.ID, i))
 			errs <- e
 		}(i)
 	}
@@ -130,7 +134,7 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal("list turns")
 	}
-	if len(turns) != n+2 {
+	if len(turns) != n+3 {
 		t.Fatalf("turn count=%d", len(turns))
 	}
 	for i, turn := range turns {

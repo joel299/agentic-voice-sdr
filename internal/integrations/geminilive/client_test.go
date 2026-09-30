@@ -76,7 +76,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 			o.activityEnd = len(realtime.ActivityEnd) > 0
 		}
 		got <- o
-		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"outputTranscription":{"text":"hello back"}}}`))
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"eventId":"output-1","serverContent":{"outputTranscription":{"text":"hello back"}}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]}}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"interrupted":true}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"toolCall":{"functionCalls":[{"id":"1","name":"schedule","args":{"x":1}}]}}`))
@@ -102,7 +102,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 		t.Fatalf("server observations: %+v", o)
 	}
 	e, err := s.Receive(context.Background())
-	if err != nil || e.Kind != EventOutputTranscription || e.Text != "hello back" {
+	if err != nil || e.Kind != EventOutputTranscription || e.Text != "hello back" || e.EventID != "output-1" {
 		t.Fatalf("text event: %+v %v", e, err)
 	}
 	e, err = s.Receive(context.Background())
@@ -263,6 +263,17 @@ func TestOutputTurnCompleteAndOtherEventsDoNotSetInputTranscriptState(t *testing
 			}
 		})
 	}
+}
+
+func TestOutputTranscriptionCarriesCompletionAndNoSyntheticReceiveIdentity(t *testing.T) {
+	got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"outputTranscription":{"text":"final chunk"},"turnComplete":true}`)})
+	if got.Kind != EventOutputTranscription || got.Text != "final chunk" || !got.TurnComplete {
+		t.Fatalf("combined final output event=%+v", got)
+	}
+	if got.EventID != "" {
+		t.Fatalf("provider did not send an event ID but parser synthesized %q", got.EventID)
+	}
+
 }
 
 func TestParsePreservesAllToolCalls(t *testing.T) {

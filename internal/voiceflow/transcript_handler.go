@@ -105,7 +105,7 @@ func (h *FinalTranscriptHandler) HandleTranscript(ctx context.Context, event gem
 	if event.State != geminilive.TranscriptFinal {
 		return nil
 	}
-	return h.handleFinalText(ctx, event.Text, event.EventID)
+	return h.handleFinalText(ctx, event.Text, event.TurnID)
 }
 
 func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminilive.Event) error {
@@ -115,11 +115,11 @@ func (h *FinalTranscriptHandler) HandleEvent(ctx context.Context, event geminili
 	if event.Kind != geminilive.EventInputTranscription || event.InputTranscriptState != geminilive.TranscriptFinal {
 		return h.forward(ctx, event)
 	}
-	return h.handleFinalText(ctx, event.Text, event.EventID)
+	return h.handleFinalText(ctx, event.Text, event.TurnID)
 }
 
-// WithTranscriptPersistence enables durable storage for this call. event IDs
-// come from the Gemini session and are namespaced by role/source in storage.
+// WithTranscriptPersistence enables durable storage for this call. Stable
+// application turn IDs, not provider receive ordinals, form idempotency keys.
 func (h *FinalTranscriptHandler) WithTranscriptPersistence(callID string, repository voicecalldomain.TranscriptRepository) error {
 	if h == nil || callID == "" || repository == nil {
 		return ErrInvalidHandler
@@ -128,16 +128,16 @@ func (h *FinalTranscriptHandler) WithTranscriptPersistence(callID string, reposi
 	return nil
 }
 
-func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, eventID string) error {
+func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, turnID string) error {
 	text := strings.TrimSpace(rawText)
 	if text == "" {
 		return nil
 	}
+	if turnID == "" {
+		turnID = fmt.Sprintf("lead-%06d", h.nextLead+1)
+	}
 	if h.transcripts != nil {
-		if eventID == "" {
-			return ErrTranscriptPersistence
-		}
-		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+eventID)
+		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+h.callID+":"+turnID)
 		if err != nil {
 			return fmt.Errorf("%w", ErrTranscriptPersistence)
 		}
@@ -147,7 +147,6 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, e
 	}
 
 	h.nextLead++
-	turnID := fmt.Sprintf("lead-%06d", h.nextLead)
 	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, text, conversation.TranscriptFinal)
 	if err != nil {
 		return err

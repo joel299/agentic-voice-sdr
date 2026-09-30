@@ -190,6 +190,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			failSession(ErrReceiveFailed)
 			return err
 		}
+		turnComplete := event.Kind == geminilive.EventTurnComplete || event.TurnComplete
 		switch event.Kind {
 		case geminilive.EventAudio:
 			if event.AudioMimeType != "audio/pcm;rate=24000" {
@@ -205,10 +206,6 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			}
 		case geminilive.EventOutputTranscription, geminilive.EventToolCall:
 			begin()
-		case geminilive.EventTurnComplete:
-			if err := complete(); err != nil {
-				return err
-			}
 		case geminilive.EventInterrupted:
 			fail(ErrResponseInterrupted)
 		case geminilive.EventAPIError:
@@ -218,6 +215,12 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 		}
 		if b.events != nil {
 			if err := b.events(ctx, event); err != nil {
+				fail(err)
+				return err
+			}
+		}
+		if turnComplete {
+			if err := complete(); err != nil {
 				return err
 			}
 		}

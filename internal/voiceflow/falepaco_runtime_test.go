@@ -71,16 +71,10 @@ func (runtimeTestProcessor) ProcessTurn(context.Context, turnruntime.TurnInput) 
 	return conversation.TurnDirective{Kind: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}, nil
 }
 
-func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
+func TestFalePacoRuntimeUsesLegacyAudioSocketComposition(t *testing.T) {
 	response := &runtimeTestResponse{ready: make(chan struct{}), events: []geminilive.Event{{Kind: geminilive.EventOutputTranscription, Text: "Agent reply", EventID: "agent-event"}, {Kind: geminilive.EventAudio, AudioMimeType: "audio/pcm;rate=24000", Audio: []byte{1, 2}}, {Kind: geminilive.EventTurnComplete}}}
-	transcripts := &transcriptRepoFake{}
 	var gotID string
-	runtime, err := NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: "127.0.0.1:0", Processor: runtimeTestProcessor{}, Transcripts: transcripts, ResolveCallID: func(_ context.Context, sessionID string) (string, error) {
-		if sessionID == "" {
-			return "", errors.New("missing session id")
-		}
-		return "canonical-call-id", nil
-	}, Sessions: func(_ context.Context, id string) (geminilive.InputTranscriberSession, geminilive.ControlledResponseSession, error) {
+	runtime, err := NewFalePacoRuntime(FalePacoRuntimeConfig{AudioSocketAddr: "127.0.0.1:0", Processor: runtimeTestProcessor{}, Sessions: func(_ context.Context, id string) (geminilive.InputTranscriberSession, geminilive.ControlledResponseSession, error) {
 		gotID = id
 		return &runtimeTestInput{}, response, nil
 	}})
@@ -128,9 +122,6 @@ func TestFalePacoRuntimeUsesCanonicalSplitComposition(t *testing.T) {
 	}
 	if gotID != "call-000102030405060708090a0b0c0d0e0f" {
 		t.Fatalf("unexpected sanitized session id: %q", gotID)
-	}
-	if len(transcripts.turns) != 2 || transcripts.turns[0].CallID != "canonical-call-id" || transcripts.turns[0].Role != "lead" || transcripts.turns[1].Role != "agent" {
-		t.Fatalf("runtime transcript persistence was not connected to resolved call: %+v", transcripts.turns)
 	}
 	_ = conn.Close()
 	_ = runtime.Shutdown(context.Background())

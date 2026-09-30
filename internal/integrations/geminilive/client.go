@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -121,6 +120,8 @@ type Event struct {
 	ToolCalls            []ToolCall
 	Error                string
 	EventID              string
+	TurnID               string
+	TurnComplete         bool
 }
 
 type InputTranscriptState string
@@ -168,7 +169,6 @@ type providerSession struct {
 	closeOnce     sync.Once
 	done          chan struct{}
 	receiveActive atomic.Bool
-	eventSequence atomic.Uint64
 }
 
 func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
@@ -400,9 +400,6 @@ func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 			break
 		}
 	}
-	if event.EventID == "" {
-		event.EventID = fmt.Sprintf("receive-%d", s.eventSequence.Add(1))
-	}
 	return event, nil
 }
 func parseAPIError(msg map[string]json.RawMessage) string {
@@ -470,12 +467,12 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}
 			}
 			if c.OutputTranscription.Text != "" {
-				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text}
+				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete}
 			}
 			if len(c.ModelTurn.Parts) > 0 && c.ModelTurn.Parts[0].InlineData.Data != "" {
 				b, err := base64.StdEncoding.DecodeString(c.ModelTurn.Parts[0].InlineData.Data)
 				if err == nil {
-					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType}
+					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType, TurnComplete: c.TurnComplete}
 				}
 			}
 			if c.TurnComplete {

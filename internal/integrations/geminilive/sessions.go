@@ -19,6 +19,7 @@ type TranscriptEvent struct {
 	State   InputTranscriptState
 	Text    string
 	EventID string
+	TurnID  string
 }
 
 // InputTranscriberSession is the only public capability that accepts raw phone

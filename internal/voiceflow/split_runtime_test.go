@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipmedia"
 	"github.com/joel299/agentic-voice-sdr/internal/turnruntime"
 )
 
@@ -112,7 +115,8 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 2), seen: make(chan geminilive.TranscriptEvent, 2)}
 	audio := &e2eAudio{frames: []audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1, 2}}}}
 	gate := conversation.NewResponseGate()
-	runtime, err := NewSplitRuntime(audio, audio, input, response, state, processor, gate, nil, nil)
+	repo := &transcriptRepoFake{}
+	runtime, err := NewSplitRuntimeWithTranscriptPersistence(audio, audio, input, response, state, processor, gate, nil, nil, "call_X", repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +129,7 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 		t.Fatalf("interim SendControlledTurn calls=%d", response.sendCalls)
 	}
 	response.mu.Unlock()
-	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "  final lead  "}
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "  final lead  ", EventID: "receive-1"}
 	<-response.sendCalled
 	response.mu.Lock()
 	if response.sendCalls != 1 || response.finalText != "final lead" {
@@ -135,6 +139,9 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 		t.Fatalf("controlled directive=%#v", response.directive)
 	}
 	response.mu.Unlock()
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "Sure,", EventID: "receive-1"}
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: " here is", EventID: "receive-2"}
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: " the answer.", EventID: "receive-3"}
 	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{9, 8}, AudioMimeType: "audio/pcm;rate=24000"}
 	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
 	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
@@ -153,11 +160,79 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	if len(audio.writes) != 1 || audio.writes[0].Type != audiosocket.TypeSlin24 || string(audio.writes[0].Payload) != "\x09\x08" {
 		t.Fatalf("output=%#v", audio.writes)
 	}
+	if len(repo.turns) != 2 || repo.turns[0].CallID != "call_X" || repo.turns[0].Role != "lead" || repo.turns[1].CallID != "call_X" || repo.turns[1].Role != "agent" || repo.turns[1].Text != "Sure, here is the answer." {
+		t.Fatalf("transcript call id or aggregated agent output is wrong: %+v", repo.turns)
+	}
 	if len(input.sent) != 1 || string(input.sent[0]) != "\x01\x02" {
 		t.Fatalf("input PCM=%#v", input.sent)
 	}
 	key := conversation.ResponseKey{ConversationID: "e2e-split", SourceTurnID: "lead-000001"}
 	if err := gate.Complete(key); !errors.Is(err, conversation.ErrResponseAlreadyCompleted) {
 		t.Fatalf("exact response key completion read-back error=%v", err)
+	}
+}
+
+func TestBaresipTranscriptRuntimeUsesCanonicalAPICallID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	media, err := baresipmedia.New(ctx, baresipmedia.Config{ParentDir: t.TempDir(), BufferFrames: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	rxPath, txPath := media.SocketPaths()
+	dialer := net.Dialer{}
+	rxPeer, err := dialer.DialContext(ctx, "unix", rxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rxPeer.Close()
+	txPeer, err := dialer.DialContext(ctx, "unix", txPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txPeer.Close()
+	session, err := media.WaitSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := conversation.NewConversationState("call_X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &transcriptRepoFake{}
+	input := &e2eInput{events: make(chan geminilive.TranscriptEvent, 1), seen: make(chan geminilive.TranscriptEvent, 1)}
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "lead final"}
+	response := &e2eResponse{sendCalled: make(chan struct{}), events: make(chan geminilive.Event, 4)}
+	runtime, err := NewBaresipSplitRuntimeWithTranscriptPersistence(session, input, response, state, &e2eProcessor{}, conversation.NewResponseGate(), nil, nil, "call_X", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	select {
+	case <-input.seen:
+	case <-time.After(time.Second):
+		t.Fatal("input transcript was not received")
+	}
+	select {
+	case <-response.sendCalled:
+	case <-time.After(time.Second):
+		t.Fatal("authorized response was not started")
+	}
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "agent final"}
+	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Baresip media runtime did not stop")
+	}
+	if len(repo.turns) != 2 || repo.turns[0].CallID != "call_X" || repo.turns[0].Role != "lead" || repo.turns[1].CallID != "call_X" || repo.turns[1].Role != "agent" {
+		t.Fatalf("API call ID was not preserved across Baresip media/Gemini: %+v", repo.turns)
 	}
 }

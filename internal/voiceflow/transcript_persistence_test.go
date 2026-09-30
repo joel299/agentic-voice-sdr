@@ -7,6 +7,7 @@ import (
 
 	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 )
 
 type transcriptRepoFake struct {
@@ -34,20 +35,20 @@ func (*transcriptRepoFake) ListFinalTurns(context.Context, string) ([]voicecalld
 func TestLeadTranscriptPersistenceIgnoresInterimAndSurfacesFailure(t *testing.T) {
 	h, _, _ := newTestHandler(t, nil)
 	repo := &transcriptRepoFake{}
-	if err := h.WithTranscriptPersistence("call-1", repo); err != nil {
+	if err := h.WithTranscriptPersistence("call_X", repo); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.HandleTranscript(context.Background(), geminilive.TranscriptEvent{State: geminilive.TranscriptInterim, Text: "Olá eu...", EventID: "e1"}); err != nil {
+	if err := h.HandleTranscript(context.Background(), geminilive.TranscriptEvent{State: geminilive.TranscriptInterim, Text: "Olá eu...", EventID: "receive-1"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(repo.turns) != 0 {
 		t.Fatalf("interim persisted: %+v", repo.turns)
 	}
-	event := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Olá, eu gostaria de informações.", EventID: "e2"}
+	event := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Olá, eu gostaria de informações.", EventID: "provider-event-1", TurnID: "lead-000001"}
 	if err := h.HandleTranscript(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.turns) != 1 || repo.turns[0].Role != "lead" || repo.turns[0].Source != "gemini_input" || repo.turns[0].State != "final" {
+	if len(repo.turns) != 1 || repo.turns[0].CallID != "call_X" || repo.turns[0].Role != "lead" || repo.turns[0].Source != "gemini_input" || repo.turns[0].State != "final" || repo.turns[0].IdempotencyKey != "lead:call_X:lead-000001" {
 		t.Fatalf("final turn=%+v", repo.turns)
 	}
 	if err := h.HandleTranscript(context.Background(), event); err != nil {
@@ -57,24 +58,151 @@ func TestLeadTranscriptPersistenceIgnoresInterimAndSurfacesFailure(t *testing.T)
 		t.Fatalf("replayed final duplicated: %+v", repo.turns)
 	}
 	repo.err = errors.New("db unavailable")
-	if err := h.HandleTranscript(context.Background(), geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Outro turno", EventID: "e3"}); !errors.Is(err, ErrTranscriptPersistence) {
+	if err := h.HandleTranscript(context.Background(), geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Outro turno", EventID: "provider-stable-id", TurnID: "lead-000002"}); !errors.Is(err, ErrTranscriptPersistence) {
 		t.Fatalf("write failure=%v", err)
 	}
 }
 
-func TestAgentOutputTranscriptionPersistence(t *testing.T) {
+func TestLeadTurnIdentityIsApplicationOwnedAcrossGeminiSessionRestart(t *testing.T) {
 	repo := &transcriptRepoFake{}
-	handler := FinalAgentTranscriptHandler("call-1", repo, nil)
-	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "Claro, posso te explicar.", EventID: "out-1"}); err != nil {
+	h1, state, _ := newTestHandler(t, nil)
+	if err := h1.WithTranscriptPersistence("call_X", repo); err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.turns) != 1 || repo.turns[0].Role != "agent" || repo.turns[0].Source != "gemini_output" || repo.turns[0].Sequence != 1 {
+	first := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	if err := h1.HandleTranscript(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	// A new Gemini session may restart its synthetic receive ordinal, but the
+	// application state owns the next call-scoped lead turn ID.
+	h2, _, _ := newTestHandler(t, nil)
+	h2.state = state
+	h2.nextLead = seedLeadSequence(state.Turns())
+	if err := h2.WithTranscriptPersistence("call_X", repo); err != nil {
+		t.Fatal(err)
+	}
+	second := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "Sim", EventID: "receive-1"}
+	if err := h2.HandleTranscript(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 2 || repo.turns[0].IdempotencyKey == repo.turns[1].IdempotencyKey || repo.turns[0].Text != "Sim" || repo.turns[1].Text != "Sim" {
+		t.Fatalf("same text in distinct application turns must remain distinct: %+v", repo.turns)
+	}
+}
+
+type transcriptTestLifecycle struct {
+	active bool
+	turnID string
+}
+
+func (l *transcriptTestLifecycle) CaptureActive() bridge.ResponseTurnLease {
+	if !l.active {
+		return nil
+	}
+	return transcriptTestLease{turnID: l.turnID}
+}
+func (l *transcriptTestLifecycle) FailActive(context.Context, error) error {
+	l.active = false
+	return nil
+}
+
+type transcriptTestLease struct{ turnID string }
+
+func (transcriptTestLease) ModelAudioAuthorized() bool        { return true }
+func (transcriptTestLease) Complete(context.Context) error    { return nil }
+func (transcriptTestLease) Fail(context.Context, error) error { return nil }
+func (l transcriptTestLease) ResponseTurnID() string          { return l.turnID }
+
+func TestAgentOutputTranscriptionAggregatesOnlyAuthorizedCompletedResponse(t *testing.T) {
+	repo := &transcriptRepoFake{}
+	lifecycle := &transcriptTestLifecycle{active: true, turnID: "lead-000001"}
+	handler := FinalAgentTranscriptHandler("call_X", repo, lifecycle, nil)
+	for _, chunk := range []string{"Claro,", " posso"} {
+		if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: chunk, EventID: "receive-1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(repo.turns) != 0 {
+		t.Fatalf("partial chunks persisted before turn completion: %+v", repo.turns)
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: " ajudar.", EventID: "receive-2", TurnComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 1 || repo.turns[0].CallID != "call_X" || repo.turns[0].Text != "Claro, posso ajudar." || repo.turns[0].Role != "agent" || repo.turns[0].Source != "gemini_output" || repo.turns[0].Sequence != 1 || repo.turns[0].IdempotencyKey != "agent:call_X:lead-000001" {
 		t.Fatalf("agent turn=%+v", repo.turns)
+	}
+	// Replaying the same logical response turn is idempotent even when its
+	// Gemini receive event ordinals start over.
+	for _, chunk := range []string{"Claro,", " posso", " ajudar."} {
+		if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: chunk, EventID: "receive-1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 1 {
+		t.Fatalf("replayed response created duplicate: %+v", repo.turns)
 	}
 	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{1, 2, 3}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(repo.turns) != 1 {
 		t.Fatalf("audio caused persistence: %+v", repo.turns)
+	}
+	lifecycle.active = false
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "stray"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 1 {
+		t.Fatalf("unowned transcript persisted: %+v", repo.turns)
+	}
+
+	// A second authorized turn with the same text has its own stable identity.
+	lifecycle.active = true
+	lifecycle.turnID = "lead-000002"
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "Sim"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 2 || repo.turns[1].Text != "Sim" {
+		t.Fatalf("distinct response turn not persisted: %+v", repo.turns)
+	}
+	if repo.turns[0].Text == repo.turns[1].Text && repo.turns[0].IdempotencyKey == repo.turns[1].IdempotencyKey {
+		t.Fatal("distinct response turns collided")
+	}
+
+	lifecycle.active = true
+	lifecycle.turnID = "lead-000003"
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "incomplete"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventInterrupted}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.active = false
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.turns) != 2 {
+		t.Fatalf("interrupted response was finalized: %+v", repo.turns)
+	}
+
+	repo.err = errors.New("database down")
+	lifecycle.active = true
+	lifecycle.turnID = "lead-000004"
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "persist failure"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler(context.Background(), geminilive.Event{Kind: geminilive.EventTurnComplete}); !errors.Is(err, ErrTranscriptPersistence) {
+		t.Fatalf("persistence error not surfaced: %v", err)
+	}
+	if len(repo.turns) != 2 {
+		t.Fatalf("failed write changed existing turns: %+v", repo.turns)
 	}
 }

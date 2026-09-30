@@ -21,37 +21,53 @@ type SIPAuthRequest struct {
 }
 
 type SIPConfigRequest struct {
-	Provider             string         `json:"provider"`
-	Name                 string         `json:"name"`
-	Host                 string         `json:"host"`
-	Port                 int            `json:"port"`
-	Transport            string         `json:"transport"`
-	Registrar            string         `json:"registrar,omitempty"`
-	OutboundProxy        string         `json:"outbound_proxy,omitempty"`
-	Auth                 SIPAuthRequest `json:"auth"`
-	FromUser             string         `json:"from_user,omitempty"`
-	FromDomain           string         `json:"from_domain,omitempty"`
-	CallerID             string         `json:"caller_id,omitempty"`
-	Codecs               []string       `json:"codecs,omitempty"`
-	RegistrationRequired bool           `json:"registration_required"`
-	Enabled              bool           `json:"enabled"`
+	Provider                  string         `json:"provider"`
+	Name                      string         `json:"name"`
+	Host                      string         `json:"host"`
+	Port                      int            `json:"port"`
+	Transport                 string         `json:"transport"`
+	Registrar                 string         `json:"registrar,omitempty"`
+	OutboundProxy             string         `json:"outbound_proxy,omitempty"`
+	Auth                      SIPAuthRequest `json:"auth"`
+	FromUser                  string         `json:"from_user,omitempty"`
+	FromDomain                string         `json:"from_domain,omitempty"`
+	CallerID                  string         `json:"caller_id,omitempty"`
+	SendPAI                   bool           `json:"send_pai,omitempty"`
+	SendRPID                  bool           `json:"send_rpid,omitempty"`
+	Codecs                    []string       `json:"codecs,omitempty"`
+	RegistrationRequired      bool           `json:"registration_required"`
+	RegistrationServerURI     string         `json:"registration_server_uri,omitempty"`
+	RegistrationClientURI     string         `json:"registration_client_uri,omitempty"`
+	RegistrationContactUser   string         `json:"registration_contact_user,omitempty"`
+	RegistrationRealm         string         `json:"registration_realm,omitempty"`
+	RegistrationRetryInterval int            `json:"registration_retry_interval,omitempty"`
+	RegistrationMaxRetries    int            `json:"registration_max_retries,omitempty"`
+	Enabled                   bool           `json:"enabled"`
 }
 
 type SIPSafeResponse struct {
-	Provider             string      `json:"provider"`
-	Name                 string      `json:"name"`
-	Host                 string      `json:"host"`
-	Port                 int         `json:"port"`
-	Transport            string      `json:"transport"`
-	Registrar            string      `json:"registrar,omitempty"`
-	OutboundProxy        string      `json:"outbound_proxy,omitempty"`
-	Auth                 SIPSafeAuth `json:"auth"`
-	FromUser             string      `json:"from_user,omitempty"`
-	FromDomain           string      `json:"from_domain,omitempty"`
-	CallerID             string      `json:"caller_id,omitempty"`
-	Codecs               []string    `json:"codecs,omitempty"`
-	RegistrationRequired bool        `json:"registration_required"`
-	Enabled              bool        `json:"enabled"`
+	Provider                  string      `json:"provider"`
+	Name                      string      `json:"name"`
+	Host                      string      `json:"host"`
+	Port                      int         `json:"port"`
+	Transport                 string      `json:"transport"`
+	Registrar                 string      `json:"registrar,omitempty"`
+	OutboundProxy             string      `json:"outbound_proxy,omitempty"`
+	Auth                      SIPSafeAuth `json:"auth"`
+	FromUser                  string      `json:"from_user,omitempty"`
+	FromDomain                string      `json:"from_domain,omitempty"`
+	CallerID                  string      `json:"caller_id,omitempty"`
+	SendPAI                   bool        `json:"send_pai,omitempty"`
+	SendRPID                  bool        `json:"send_rpid,omitempty"`
+	Codecs                    []string    `json:"codecs,omitempty"`
+	RegistrationRequired      bool        `json:"registration_required"`
+	RegistrationServerURI     string      `json:"registration_server_uri,omitempty"`
+	RegistrationClientURI     string      `json:"registration_client_uri,omitempty"`
+	RegistrationContactUser   string      `json:"registration_contact_user,omitempty"`
+	RegistrationRealm         string      `json:"registration_realm,omitempty"`
+	RegistrationRetryInterval int         `json:"registration_retry_interval,omitempty"`
+	RegistrationMaxRetries    int         `json:"registration_max_retries,omitempty"`
+	Enabled                   bool        `json:"enabled"`
 }
 
 type SIPSafeAuth struct {
@@ -146,7 +162,7 @@ func (c SIPConfigRequest) Validate() error {
 	return nil
 }
 func (c SIPConfigRequest) SafeView() SIPSafeResponse {
-	return SIPSafeResponse{Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port, Transport: c.Transport, Registrar: c.Registrar, OutboundProxy: c.OutboundProxy, Auth: SIPSafeAuth{Type: c.Auth.Type, Username: c.Auth.Username, Realm: c.Auth.Realm}, FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired, Enabled: c.Enabled}
+	return SIPSafeResponse{Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port, Transport: c.Transport, Registrar: c.Registrar, OutboundProxy: c.OutboundProxy, Auth: SIPSafeAuth{Type: c.Auth.Type, Username: c.Auth.Username, Realm: c.Auth.Realm}, FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, SendPAI: c.SendPAI, SendRPID: c.SendRPID, Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired, RegistrationServerURI: c.RegistrationServerURI, RegistrationClientURI: c.RegistrationClientURI, RegistrationContactUser: c.RegistrationContactUser, RegistrationRealm: c.RegistrationRealm, RegistrationRetryInterval: c.RegistrationRetryInterval, RegistrationMaxRetries: c.RegistrationMaxRetries, Enabled: c.Enabled}
 }
 
 // ToCanonical performs the explicit HTTP DTO to canonical sip.TrunkConfig mapping.
@@ -154,15 +170,22 @@ func (c SIPConfigRequest) ToCanonical() (sip.TrunkConfig, error) {
 	if err := c.Validate(); err != nil {
 		return sip.TrunkConfig{}, err
 	}
+	authRealm := c.Auth.Realm
+	if authRealm == "" {
+		authRealm = c.RegistrationRealm
+	}
 	canonical := sip.TrunkConfig{
 		Provider: c.Provider, Name: c.Name, Host: c.Host, Port: c.Port,
 		Transport: sip.TransportType(strings.ToLower(strings.TrimSpace(c.Transport))),
 		Registrar: c.Registrar, OutboundProxy: c.OutboundProxy,
 		AuthType:     sip.AuthType(strings.ToLower(strings.TrimSpace(c.Auth.Type))),
-		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: c.Auth.Realm,
-		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID,
+		AuthUsername: c.Auth.Username, Secret: c.Auth.Secret, Realm: authRealm,
+		FromUser: c.FromUser, FromDomain: c.FromDomain, CallerID: c.CallerID, SendPAI: c.SendPAI, SendRPID: c.SendRPID,
 		Codecs: append([]string(nil), c.Codecs...), RegistrationRequired: c.RegistrationRequired,
-		Enabled: c.Enabled,
+		RegistrationServerURI: c.RegistrationServerURI, RegistrationClientURI: c.RegistrationClientURI,
+		RegistrationContactUser: c.RegistrationContactUser, RegistrationRetryInterval: c.RegistrationRetryInterval,
+		RegistrationMaxRetries: c.RegistrationMaxRetries,
+		Enabled:                c.Enabled,
 	}
 	if err := canonical.Validate(); err != nil {
 		return sip.TrunkConfig{}, err

@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: SDR Fale Paco Test API
+  version: 1.2.0
+  description: >-
+    Test-only outbound-only API. Owner flow: login and authorize, PUT config, GET config, POST apply, GET registration, POST registration/test, confirm Registered, then POST call.
+    The call endpoint requires Registered state and a matching active PJSIP profile. SIP credentials are server-side and the SIP password is write-only.
+servers:
+  - url: https://sdr.iainfinito.com.br
+tags:
+  - name: Authentication
+  - name: Fale Paco Configuration
+  - name: Fale Paco Registration
+  - name: Fale Paco Test
+components:
+  securitySchemes:
+    BearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  schemas:
+    LoginRequest: {type: object, required: [username, password], properties: {username: {type: string, example: owner}, password: {type: string, format: password, example: "********"}}}
+    FalePacoConfigRequest:
+      type: object
+      required: [provider_address, request_uri_host, outbound_proxy, username, extension, caller_id, transport, port, registration]
+      properties:
+        provider_address: {type: string, example: 98034.falepaco.com.br}
+        request_uri_host: {type: string, example: 98034.falepaco.com.br}
+        outbound_proxy: {type: string, example: 98034.falepaco.com.br:5060}
+        username: {type: string, example: "100"}
+        extension: {type: string, example: "100"}
+        password: {type: string, format: password, writeOnly: true}
+        caller_id: {type: string, example: "551155200455"}
+        transport: {type: string, enum: [tcp, udp], example: tcp}
+        port: {type: integer, example: 5060}
+        registration: {type: object, required: [enabled, server_uri, client_uri, contact_user, realm, retry_interval_seconds, max_retries], properties: {enabled: {type: boolean, example: true}, server_uri: {type: string, example: "sip:98034.falepaco.com.br:5060"}, client_uri: {type: string, example: "sip:100@98034.falepaco.com.br:5060"}, contact_user: {type: string, example: "100"}, realm: {type: string, example: 98034.falepaco.com.br}, retry_interval_seconds: {type: integer, example: 60}, max_retries: {type: integer, example: 3}}}
+    FalePacoConfigResponse:
+      type: object
+      required: [configured, provider_address, request_uri_host, outbound_proxy, username, extension, password_configured, caller_id, transport, port, registration]
+      properties:
+        configured: {type: boolean}
+        provider_address: {type: string}
+        request_uri_host: {type: string}
+        outbound_proxy: {type: string}
+        username: {type: string}
+        extension: {type: string}
+        password_configured: {type: boolean}
+        caller_id: {type: string}
+        transport: {type: string, enum: [tcp, udp]}
+        port: {type: integer}
+        registration: {$ref: '#/components/schemas/FalePacoConfigRequest/properties/registration'}
+    NetworkPreflightResponse:
+      type: object
+      properties:
+        resolver_mode: {type: string, enum: [go_tcp], example: go_tcp}
+        system_resolver_state: {type: string}
+        dns_nameserver_count: {type: integer}
+        dns_egress_state: {type: string}
+        provider_address_lookup_duration_ms: {type: integer}
+        request_uri_host_lookup_duration_ms: {type: integer}
+        provider_address_dns_state: {type: string}
+        provider_address_resolved_ips_count: {type: integer}
+        provider_address_resolves_to_allowlist: {type: boolean}
+        provider_address_resolved_ips: {type: array, items: {type: string}}
+        request_uri_host_dns_state: {type: string}
+        request_uri_host_resolved_ips_count: {type: integer}
+        request_uri_host_resolves_to_allowlist: {type: boolean}
+        request_uri_host_resolved_ips: {type: array, items: {type: string}}
+        outbound_proxy_dns_state: {type: string}
+        outbound_proxy_resolves_to_allowlist: {type: boolean}
+        dns_timeout_ms: {type: integer, example: 4000}
+        dns_transport: {type: string, enum: [tcp], example: tcp}
+        warnings: {type: array, items: {type: string}}
+        blockers: {type: array, items: {type: string}}
+    RegistrationTestResponse:
+      type: object
+      required: [selected_transport, registration_object_present, registration_status, registration_apply_error, registration_capture_implemented, registration_initial_request_present, registration_challenge_received, registration_authenticated_request_sent, registration_triggered, registration_pre_state, registration_post_state, registration_wire_activity_present, registration_capture_mode, registration_tcp_reassembly, registration_capture_error_class, registration_capture_window_ms, registration_first_wire_activity_ms, registration_authenticated_request_ms, registration_final_response_ms, registration_temporary_pcap_deleted, secrets_redacted]
+      properties:
+        selected_transport: {type: string, enum: [tcp, udp], example: tcp}
+        network_protocol_observed: {type: string, enum: [TCP, UDP, ""]}
+        registration_object_present: {type: boolean}
+        registration_server_uri: {type: string}
+        registration_client_uri: {type: string}
+        registration_contact_user: {type: string}
+        registration_outbound_proxy: {type: string}
+        register_request_uri: {type: string}
+        register_from_uri: {type: string}
+        register_to_uri: {type: string}
+        register_contact_uri: {type: string}
+        register_via_sent_by: {type: string}
+        register_expires: {type: string}
+        register_route_uri: {type: string}
+        register_source_ip_port: {type: string}
+        register_remote_ip_port: {type: string}
+        final_warning_header_present: {type: boolean}
+        final_warning_header: {type: string}
+        final_reason_header_present: {type: boolean}
+        final_reason_header: {type: string}
+        registration_status: {type: string, enum: [Registered, Rejected, NoWireActivity, TriggerFailed, Pending, ApplyFailed, LocalError], example: Registered}
+        registration_state: {type: string}
+        registration_pre_state: {type: string}
+        registration_triggered: {type: boolean}
+        registration_trigger_attempted: {type: boolean}
+        registration_trigger_command: {type: string, example: "pjsip send register trunk-falepaco-reg"}
+        registration_trigger_exit_code: {type: integer}
+        registration_trigger_error_class: {type: string}
+        registration_post_state: {type: string}
+        registration_wire_activity_present: {type: boolean}
+        registration_error_class: {type: string}
+        registration_apply_error: {type: boolean}
+        apply_stage: {type: string}
+        apply_error_class: {type: string}
+        apply_error_summary: {type: string}
+        registration_capture_implemented: {type: boolean, example: true}
+        registration_initial_request_present: {type: boolean}
+        registration_first_response: {type: [string, "null"], example: "401"}
+        registration_first_reason: {type: [string, "null"], example: Unauthorized}
+        registration_challenge_received: {type: boolean}
+        registration_challenge_type: {type: string, example: "401"}
+        registration_realm: {type: string, example: 98034.falepaco.com.br}
+        registration_algorithm: {type: string, example: MD5}
+        registration_qop: {type: string, example: auth}
+        registration_authenticated_request_sent: {type: boolean}
+        registration_auth_username: {type: string, example: "100"}
+        registration_auth_realm: {type: string, example: 98034.falepaco.com.br}
+        registration_auth_uri: {type: string}
+        registration_digest_matches_runtime_secret: {type: [boolean, "null"]}
+        registration_final_response: {type: string, example: "200"}
+        registration_final_reason: {type: string, example: OK}
+        provider_server_or_user_agent: {type: string}
+        registration_capture_mode: {type: string, enum: [pcap_tcp_reassembly, pcap_udp_datagrams, pcap, ""]}
+        registration_tcp_reassembly: {type: string, enum: [PASS, FAIL, NOT_REQUIRED, ""]}
+        registration_capture_error_class: {type: string}
+        registration_capture_window_ms: {type: integer, minimum: 0}
+        registration_first_wire_activity_ms: {type: [integer, "null"], minimum: 0}
+        registration_authenticated_request_ms: {type: [integer, "null"], minimum: 0}
+        registration_final_response_ms: {type: [integer, "null"], minimum: 0, description: Null when no final response was reconstructed}
+        registration_temporary_pcap_deleted: {type: boolean}
+        secrets_redacted: {type: boolean, enum: [true]}
+    FalePacoApplyResponse:
+      type: object
+      required: [applied, credential_file_loaded_fresh, endpoint_active, auth_object_present, auth_username, auth_realm, outbound_auth_reference, transport, request_uri_host, outbound_proxy, caller_id, registration_enabled, registration_object_present, transport_object, transport_object_present, secrets_redacted]
+      properties:
+        applied: {type: boolean, enum: [true]}
+        credential_file_loaded_fresh: {type: boolean, enum: [true]}
+        endpoint_active: {type: boolean}
+        auth_object_present: {type: boolean}
+        auth_username: {type: string}
+        auth_realm: {type: string}
+        outbound_auth_reference: {type: string}
+        transport: {type: string, enum: [tcp, udp]}
+        request_uri_host: {type: string}
+        outbound_proxy: {type: string}
+        caller_id: {type: string}
+        registration_enabled: {type: boolean}
+        registration_object_present: {type: boolean}
+        transport_object: {type: string}
+        transport_object_present: {type: boolean}
+        secrets_redacted: {type: boolean, enum: [true]}
+    ApplyErrorResponse:
+      type: object
+      required: [error, apply_stage, apply_error_class, apply_error_summary, secrets_redacted]
+      properties:
+        error: {type: string}
+        apply_stage: {type: string}
+        apply_error_class: {type: string}
+        apply_error_summary: {type: string}
+        secrets_redacted: {type: boolean, enum: [true]}
+    FalePacoCallResponse:
+      type: object
+      required: [ok, destination, registration_status, selected_transport, request_uri_host, request_uri, outbound_proxy_host, auth_username, originate_accepted, invite_sent, digest_challenge_received, authenticated_invite_sent, digest_response_matches_runtime_secret, sip_progress, sip_final_status, sip_final_reason, call_established, sdp_negotiated, codec, rtp_activity_present, q850_cause, q850_reason, duration_seconds, secrets_redacted]
+      properties:
+        ok: {type: boolean}
+        destination: {type: string, example: "+5567981340687"}
+        registration_status: {type: string, example: Registered}
+        selected_transport: {type: string, enum: [tcp], example: tcp}
+        request_uri_host: {type: string, example: 98034.falepaco.com.br}
+        request_uri: {type: string, example: "sip:+5567981340687@98034.falepaco.com.br:5060;transport=tcp"}
+        outbound_proxy_host: {type: string, example: "98034.falepaco.com.br:5060"}
+        auth_username: {type: string, example: "100"}
+        originate_accepted: {type: boolean}
+        invite_sent: {type: boolean}
+        digest_challenge_received: {type: boolean}
+        authenticated_invite_sent: {type: boolean}
+        digest_response_matches_runtime_secret: {type: boolean}
+        sip_progress: {type: array, items: {type: integer}, example: [183]}
+        sip_final_status: {type: integer, example: 200}
+        sip_final_reason: {type: string, example: OK}
+        call_established: {type: boolean}
+        sdp_negotiated: {type: boolean}
+        codec: {type: string, example: PCMU/8000}
+        rtp_activity_present: {type: boolean}
+        q850_cause: {type: integer, example: 16}
+        q850_reason: {type: string, example: NORMAL_CLEARING}
+        duration_seconds: {type: number, format: float}
+        secrets_redacted: {type: boolean, enum: [true]}
+paths:
+  /healthz: {get: {tags: [Authentication], responses: {"200": {description: Healthy}}}}
+  /readyz: {get: {tags: [Authentication], responses: {"200": {description: Ready}, "503": {description: Not ready}}}}
+  /v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Login
+      description: Obtain JWT, click Authorize, and paste the access_token.
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses: {"200": {description: JWT issued}, "400": {description: Missing credentials}, "401": {description: Invalid credentials}, "429": {description: Rate limit}}
+  /v1/auth/me:
+    get: {tags: [Authentication], summary: Validate login, security: [{BearerAuth: []}], responses: {"200": {description: Authenticated}, "401": {description: Unauthorized}}}
+  /v1/falepaco/config:
+    get: {tags: [Fale Paco Configuration], summary: Get Fale Paco configuration, security: [{BearerAuth: []}], responses: {"200": {description: Sanitized configuration, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigResponse'}}}}, "401": {description: Unauthorized}}}
+    put:
+      tags: [Fale Paco Configuration]
+      summary: Configure Fale Paco
+      description: Save manually entered SIP configuration. Save validates syntax and the Fale Paco host allowlist without live DNS; apply/preflight perform bounded DNS and IP allowlist checks. Password is write-only; omitted password preserves the existing SIP password.
+      security: [{BearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoConfigRequest'}}}}
+      responses: {"200": {description: Saved sanitized configuration}, "400": {description: Invalid configuration}, "401": {description: Unauthorized}}
+  /v1/falepaco/config/apply:
+    post:
+      tags: [Fale Paco Configuration]
+      summary: Apply Fale Paco configuration
+      description: Read fresh runtime credentials, render/apply PJSIP, reload Asterisk, and read back. Does not place a call.
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {description: Applied and read back with auth/transport/registration readback, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoApplyResponse'}}}}
+        "401": {description: Unauthorized}
+        "502": {description: Asterisk failure, content: {application/json: {schema: {$ref: '#/components/schemas/ApplyErrorResponse'}}}}
+  /v1/falepaco/network/preflight:
+    get:
+      tags: [Fale Paco Configuration]
+      summary: Sanitized network and RTP preflight
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: Bounded DNS/IP allowlist, route/firewall/listener checks
+          content: {application/json: {schema: {$ref: '#/components/schemas/NetworkPreflightResponse'}}}
+        "401": {description: Unauthorized}
+
+  /v1/falepaco/registration:
+    get:
+      tags: [Fale Paco Registration]
+      summary: Get registration state
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Sanitized registration state}, "401": {description: Unauthorized}}
+    delete:
+      tags: [Fale Paco Registration]
+      summary: Disable registration object
+      security: [{BearerAuth: []}]
+      responses: {"200": {description: Registration disabled}, "401": {description: Unauthorized}}
+  /v1/falepaco/registration/test:
+    post:
+      tags: [Fale Paco Registration]
+      summary: Test SIP REGISTER once
+      description: Captures the saved TCP or UDP transport on port 5060 to a mode-0600 temporary PCAP, applies the saved registration configuration, reads the registration object and pre-state, then explicitly runs one `pjsip send register trunk-falepaco-reg` trigger. TCP SIP is decoded only after in-process TCP stream reassembly and correlated by Call-ID/CSeq; no tshark dependency or packet-oriented text fallback is used. The PCAP is removed after parsing. A stale Rejected state without current-attempt wire evidence is not provider rejection. Does not place a call.
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {description: Registered, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}
+        "401": {description: Unauthorized}
+        "502": {description: Registration rejected or unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/RegistrationTestResponse'}}}}
+  /v1/test/falepaco/call:
+    post:
+      tags: [Fale Paco Test]
+      summary: Call the allowed destination after registration
+      description: Requires registration_status=Registered and a saved configuration matching the active PJSIP endpoint, AOR, auth, registration and TCP transport. It does not reapply or reload the trunk after the registration gate. Uses the canonical 98034 profile and only allows +5567981340687.
+      security: [{BearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [destination], properties: {destination: {type: string, example: "+5567981340687"}}}}}}
+      responses:
+        "200": {description: Sanitized INVITE, SDP, RTP and Q.850 result, content: {application/json: {schema: {$ref: '#/components/schemas/FalePacoCallResponse'}}}}
+        "400": {description: Destination not allowed}
+        "401": {description: Unauthorized}
+        "409": {description: Registration or active PJSIP profile gate failed}
+        "502": {description: SIP capture, originate or readback failure}

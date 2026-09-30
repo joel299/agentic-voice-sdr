@@ -384,10 +384,18 @@ func (r *RealAsteriskReloader) restoreResolver(s resolverSnapshot) error {
 }
 
 func (r *RealAsteriskReloader) reloadResolver(ctx context.Context) error {
-	if _, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_resolver_unbound.so"); err != nil {
-		return err
+	out, err := r.runner.RunCommand(ctx, "asterisk", "-rx", "module show like res_resolver_unbound.so")
+	if err != nil {
+		return fmt.Errorf("resolver module status unavailable: %w", err)
 	}
-	return nil
+	if strings.Contains(out, "res_resolver_unbound.so") && strings.Contains(out, "Running") {
+		out, err = r.runner.RunCommand(ctx, "asterisk", "-rx", "module reload res_resolver_unbound.so")
+		if err != nil {
+			return fmt.Errorf("resolver reload failed: %w (output: %s)", err, out)
+		}
+		return nil
+	}
+	return errors.New("resolver module res_resolver_unbound.so is not loaded; pinned DNS validation unavailable")
 }
 
 func compoundRollback(primary error, failures ...error) error {
@@ -1024,8 +1032,29 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 	}
 
 	// Step 7: Verify Registration if required
-	if cfg.RegistrationRequired {
-		regState, regHealthy, regErr := m.reloader.CheckRegistration(ctx, cfg.Name)
+	if cfg.RegistrationRequired && !cfg.DeferRegistrationCheck {
+		regState := "Unregistered"
+		var regHealthy bool
+		var regErr error
+		deadline := time.NewTimer(15 * time.Second)
+		defer deadline.Stop()
+		poll := time.NewTicker(750 * time.Millisecond)
+		defer poll.Stop()
+		for {
+			regState, regHealthy, regErr = m.reloader.CheckRegistration(ctx, cfg.Name)
+			if regErr != nil || regHealthy || regState == "Rejected" || regState == "REJECTED" {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				regErr = ctx.Err()
+			case <-deadline.C:
+				regErr = fmt.Errorf("registration wait timed out after 15s (state %q)", regState)
+			case <-poll.C:
+				continue
+			}
+			break
+		}
 		report.RegistrationState = regState
 		if regErr != nil || !regHealthy || (regState != "Registered" && regState != "REGISTERED") {
 			if regErr == nil {
@@ -1034,6 +1063,10 @@ func (m *Manager) ApplyTrunk(ctx context.Context, cfg TrunkConfig) (StatusReport
 			return rollbackTransaction(fmt.Errorf("registration failed: %w", regErr), StatusRegistrationFailed)
 		}
 		report.Status = StatusReady
+		report.EndpointActive = true
+	} else if cfg.RegistrationRequired {
+		report.RegistrationState = "Pending"
+		report.Status = StatusConfigured
 		report.EndpointActive = true
 	} else {
 		report.RegistrationState = "N/A"

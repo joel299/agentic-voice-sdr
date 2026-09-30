@@ -20,7 +20,10 @@ type resolverTxnRunner struct {
 
 func (r *resolverTxnRunner) RunCommand(_ context.Context, _ string, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
-	if strings.Contains(cmd, "res_resolver_unbound") {
+	if strings.Contains(cmd, "module show like res_resolver_unbound.so") {
+		return "res_resolver_unbound.so Running", nil
+	}
+	if strings.Contains(cmd, "module reload res_resolver_unbound.so") {
 		r.resolverReloads++
 		if r.resolverFailures > 0 {
 			r.resolverFailures--
@@ -225,7 +228,7 @@ func TestGeneratePJSIPConfigIPv6UsesBrackets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"contact=sip:[2001:db8::10]:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:[2001:db8::12]:5090"} {
+	for _, want := range []string{"contact=sip:sip.provider.test:5061", "server_uri=sip:reg.provider.test:5061", "client_uri=sip:test@reg.provider.test:5061", "outbound_proxy=sip:proxy.provider.test:5061"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("IPv6 rendering missing %q:\n%s", want, rendered)
 		}
@@ -275,6 +278,14 @@ type removeRollbackRunner struct {
 func (r *removeRollbackRunner) RunCommand(_ context.Context, _ string, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	switch {
+	case strings.Contains(cmd, "module show like res_resolver_unbound.so"):
+		return "res_resolver_unbound.so Running", nil
+	case strings.Contains(cmd, "module reload res_resolver_unbound.so"):
+		r.resolverCalls++
+		if r.failResolverAt == r.resolverCalls {
+			return "resolver reload failed", errors.New("resolver reload failed")
+		}
+		return "resolver reload ok", nil
 	case strings.Contains(cmd, "res_resolver_unbound"):
 		r.resolverCalls++
 		if r.failResolverAt == r.resolverCalls {

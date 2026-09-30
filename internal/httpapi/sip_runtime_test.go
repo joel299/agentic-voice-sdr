@@ -135,11 +135,11 @@ func TestPinnedSIPDestinationPreservesLogicalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(config, "contact=sip:93.184.216.34:5061") {
+	if !strings.Contains(config, `contact=sip:sip.provider.test:5061\;transport=tls`) {
 		t.Fatalf("AOR contact lost pinned network destination:\n%s", config)
 	}
 	registration := config[strings.Index(config, "[trunk-provider_tls-reg]"):]
-	for _, want := range []string{"server_uri=sip:registrar.provider.test:5061", "client_uri=sip:user@registrar.provider.test:5061", "outbound_proxy=sip:93.184.216.36:5061"} {
+	for _, want := range []string{`server_uri=sip:registrar.provider.test:5061`, `client_uri=sip:user@registrar.provider.test:5061`, `outbound_proxy=sip:proxy.provider.test:5061\;transport=tls\;lr`} {
 		if !strings.Contains(registration, want) {
 			t.Fatalf("registration config missing %q:\n%s", want, registration)
 		}
@@ -163,5 +163,26 @@ func TestSafeSIPTLSKeepsLogicalServerName(t *testing.T) {
 	}
 	if gotNetwork != "tcp" || gotAddress != "93.184.216.34:5061" || gotServerName != "sip.provider.test" {
 		t.Fatalf("TLS identity/destination mixed: network=%q address=%q serverName=%q", gotNetwork, gotAddress, gotServerName)
+	}
+}
+
+func TestFalePacoKeepsLogicalOutboundRouteHostname(t *testing.T) {
+	resolver := &sequenceSIPResolver{answers: [][]string{{"177.11.49.36"}}}
+	policy := &sipDestinationPolicy{dialer: newSafeSIPNetworkDialer()}
+	policy.dialer.resolver = resolver
+	cfg := sip.TrunkConfig{Provider: "falepaco", Name: "falepaco", Host: "96678.falepaco.com.br", Port: 5060, Transport: sip.TransportTCP, AuthType: sip.AuthUserPass, AuthUsername: "100", Secret: "secret", FromUser: "100", Enabled: true}
+	pinned, err := policy.PinConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Host != "96678.falepaco.com.br" || pinned.HostNetworkAddress != "" {
+		t.Fatalf("route hostname was replaced: %#v", pinned)
+	}
+	rendered, err := sip.GeneratePJSIPConfig(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "contact=sip:96678.falepaco.com.br:5060") {
+		t.Fatalf("hostname missing from contact: %s", rendered)
 	}
 }

@@ -236,3 +236,24 @@ func TestSIPDisableDoesNotDependOnDNS(t *testing.T) {
 		t.Fatalf("disable must reach Manager without DNS: status=%d calls=%d cfg=%#v body=%s", res.Code, manager.calls, manager.got, res.Body)
 	}
 }
+
+func TestSIPRegistrationCanonicalFieldsSurviveMapping(t *testing.T) {
+	request := SIPConfigRequest{
+		Provider: "falepaco", Name: "falepaco", Host: "98034.falepaco.com.br", Port: 5060,
+		Transport: "tcp", Auth: SIPAuthRequest{Type: "userpass", Username: "100", Secret: "secret"},
+		RegistrationRealm: "98034.falepaco.com.br", RegistrationRequired: true, Enabled: true,
+		RegistrationServerURI:   "sip:98034.falepaco.com.br:5060",
+		RegistrationClientURI:   "sip:100@98034.falepaco.com.br:5060",
+		RegistrationContactUser: "100", RegistrationRetryInterval: 45, RegistrationMaxRetries: 7,
+	}
+	canonical, err := request.ToCanonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.RegistrationServerURI != request.RegistrationServerURI || canonical.RegistrationClientURI != request.RegistrationClientURI || canonical.RegistrationContactUser != request.RegistrationContactUser || canonical.RegistrationRetryInterval != 45 || canonical.RegistrationMaxRetries != 7 {
+		t.Fatalf("registration fields were dropped: %#v", canonical)
+	}
+	if canonical.Realm != request.RegistrationRealm {
+		t.Fatalf("realm must map to auth: got %q", canonical.Realm)
+	}
+}

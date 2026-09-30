@@ -181,6 +181,29 @@ func TestCallLifecycleUsesRepositoryAndSurfacesWriteFailure(t *testing.T) {
 	}
 }
 
+func TestUncertainDialReconciliationPersistsTerminalFailure(t *testing.T) {
+	provider := newFakeProvider()
+	provider.dialErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("dispatch outcome unknown")}
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Start(context.Background(), "+5567981340687"); !errors.Is(err, ErrProviderFailure) {
+		t.Fatalf("Start error=%v", err)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.updates) != 1 || repo.updates[0].status != "failed" {
+		t.Fatalf("reconciled lifecycle was not persisted: %+v", repo.updates)
+	}
+}
+
 func TestStartFailsClosedForInvalidOrUnlistedDestination(t *testing.T) {
 	provider := newFakeProvider()
 	service := testService(t, provider)

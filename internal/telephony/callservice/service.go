@@ -178,6 +178,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 			s.mu.Lock()
 			s.starting = false
 			s.mu.Unlock()
+			if errors.Is(reconcileErr, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 			return Call{}, ErrCallActive
 		}
 		s.mu.Lock()
@@ -260,7 +263,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 			}
 		}
 		if certainty == control.DispatchMaybeDispatched {
-			_ = s.Reconcile(ctx, callID)
+			if reconcileErr := s.Reconcile(ctx, callID); errors.Is(reconcileErr, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 		}
 		return Call{}, ErrProviderFailure
 	}
@@ -302,6 +307,9 @@ func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 	if s.requested[callID] && s.hangupUncertain[callID] {
 		s.mu.Unlock()
 		if err := s.reconcileHangup(ctx, callID); err != nil {
+			if errors.Is(err, ErrPersistenceFailure) {
+				return Call{}, ErrPersistenceFailure
+			}
 			return Call{}, ErrProviderFailure
 		}
 		s.mu.RLock()
@@ -338,9 +346,9 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || s.activeID != callID || !s.uncertain[callID] {
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) == 0 {
@@ -348,7 +356,8 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		s.calls[callID] = call
 		s.activeID = ""
 		delete(s.uncertain, callID)
-		return nil
+		s.mu.Unlock()
+		return s.persistLifecycle(ctx, call, "failed")
 	}
 	for _, active := range inventory {
 		if !inventoryMatches(active, call) {
@@ -365,8 +374,10 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 		}
 		s.calls[callID] = call
 		delete(s.uncertain, callID)
-		return nil
+		s.mu.Unlock()
+		return s.persistLifecycle(ctx, call, "")
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -376,9 +387,9 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || s.activeID != callID || !s.hangupUncertain[callID] {
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) == 1 && inventoryMatches(inventory[0], call) {
@@ -388,9 +399,11 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 		s.calls[callID] = call
 		delete(s.hangupUncertain, callID)
 		delete(s.requested, callID)
+		s.mu.Unlock()
 		return nil
 	}
 	if len(inventory) != 0 {
+		s.mu.Unlock()
 		return nil
 	}
 	if call.Status == StatusConnected {
@@ -401,6 +414,18 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 	s.calls[callID] = call
 	s.activeID = ""
 	delete(s.hangupUncertain, callID)
+	s.mu.Unlock()
+	return s.persistLifecycle(ctx, call, string(call.Status))
+}
+
+func (s *Service) persistLifecycle(ctx context.Context, call Call, reason string) error {
+	if s.repository == nil {
+		return nil
+	}
+	if err := s.repository.UpdateLifecycle(ctx, call.CallID, string(call.Status), call.ProviderCallID, reason); err != nil {
+		s.setPersistenceError(err)
+		return ErrPersistenceFailure
+	}
 	return nil
 }
 

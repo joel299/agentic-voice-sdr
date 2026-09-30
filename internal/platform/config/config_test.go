@@ -8,6 +8,9 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("OWNER_API_TOKEN", "")
+	t.Setenv("BARESIP_CTRL_TCP_ADDR", "")
+	t.Setenv("OUTBOUND_CALL_DESTINATION_ALLOWLIST", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -15,8 +18,31 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr != ":8080" {
 		t.Fatalf("HTTPAddr = %q, want %q", cfg.HTTPAddr, ":8080")
 	}
+	if cfg.BaresipCtrlTCPAddress != "127.0.0.1:4444" || len(cfg.OutboundCallAllowlist) != 0 || cfg.OwnerAPIToken != "" {
+		t.Fatalf("unexpected outbound call defaults: %+v", cfg)
+	}
 	if cfg.ReadTimeout <= 0 || cfg.WriteTimeout <= 0 || cfg.IdleTimeout <= 0 {
 		t.Fatal("HTTP timeouts must be positive")
+	}
+}
+
+func TestLoadOutboundCallSettings(t *testing.T) {
+	t.Setenv("OWNER_API_TOKEN", "owner-token")
+	t.Setenv("BARESIP_CTRL_TCP_ADDR", "127.0.0.1:4444")
+	t.Setenv("OUTBOUND_CALL_DESTINATION_ALLOWLIST", " +5567981340687, , +14155550100 ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OwnerAPIToken != "owner-token" || cfg.BaresipCtrlTCPAddress != "127.0.0.1:4444" || len(cfg.OutboundCallAllowlist) != 2 || cfg.OutboundCallAllowlist[0] != "+5567981340687" {
+		t.Fatalf("outbound call settings not loaded: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsWhitespaceInOwnerToken(t *testing.T) {
+	t.Setenv("OWNER_API_TOKEN", "owner token")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected token validation error")
 	}
 }
 

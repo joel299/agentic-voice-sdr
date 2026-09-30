@@ -14,6 +14,8 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
 	"github.com/joel299/agentic-voice-sdr/internal/voiceflow"
 )
 
@@ -49,12 +51,33 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 }
 
 func serve(ctx context.Context, cfg config.Config) error {
-	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfig(cfg))
+	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	provider, err := baresipctrl.New(baresipctrl.Options{Address: cfg.BaresipCtrlTCPAddress})
+	if err != nil {
+		return fmt.Errorf("configure local Baresip control: %w", err)
+	}
+	policy, err := callservice.NewAllowlist(cfg.OutboundCallAllowlist)
+	if err != nil {
+		_ = provider.Close()
+		return fmt.Errorf("configure outbound call destination policy: %w", err)
+	}
+	calls, err := callservice.New(provider, policy)
+	if err != nil {
+		_ = provider.Close()
+		return fmt.Errorf("configure outbound call service: %w", err)
+	}
+	defer calls.Close()
+	defer provider.Close()
+	go func() {
+		if err := provider.Run(signalCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Baresip ctrl_tcp runtime unavailable; outbound call control is disabled")
+		}
+	}()
+	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCallService(cfg, calls))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout
 	server.IdleTimeout = cfg.IdleTimeout
-	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	var audio falePacoServer
 	var logger voiceflow.FalePacoLogger
 	if cfg.FalePacoAudioSocketEnabled {

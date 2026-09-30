@@ -795,7 +795,7 @@ func classifyCallClose(param string, connected bool) (control.CallState, string)
 		return control.CallStateCanceled, "local_hangup"
 	case strings.Contains(value, "connection reset by peer"):
 		return control.CallStateFailed, "failed"
-	case hasWord(value, "busy") || hasWord(value, "486") || hasWord(value, "600"):
+	case hasWord(value, "busy") || hasWord(value, "486") || hasWord(value, "600") || hasWord(value, "cause=17"):
 		return control.CallStateBusy, "busy"
 	case containsAny(value, "no answer", "no-answer", "no_answer", "noanswer", "timed out") || hasWord(value, "timeout") || hasWord(value, "408") || hasWord(value, "cause=18") || hasWord(value, "cause=19"):
 		return control.CallStateNoAnswer, "no_answer"

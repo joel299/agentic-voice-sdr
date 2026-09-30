@@ -211,6 +211,14 @@ func TestCallClosedTerminalStatesByCallID(t *testing.T) {
 			want: control.CallStateBusy, wantParam: "busy",
 		},
 		{
+			name: "Q.850 cause 17 is busy before connect",
+			sequence: []wireMessage{
+				{Class: "call", Type: "CALL_OUTGOING", CallID: "cause-17"},
+				{Class: "call", Type: "CALL_CLOSED", CallID: "cause-17", Param: "cause=17"},
+			},
+			want: control.CallStateBusy, wantParam: "busy",
+		},
+		{
 			name: "no answer timeout",
 			sequence: []wireMessage{
 				{Class: "call", Type: "CALL_OUTGOING", CallID: "no-answer"},

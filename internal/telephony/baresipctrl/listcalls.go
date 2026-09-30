@@ -21,58 +21,105 @@ func ParseActiveCalls(output string) ([]control.ActiveCall, error) {
 	if clean == "" {
 		return nil, fmt.Errorf("empty Baresip call inventory")
 	}
-	for _, line := range strings.Split(clean, "\n") {
-		if strings.EqualFold(strings.TrimSpace(line), "--- No active calls ---") {
-			return []control.ActiveCall{}, nil
-		}
-	}
-
 	lines := strings.Split(clean, "\n")
-	headerIndex, expected := -1, -1
+	var headers []int
+	var counts []int
+	noActiveMarker := false
 	for i, line := range lines {
-		match := activeCallsHeader.FindStringSubmatch(strings.TrimSpace(line))
-		if len(match) == 2 {
-			headerIndex = i
-			expected, _ = strconv.Atoi(match[1])
-			break
+		trimmed := strings.TrimSpace(line)
+		if strings.EqualFold(trimmed, "--- No active calls ---") {
+			noActiveMarker = true
+			continue
+		}
+		if strings.Contains(strings.ToLower(trimmed), "active calls") {
+			match := activeCallsHeader.FindStringSubmatch(trimmed)
+			if len(match) != 2 {
+				return nil, fmt.Errorf("invalid Baresip call inventory header")
+			}
+			count, err := strconv.Atoi(match[1])
+			if err != nil {
+				return nil, fmt.Errorf("invalid Baresip active call count")
+			}
+			headers = append(headers, i)
+			counts = append(counts, count)
 		}
 	}
-	if headerIndex < 0 {
-		return nil, fmt.Errorf("unrecognized Baresip call inventory")
-	}
-	if expected == 0 {
+	if len(headers) == 0 && noActiveMarker {
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.EqualFold(trimmed, "--- No active calls ---") || strings.HasPrefix(strings.ToLower(trimmed), "user-agent:") {
+				continue
+			}
+			return nil, fmt.Errorf("unrecognized Baresip call inventory")
+		}
 		return []control.ActiveCall{}, nil
 	}
-
-	calls := make([]control.ActiveCall, 0, expected)
-	for _, line := range lines[headerIndex+1:] {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "---") {
-			continue
-		}
-		uri := callURI.FindString(line)
-		if uri == "" {
-			continue
-		}
-		call := control.ActiveCall{PeerURI: strings.TrimRight(uri, ".,;)")}
-		if id := callIDField.FindStringSubmatch(line); len(id) == 2 {
-			call.ProviderCallID = strings.TrimRight(id[1], ".,;)")
-		}
-		lower := strings.ToLower(line)
-		switch {
-		case strings.Contains(lower, "established"), strings.Contains(lower, "connected"):
-			call.State = control.CallStateConnected
-		case strings.Contains(lower, "ringing"), strings.Contains(lower, "progress"):
-			call.State = control.CallStateRinging
-		default:
-			call.State = control.CallStateOutgoing
-		}
-		calls = append(calls, call)
+	if len(headers) == 0 {
+		return nil, fmt.Errorf("unrecognized Baresip call inventory")
 	}
-	// If Baresip reports active calls without parseable peers, retain opaque
-	// entries. Any nonempty inventory must block a new dial.
-	for len(calls) < expected {
-		calls = append(calls, control.ActiveCall{})
+	for _, line := range lines[:headers[0]] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "user-agent:") || strings.EqualFold(trimmed, "--- No active calls ---") {
+			continue
+		}
+		return nil, fmt.Errorf("unrecognized Baresip call inventory preamble")
+	}
+
+	total := 0
+	for _, count := range counts {
+		if count > len(lines)-total {
+			return nil, fmt.Errorf("Baresip active call count exceeds response size")
+		}
+		total += count
+	}
+	calls := make([]control.ActiveCall, 0, total)
+	for section, headerIndex := range headers {
+		expected := counts[section]
+		end := len(lines)
+		if section+1 < len(headers) {
+			end = headers[section+1]
+		}
+		sectionCalls := make([]control.ActiveCall, 0, expected)
+		for _, line := range lines[headerIndex+1 : end] {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(line), "user-agent:") {
+				break
+			}
+			if line == "" || strings.EqualFold(line, "--- No active calls ---") {
+				continue
+			}
+			if strings.HasPrefix(line, "---") {
+				return nil, fmt.Errorf("unrecognized Baresip call inventory section")
+			}
+			if len(sectionCalls) >= expected {
+				return nil, fmt.Errorf("Baresip call rows exceed reported active count")
+			}
+			uri := callURI.FindString(line)
+			if uri == "" {
+				sectionCalls = append(sectionCalls, control.ActiveCall{})
+				continue
+			}
+			call := control.ActiveCall{PeerURI: strings.TrimRight(uri, ".,;)")}
+			if id := callIDField.FindStringSubmatch(line); len(id) == 2 {
+				call.ProviderCallID = strings.TrimRight(id[1], ".,;)")
+			}
+			lower := strings.ToLower(line)
+			switch {
+			case strings.Contains(lower, "established"), strings.Contains(lower, "connected"):
+				call.State = control.CallStateConnected
+			case strings.Contains(lower, "ringing"), strings.Contains(lower, "progress"):
+				call.State = control.CallStateRinging
+			default:
+				call.State = control.CallStateOutgoing
+			}
+			sectionCalls = append(sectionCalls, call)
+		}
+		calls = append(calls, sectionCalls...)
+		// Preserve every provider-reported call even when a row is malformed.
+		for len(sectionCalls) < expected {
+			calls = append(calls, control.ActiveCall{})
+			sectionCalls = append(sectionCalls, control.ActiveCall{})
+		}
 	}
 	return calls, nil
 }

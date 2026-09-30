@@ -336,24 +336,97 @@ func TestAmbiguousHangupDoesNotDuplicateAndReconciles(t *testing.T) {
 	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "baresip-established", PeerURI: "sip:+5567981340687@example"}
 	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
 	provider.hangupErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
-	provider.activeCalls = []control.ActiveCall{{PeerURI: "sip:+5567981340687@example", State: control.CallStateConnected}}
 	if _, err := service.Hangup(context.Background(), call.CallID); err != ErrProviderFailure {
 		t.Fatalf("Hangup error=%v", err)
 	}
+	_, sent := provider.counts()
+	if sent != 1 {
+		t.Fatalf("first ambiguous Hangup calls=%d, want 1", sent)
+	}
+	provider.setInventory([]control.ActiveCall{{ProviderCallID: "baresip-established", PeerURI: "sip:+5567981340687@example", State: control.CallStateConnected}}, nil)
 	if _, err := service.Hangup(context.Background(), call.CallID); !errors.Is(err, ErrHangupRequested) {
-		t.Fatalf("duplicate Hangup error=%v", err)
+		t.Fatalf("reconciliation Hangup error=%v, want safe retry conflict", err)
+	}
+	_, sent = provider.counts()
+	if sent != 1 {
+		t.Fatalf("reconciliation sent duplicate Hangup; calls=%d", sent)
+	}
+	provider.hangupErr = nil
+	if _, err := service.Hangup(context.Background(), call.CallID); err != nil {
+		t.Fatalf("explicit retry Hangup=%v", err)
+	}
+	if _, err := service.Hangup(context.Background(), call.CallID); !errors.Is(err, ErrHangupRequested) {
+		t.Fatalf("third Hangup error=%v, want one-shot guard", err)
+	}
+	_, sent = provider.counts()
+	if sent != 2 {
+		t.Fatalf("dispatched Hangup calls=%d, want exactly 2", sent)
+	}
+}
+
+func TestAmbiguousHangupZeroInventoryMarksTerminal(t *testing.T) {
+	provider := newFakeProvider()
+	service := testService(t, provider)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "baresip-zero", PeerURI: "sip:+5567981340687@example"}
+	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
+	provider.hangupErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
+	if _, err := service.Hangup(context.Background(), call.CallID); err != ErrProviderFailure {
+		t.Fatalf("Hangup error=%v", err)
+	}
+	provider.setInventory(nil, nil)
+	if _, err := service.Hangup(context.Background(), call.CallID); err != nil {
+		t.Fatalf("zero-call reconciliation=%v", err)
+	}
+	got, _ := service.Get(call.CallID)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed", got.Status)
 	}
 	_, sent := provider.counts()
 	if sent != 1 {
 		t.Fatalf("Hangup calls=%d, want 1", sent)
 	}
-	provider.setInventory(nil, nil)
-	if _, err := service.Hangup(context.Background(), call.CallID); err != nil {
-		t.Fatalf("terminal reconciliation=%v", err)
+}
+
+func TestAmbiguousHangupUnknownOrDifferentInventoryStaysFailClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		inventory []control.ActiveCall
+		err       error
+	}{
+		{name: "different call", inventory: []control.ActiveCall{{ProviderCallID: "other", PeerURI: "sip:+15550001111@example"}}},
+		{name: "provider ID mismatch forbids URI fallback", inventory: []control.ActiveCall{{ProviderCallID: "other", PeerURI: "sip:+5567981340687@example"}}},
+		{name: "opaque call", inventory: []control.ActiveCall{{}}},
+		{name: "inventory query failure", err: errors.New("inventory unavailable")},
 	}
-	got, _ := service.Get(call.CallID)
-	if got.Status != StatusCompleted {
-		t.Fatalf("status=%s, want completed", got.Status)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newFakeProvider()
+			service := testService(t, provider)
+			call, err := service.Start(context.Background(), "+5567981340687")
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "baresip-fail-closed", PeerURI: "sip:+5567981340687@example"}
+			waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
+			provider.hangupErr = &control.CommandError{Certainty: control.DispatchMaybeDispatched, Cause: errors.New("response lost")}
+			if _, err := service.Hangup(context.Background(), call.CallID); err != ErrProviderFailure {
+				t.Fatalf("first Hangup error=%v", err)
+			}
+			provider.setInventory(tc.inventory, tc.err)
+			if _, err := service.Hangup(context.Background(), call.CallID); err == nil {
+				t.Fatal("unknown inventory incorrectly allowed retry")
+			}
+			provider.mu.Lock()
+			commands := provider.hangupCalls
+			provider.mu.Unlock()
+			if commands != 1 {
+				t.Fatalf("Hangup calls=%d, want 1", commands)
+			}
+		})
 	}
 }
 

@@ -290,9 +290,6 @@ func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 			s.hangupUncertain[callID] = true
 		}
 		s.mu.Unlock()
-		if certainty == control.DispatchMaybeDispatched {
-			_ = s.reconcileHangup(ctx, callID)
-		}
 		return Call{}, ErrProviderFailure
 	}
 	return s.Get(callID)
@@ -347,6 +344,15 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || s.activeID != callID || !s.hangupUncertain[callID] {
+		return nil
+	}
+	if len(inventory) == 1 && inventoryMatches(inventory[0], call) {
+		if call.ProviderCallID == "" {
+			call.ProviderCallID = inventory[0].ProviderCallID
+		}
+		s.calls[callID] = call
+		delete(s.hangupUncertain, callID)
+		delete(s.requested, callID)
 		return nil
 	}
 	if len(inventory) != 0 {

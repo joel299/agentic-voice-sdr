@@ -4,6 +4,7 @@ package voicecall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -14,7 +15,7 @@ import (
 
 var (
 	ErrDatabaseOperation = errors.New("database operation failed")
-	ErrCallNotFound      = errors.New("call not found")
+	ErrCallNotFound      = domain.ErrCallNotFound
 	ErrInvalidRecord     = errors.New("invalid call or transcript record")
 )
 
@@ -129,22 +130,25 @@ func (r *Repository) AppendFinalTurn(ctx context.Context, callID, role, text, so
 	return turn, true, nil
 }
 
-func (r *Repository) ListFinalTurns(ctx context.Context, callID string) ([]domain.Turn, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,call_id,sequence,role,text,transcript_state,source,idempotency_key,created_at FROM voice_call_transcript_turns WHERE call_id=$1 AND transcript_state='final' ORDER BY sequence`, callID)
+func (r *Repository) ListFinalTurns(ctx context.Context, callID string, limit int) ([]domain.Turn, error) {
+	if ctx == nil || strings.TrimSpace(callID) == "" || limit <= 0 {
+		return nil, ErrInvalidRecord
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,call_id,sequence,role,text,transcript_state,source,idempotency_key,created_at FROM voice_call_transcript_turns WHERE call_id=$1 AND transcript_state='final' ORDER BY sequence ASC LIMIT $2`, callID, limit)
 	if err != nil {
-		return nil, ErrDatabaseOperation
+		return nil, fmt.Errorf("%w: %w", ErrDatabaseOperation, err)
 	}
 	defer rows.Close()
 	turns := make([]domain.Turn, 0)
 	for rows.Next() {
 		var t domain.Turn
 		if err := rows.Scan(&t.ID, &t.CallID, &t.Sequence, &t.Role, &t.Text, &t.State, &t.Source, &t.IdempotencyKey, &t.CreatedAt); err != nil {
-			return nil, ErrDatabaseOperation
+			return nil, fmt.Errorf("%w: %w", ErrDatabaseOperation, err)
 		}
 		turns = append(turns, t)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, ErrDatabaseOperation
+		return nil, fmt.Errorf("%w: %w", ErrDatabaseOperation, err)
 	}
 	return turns, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/transcriptquery"
 	"github.com/joel299/agentic-voice-sdr/internal/voiceflow"
 )
 
@@ -88,12 +89,13 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer calls.Close()
 	defer provider.Close()
+	transcripts := transcriptquery.New(callRepository, callRepository)
 	go func() {
 		if err := provider.Run(signalCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Baresip ctrl_tcp runtime unavailable; outbound call control is disabled")
 		}
 	}()
-	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCallService(cfg, calls))
+	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigCallAndTranscriptServices(cfg, calls, transcripts))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout
 	server.IdleTimeout = cfg.IdleTimeout

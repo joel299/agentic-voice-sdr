@@ -32,7 +32,7 @@ func (r *transcriptRepoFake) AppendFinalTurn(_ context.Context, callID, role, te
 	r.turns = append(r.turns, t)
 	return t, true, nil
 }
-func (r *transcriptRepoFake) ListFinalTurns(context.Context, string) ([]voicecalldomain.Turn, error) {
+func (r *transcriptRepoFake) ListFinalTurns(context.Context, string, int) ([]voicecalldomain.Turn, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]voicecalldomain.Turn(nil), r.turns...), nil

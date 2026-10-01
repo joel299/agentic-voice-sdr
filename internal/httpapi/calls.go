@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/transcriptquery"
 )
 
 // OutboundCallService is the narrow HTTP-facing call control contract.
@@ -16,14 +17,22 @@ type OutboundCallService interface {
 	Hangup(context.Context, string) (callservice.Call, error)
 }
 
-type callAPI struct{ service OutboundCallService }
+type CallTranscriptReader interface {
+	Get(context.Context, string, int) (transcriptquery.Transcript, error)
+}
 
-func registerCallRoutes(router chi.Router, service OutboundCallService, authorizer OwnerAuthorizer) {
-	a := &callAPI{service: service}
+type callAPI struct {
+	service     OutboundCallService
+	transcripts CallTranscriptReader
+}
+
+func registerCallRoutes(router chi.Router, service OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer) {
+	a := &callAPI{service: service, transcripts: transcripts}
 	router.Route("/v1/calls", func(r chi.Router) {
 		r.Use(ownerOnly(authorizer))
 		r.Post("/", a.create)
 		r.Get("/{call_id}", a.get)
+		r.Get("/{call_id}/transcript", a.getTranscript)
 		r.Post("/{call_id}/hangup", a.hangup)
 	})
 }

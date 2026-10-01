@@ -34,6 +34,10 @@ func NewRouterWithConfig(cfg config.Config) http.Handler {
 }
 
 func NewRouterWithConfigAndCallService(cfg config.Config, calls OutboundCallService) http.Handler {
+	return NewRouterWithConfigCallAndTranscriptServices(cfg, calls, nil)
+}
+
+func NewRouterWithConfigCallAndTranscriptServices(cfg config.Config, calls OutboundCallService, transcripts CallTranscriptReader) http.Handler {
 	var store whatsapp.ConfigStore = whatsapp.NewMemoryConfigStore()
 	if cfg.WhatsAppConfigPath != "" {
 		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
@@ -42,7 +46,7 @@ func NewRouterWithConfigAndCallService(cfg config.Config, calls OutboundCallServ
 	if cfg.OwnerAPIToken != "" {
 		authorizer, _ = NewStaticBearerAuthorizer(cfg.OwnerAPIToken)
 	}
-	return NewRouterWithServicesAndCalls(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, authorizer)
+	return NewRouterWithServicesCallsAndTranscript(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, transcripts, authorizer)
 }
 
 func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
@@ -74,6 +78,10 @@ func NewRouterWithServices(whatsappService *whatsapp.Service, sipConfigurator SI
 }
 
 func NewRouterWithServicesAndCalls(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator, calls OutboundCallService, authorizer OwnerAuthorizer) http.Handler {
+	return NewRouterWithServicesCallsAndTranscript(whatsappService, sipConfigurator, calls, nil, authorizer)
+}
+
+func NewRouterWithServicesCallsAndTranscript(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer) http.Handler {
 	a := &configAPI{whatsapp: whatsappService, sip: sipConfigurator}
 	router := chi.NewRouter()
 	router.Get("/healthz", health)
@@ -85,7 +93,7 @@ func NewRouterWithServicesAndCalls(whatsappService *whatsapp.Service, sipConfigu
 	router.Post("/v1/config/whatsapp/test", a.testWhatsApp)
 	router.Put("/v1/config/sip-trunk", a.putSIP)
 	router.Get("/v1/config/sip-trunk", a.getSIP)
-	registerCallRoutes(router, calls, authorizer)
+	registerCallRoutes(router, calls, transcripts, authorizer)
 	return router
 }
 func health(w http.ResponseWriter, _ *http.Request) { writeStatus(w, http.StatusOK, "ok") }

@@ -133,6 +133,35 @@ func TestStartNormalizesAllowedDestinationAndCorrelatesProviderCallID(t *testing
 	}
 }
 
+func TestCallFailedPersistsSanitizedTerminalReason(t *testing.T) {
+	provider := newFakeProvider()
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.events <- control.Event{Class: "call", Type: "CALL_FAILED", State: control.CallStateFailed, CallID: "baresip-failed", PeerURI: "sip:+5567981340687@example.test", Param: "sip_403"}
+	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusFailed })
+	got, err := service.Get(call.CallID)
+	if err != nil || got.TerminalReason != "sip_403" {
+		t.Fatalf("call=%+v err=%v; want sanitized sip_403", got, err)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.updates) == 0 || repo.updates[len(repo.updates)-1].reason != "sip_403" {
+		t.Fatalf("persisted updates=%+v; want terminal reason sip_403", repo.updates)
+	}
+}
+
 func TestCallLifecycleUsesRepositoryAndSurfacesWriteFailure(t *testing.T) {
 	provider := newFakeProvider()
 	repo := &callRepositoryFake{}

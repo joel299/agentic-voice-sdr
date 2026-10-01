@@ -319,6 +319,34 @@ func TestCallClosedTerminalStatesByCallID(t *testing.T) {
 	}
 }
 
+func TestCallFailedPreservesOnlySanitizedProviderClass(t *testing.T) {
+	tests := []struct {
+		name      string
+		param     string
+		wantState control.CallState
+		wantParam string
+	}{
+		{name: "SIP forbidden", param: "403 Forbidden", wantState: control.CallStateFailed, wantParam: "sip_403"},
+		{name: "server error", param: "503 Service Unavailable", wantState: control.CallStateFailed, wantParam: "sip_503"},
+		{name: "busy", param: "486 Busy Here", wantState: control.CallStateBusy, wantParam: "busy"},
+		{name: "temporarily unavailable", param: "480 Temporarily Unavailable", wantState: control.CallStateFailed, wantParam: "sip_480"},
+		{name: "transport reset", param: "connection reset by peer", wantState: control.CallStateFailed, wantParam: "transport_error"},
+		{name: "no reason", param: "", wantState: control.CallStateFailed, wantParam: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newCallLifecycleClient(8)
+			event := client.normalizeLifecycleEvent(normalizeEvent(wireMessage{Class: "call", Type: "CALL_FAILED", CallID: "provider-call", Param: test.param}))
+			if event.State != test.wantState || event.Param != test.wantParam {
+				t.Fatalf("state/param=%q/%q, want %q/%q", event.State, event.Param, test.wantState, test.wantParam)
+			}
+			if strings.Contains(event.Param, test.param) && test.param != "" {
+				t.Fatalf("provider detail leaked into normalized parameter: %q", event.Param)
+			}
+		})
+	}
+}
+
 func TestInterleavedCallLifecycleStateIsIsolated(t *testing.T) {
 	client := newCallLifecycleClient(4)
 	feed := func(id, eventType, param string) control.Event {

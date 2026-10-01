@@ -21,7 +21,7 @@ var (
 	ErrClosed        = errors.New("baresip media adapter: closed")
 	ErrNotConnected  = errors.New("baresip media adapter: Baresip audio module is not connected")
 	ErrSessionClosed = errors.New("baresip media adapter: call media session closed")
-	ErrBackpressure  = errors.New("baresip media adapter: bounded frame queue is full")
+	ErrBackpressure  = errors.New("baresip media adapter: bounded RX frame queue is full")
 	ErrInvalidFormat = errors.New("baresip media adapter: frame does not match PCM contract")
 )
 
@@ -439,10 +439,6 @@ func (s *mediaSession) enqueuePCM(payload []byte) error {
 	}
 	combinedLen := s.txUsed + len(payload)
 	frameCount := combinedLen / txFrameBytes
-	if frameCount > cap(s.txQueue)-len(s.txQueue) {
-		s.adapter.endSession(s, ErrBackpressure)
-		return ErrBackpressure
-	}
 	combined := make([]byte, combinedLen)
 	copy(combined, s.txPartial[:s.txUsed])
 	copy(combined[s.txUsed:], payload)
@@ -452,11 +448,6 @@ func (s *mediaSession) enqueuePCM(payload []byte) error {
 		case <-s.done:
 			return ErrSessionClosed
 		case s.txQueue <- frame:
-		default:
-			// A single producer holds txMu; the writer only frees capacity, so
-			// this guard is defensive against future concurrent producers.
-			s.adapter.endSession(s, ErrBackpressure)
-			return ErrBackpressure
 		}
 	}
 	remainder := combinedLen - frameCount*txFrameBytes

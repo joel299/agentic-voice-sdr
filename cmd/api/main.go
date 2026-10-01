@@ -260,7 +260,7 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 func baresipMediaErrorClass(err error) string {
 	switch {
 	case errors.Is(err, baresipmedia.ErrBackpressure):
-		return "backpressure"
+		return "rx_backpressure"
 	case errors.Is(err, baresipmedia.ErrInvalidFormat):
 		return "invalid_pcm"
 	case errors.Is(err, baresipmedia.ErrNotConnected):

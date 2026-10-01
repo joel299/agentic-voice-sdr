@@ -55,6 +55,7 @@ type Call struct {
 	ProviderCallID string `json:"provider_call_id,omitempty"`
 	To             string `json:"to"`
 	Status         Status `json:"status"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
 }
 
 type DestinationPolicy interface {
@@ -505,6 +506,10 @@ func (s *Service) applyEvent(event control.Event) {
 	case "CALL_CLOSED", "CALL_TERMINATED", "CALL_FAILED":
 		call.Status = statusFromEvent(event)
 		if call.Status.terminal() {
+			call.TerminalReason = event.Param
+			if call.TerminalReason == "" {
+				call.TerminalReason = string(call.Status)
+			}
 			s.activeID = ""
 			delete(s.uncertain, call.CallID)
 			delete(s.hangupUncertain, call.CallID)
@@ -518,7 +523,10 @@ func (s *Service) applyEvent(event control.Event) {
 	if s.repository != nil {
 		reason := ""
 		if call.Status.terminal() {
-			reason = string(call.Status)
+			reason = call.TerminalReason
+			if reason == "" {
+				reason = string(call.Status)
+			}
 		}
 		if err := s.repository.UpdateLifecycle(s.ctx, call.CallID, string(call.Status), call.ProviderCallID, reason); err != nil {
 			s.setPersistenceError(err)
@@ -558,7 +566,16 @@ func eventMatchesDestination(event control.Event, destination string) bool {
 
 func statusFromEvent(event control.Event) Status {
 	if strings.EqualFold(event.Type, "CALL_FAILED") {
-		return StatusFailed
+		switch event.State {
+		case control.CallStateBusy:
+			return StatusBusy
+		case control.CallStateNoAnswer:
+			return StatusNoAnswer
+		case control.CallStateCanceled:
+			return StatusCanceled
+		default:
+			return StatusFailed
+		}
 	}
 	switch event.State {
 	case control.CallStateCompleted:

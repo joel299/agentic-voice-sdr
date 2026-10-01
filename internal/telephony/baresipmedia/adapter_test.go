@@ -112,37 +112,62 @@ func TestTXRechunkerPreservesSamplesAcrossChunkShapes(t *testing.T) {
 	}
 }
 
-func TestTXRechunkerRejectsOverflowAndAdapterRecovers(t *testing.T) {
-	a, err := New(context.Background(), Config{ParentDir: shortTempDir(t), BufferFrames: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
-	rxPath, txPath := a.SocketPaths()
-	peerRX, peerTX, first := connectPair(t, a, rxPath, txPath)
-	if err := first.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes)}); !errors.Is(err, ErrBackpressure) {
-		t.Fatalf("oversized queued write error=%v, want ErrBackpressure", err)
-	}
-	if _, err := first.ReadFrame(); !errors.Is(err, ErrBackpressure) {
-		t.Fatalf("session read error=%v, want ErrBackpressure", err)
-	}
-	_ = peerRX.Close()
-	_ = peerTX.Close()
-	waitIdle(t, a)
-	assertSocketExists(t, rxPath)
-	assertSocketExists(t, txPath)
+func TestTXQueueAppliesBoundedBackpressureWithoutEndingSession(t *testing.T) {
+	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
+	pcm := pcmSamples(txFrameBytes)
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- state.enqueuePCM(pcm) }()
 
-	peerRX2, peerTX2, second := connectPair(t, a, rxPath, txPath)
-	defer peerRX2.Close()
-	defer peerTX2.Close()
-	defer second.Close()
-	frame := audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes / 2)}
-	if err := second.WriteFrame(frame); err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(time.Second)
+	for len(state.txQueue) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
-	got, err := audiosocket.DecodeReader(peerTX2)
-	if err != nil || !bytes.Equal(got.Payload, frame.Payload) {
-		t.Fatalf("adapter did not recover after session overflow: got %d bytes, err=%v", len(got.Payload), err)
+	if len(state.txQueue) != 1 {
+		t.Fatal("producer did not fill the bounded queue")
+	}
+	select {
+	case err := <-writeDone:
+		t.Fatalf("writer returned before bounded queue had capacity: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	first := <-state.txQueue
+	if !bytes.Equal(first.Payload, pcm[:txFrameBytes]) {
+		t.Fatal("first queued frame did not preserve PCM order")
+	}
+	second := <-state.txQueue
+	if !bytes.Equal(second.Payload, pcm[txFrameBytes:]) {
+		t.Fatal("second queued frame did not preserve PCM order")
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("WriteFrame returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writer did not resume after queue capacity became available")
+	}
+}
+
+func TestTXQueueBackpressureStopsOnSessionCancellation(t *testing.T) {
+	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
+	state.txQueue <- audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes)}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- state.enqueuePCM(pcmSamples(2 * txFrameBytes)) }()
+
+	select {
+	case err := <-writeDone:
+		t.Fatalf("writer did not wait for bounded queue capacity: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(state.done)
+	select {
+	case err := <-writeDone:
+		if !errors.Is(err, ErrSessionClosed) {
+			t.Fatalf("WriteFrame error=%v, want ErrSessionClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writer did not stop after session cancellation")
 	}
 }
 

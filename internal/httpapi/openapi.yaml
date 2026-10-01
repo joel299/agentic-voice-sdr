@@ -453,6 +453,7 @@ components:
         provider_call_id: { type: string, description: Baresip runtime CallID when observed }
         to: { type: string }
         status: { type: string, enum: [dialing, ringing, connected, completed, busy, no_answer, failed, canceled] }
+        terminal_reason: { type: string, pattern: '^(local_hangup|normal|busy|no_answer|canceled|failed|unknown|transport_error|sip_[45][0-9]{2})$', description: Sanitized provider close category or SIP status code; never includes raw SIP headers or credentials. }
     CallTranscriptResponse:
       type: object
       required: [call_id, status, turns]

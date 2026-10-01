@@ -25,6 +25,23 @@ func TestServerConfiguresExplicitTimeouts(t *testing.T) {
 	}
 }
 
+func TestWaitForBaresipControlRequiresListeningEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForBaresipControl(ctx, listener.Addr().String(), time.Second); err != nil {
+		t.Fatalf("ready local control listener rejected: %v", err)
+	}
+
+	if err := waitForBaresipControl(ctx, "127.0.0.1:1", 150*time.Millisecond); !errors.Is(err, errBaresipControlUnavailable) {
+		t.Fatalf("missing control listener error = %v", err)
+	}
+}
+
 func TestGracefulShutdownWaitsForActiveRequests(t *testing.T) {
 	requestStarted := make(chan struct{})
 	releaseRequest := make(chan struct{})

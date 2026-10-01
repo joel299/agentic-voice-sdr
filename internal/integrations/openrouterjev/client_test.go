@@ -20,7 +20,7 @@ func testConfig(endpoint string) Config {
 	return Config{APIKey: testAPIKey, BaseURL: endpoint + "/api", Model: "test/model"}
 }
 func providerBody(choice string) string {
-	b, _ := json.Marshal(map[string]any{"answers": map[string]any{"next_action": map[string]string{"type": "choice", "choice": choice}}})
+	b, _ := json.Marshal(map[string]any{"answers": map[string]any{"intent": map[string]string{"type": "choice", "choice": choice}}})
 	return string(b)
 }
 func activeInput() conversation.DecisionInput {
@@ -48,23 +48,17 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 			t.Errorf("decode request: %v", err)
 			return
 		}
-		question, exists := req.Questions["next_action"]
-		if req.Model != "test/model" || !exists || question.Type != "choice" || question.Criteria["ask_question"] == "" || question.Criteria["end_conversation"] == "" || !strings.Contains(question.Instructions, "opted_out") {
+		question, exists := req.Questions["intent"]
+		if req.Model != "test/model" || !exists || question.Type != "choice" || question.Criteria["acceptance"] == "" || question.Criteria["opt_out"] == "" || !strings.Contains(question.Instructions, "opted_out") {
 			t.Errorf("Jev request = %+v", req)
 		}
-		if !strings.Contains(question.Instructions, "stage") ||
-			!strings.Contains(question.Criteria["continue_conversation"], "active") ||
-			!strings.Contains(question.Criteria["continue_conversation"], "last_turn_role=lead") ||
-			!strings.Contains(question.Criteria["continue_conversation"], "last_transcript_state=final") ||
-			!strings.Contains(question.Criteria["follow_up"], "explicitly commits") ||
-			!strings.Contains(question.Criteria["propose_scheduling"], "explicit meeting request") ||
-			!strings.Contains(question.Instructions, "indecision_security") ||
-			!strings.Contains(question.Instructions, "latest_final_lead_text") ||
-			!strings.Contains(question.Criteria["end_conversation"], "ended") ||
-			!strings.Contains(question.Criteria["end_conversation"], "opted_out") {
-			t.Errorf("Jev criteria do not prioritize latest turn over cumulative response signal: %+v", question)
+		if !strings.Contains(question.Instructions, "semantic intent") ||
+			!strings.Contains(question.Criteria["indecision_security"], "security") ||
+			!strings.Contains(question.Criteria["acceptance"], "concrete suggested time") ||
+			!strings.Contains(question.Criteria["opt_out"], "stop") {
+			t.Errorf("JEV semantic intent contract is incomplete: %+v", question)
 		}
-		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal || !strings.Contains(req.State.LatestFinalLeadText, "Quero marcar") || strings.Contains(req.State.LatestFinalLeadText, "lead@example.com") || strings.Contains(req.State.LatestFinalLeadText, "98134-0687") || req.State.LeadIntentClass != "acceptance" || req.State.ExplicitFutureContact {
+		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal || !strings.Contains(req.State.LatestFinalLeadText, "Quero marcar") || strings.Contains(req.State.LatestFinalLeadText, "lead@example.com") || strings.Contains(req.State.LatestFinalLeadText, "98134-0687") || req.State.MatchingExecutableCapability {
 			t.Errorf("serialized state = %+v", req.State)
 		}
 		encoded, _ := json.Marshal(req.State)
@@ -72,7 +66,7 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 			t.Errorf("request included transcript content: %s", encoded)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, providerBody("propose_scheduling"))
+		io.WriteString(w, providerBody("acceptance"))
 	}))
 	defer server.Close()
 	client, err := New(testConfig(server.URL))
@@ -94,14 +88,14 @@ func TestDecideMapsJevChoiceToCanonicalDecision(t *testing.T) {
 		choice string
 		want   conversation.Decision
 	}{
-		{"continue_conversation", conversation.Decision{NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery}},
-		{"ask_question", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
-		{"propose_scheduling", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule}},
-		{"propose_scheduling_interest_confirmed", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonInterestConfirmed}},
-		{"request_capability", conversation.Decision{NextAction: conversation.ActionRequestCapability, Reason: conversation.ReasonCapabilityRequired}},
-		{"follow_up", conversation.Decision{NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired}},
-		{"end_conversation", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
-		{"handoff", conversation.Decision{NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired}},
+		{"neutral_continue", conversation.Decision{NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery}},
+		{"clarification_or_information_request", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
+		{"acceptance", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule}},
+		{"capability_request", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
+		{"indecision_timing_or_internal_alignment", conversation.Decision{NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired}},
+		{"rejection", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
+		{"opt_out", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
+		{"human_request", conversation.Decision{NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.choice, func(t *testing.T) {
@@ -127,13 +121,59 @@ func TestDecideMapsJevChoiceToCanonicalDecision(t *testing.T) {
 	}
 }
 
+func TestSemanticParaphraseContractUsesJEVIntentInsteadOfGoPhraseRules(t *testing.T) {
+	cases := []struct {
+		name, intent string
+		texts        []string
+		want         conversation.NextAction
+	}{
+		{"acceptance", "acceptance", []string{"quinta às 10 funciona", "esse horário que você sugeriu está ótimo", "pode reservar esse horário para mim"}, conversation.ActionProposeScheduling},
+		{"internal_alignment", "indecision_timing_or_internal_alignment", []string{"preciso conversar com meu sócio primeiro", "vou validar isso internamente antes de avançar", "me procura na próxima semana depois da reunião da diretoria"}, conversation.ActionFollowUp},
+		{"rejection", "rejection", []string{"prefiro não continuar essa conversa", "não é algo que queremos implementar"}, conversation.ActionEndConversation},
+		{"human_request", "human_request", []string{"quero que alguém da equipe fale comigo", "pode transferir para uma pessoa?"}, conversation.ActionHandoff},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, text := range tc.texts {
+				t.Run(text, func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						var req decisionsRequest
+						if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+							t.Errorf("decode request: %v", err)
+							return
+						}
+						if req.State.LatestFinalLeadText != text {
+							t.Errorf("JEV text = %q, want original bounded text %q", req.State.LatestFinalLeadText, text)
+						}
+						_, _ = io.WriteString(w, providerBody(tc.intent))
+					}))
+					defer server.Close()
+					client, err := New(testConfig(server.URL))
+					if err != nil {
+						t.Fatal(err)
+					}
+					input := activeInput()
+					input.LatestFinalLeadText = text
+					got, err := client.Decide(context.Background(), input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.NextAction != tc.want {
+						t.Fatalf("decision = %+v, want action %s", got, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestDecideRejectsMalformedJevAnswers(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
 		{"unknown choice", providerBody("launch_offer")},
-		{"wrong answer primitive", `{"answers":{"next_action":{"type":"noul","noul":0.9}}}`},
+		{"wrong answer primitive", `{"answers":{"intent":{"type":"noul","noul":0.9}}}`},
 		{"missing answer", `{"answers":{}}`},
 		{"malformed JSON", `{`},
 		{"empty response", ``},
@@ -160,10 +200,10 @@ func TestDecideMapsOptedOutInputToCanonicalEndDecision(t *testing.T) {
 			t.Errorf("decode request: %v", err)
 			return
 		}
-		if !req.State.Signals.OptedOut || req.Questions["next_action"].Criteria["end_conversation"] == "" {
+		if !req.State.Signals.OptedOut || req.Questions["intent"].Criteria["opt_out"] == "" {
 			t.Errorf("opt-out signal or end option missing from request state: %+v", req)
 		}
-		_, _ = io.WriteString(w, providerBody("end_conversation"))
+		_, _ = io.WriteString(w, providerBody("neutral_continue"))
 	}))
 	defer server.Close()
 	client, err := New(testConfig(server.URL))

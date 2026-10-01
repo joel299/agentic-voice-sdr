@@ -285,6 +285,21 @@ func (s *Service) Get(callID string) (Call, error) {
 	return call, nil
 }
 
+// ActiveCall returns the current canonical API call identity for media-session
+// correlation. The provider's Baresip Call-ID remains a separate field.
+func (s *Service) ActiveCall() (Call, bool) {
+	if s == nil {
+		return Call{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.activeID == "" {
+		return Call{}, false
+	}
+	call, ok := s.calls[s.activeID]
+	return call, ok
+}
+
 func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
 	s.mu.Lock()
 	if s.persistenceErr != nil {

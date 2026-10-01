@@ -96,8 +96,6 @@ type requestInput struct {
 	LastTurnRole                 conversation.ParticipantRole `json:"last_turn_role,omitempty"`
 	LastTranscriptState          conversation.TranscriptState `json:"last_transcript_state,omitempty"`
 	LatestFinalLeadText          string                       `json:"latest_final_lead_text,omitempty"`
-	LeadIntentClass              string                       `json:"lead_intent_class,omitempty"`
-	ExplicitFutureContact        bool                         `json:"explicit_future_contact"`
 	MatchingExecutableCapability bool                         `json:"matching_executable_capability"`
 }
 
@@ -122,29 +120,33 @@ type typedDecisionAnswer struct {
 	Choice string `json:"choice"`
 }
 
-var canonicalDecisionChoices = map[string]conversation.Decision{
-	"continue_conversation":                 {NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery},
-	"ask_question":                          {NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification},
-	"propose_scheduling":                    {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule},
-	"propose_scheduling_interest_confirmed": {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonInterestConfirmed},
-	"request_capability":                    {NextAction: conversation.ActionRequestCapability, Reason: conversation.ReasonCapabilityRequired},
-	"follow_up":                             {NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired},
-	"end_conversation":                      {NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete},
-	"handoff":                               {NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired},
+var intentChoices = map[string]salesintent.Class{
+	"acceptance":          salesintent.Acceptance,
+	"indecision_cost":     salesintent.IndecisionCost,
+	"indecision_security": salesintent.IndecisionSecurity,
+	"indecision_timing_or_internal_alignment": salesintent.IndecisionTiming,
+	"rejection":                            salesintent.Rejection,
+	"opt_out":                              salesintent.OptOut,
+	"human_request":                        salesintent.HumanRequest,
+	"clarification_or_information_request": salesintent.Clarification,
+	"capability_request":                   salesintent.CapabilityRequest,
+	"neutral_continue":                     salesintent.NeutralContinue,
 }
 
-var canonicalNextActionQuestion = decisionQuestion{
+var semanticIntentQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Choose exactly one canonical next action using the canonical state and latest bounded FINAL lead turn. lead_intent_class is a typed deterministic classification of latest_final_lead_text and is the primary intent signal. Class mappings: opt_out -> end_conversation; rejection -> end_conversation; human_request -> handoff; acceptance -> propose_scheduling only for explicit meeting request or accepted concrete time; indecision_timing_or_internal_alignment -> follow_up only when explicit_future_contact=true, otherwise continue_conversation; clarification_or_information_request -> ask_question; capability_request -> request_capability only if matching_executable_capability=true, otherwise ask_question; indecision_cost and indecision_security -> continue_conversation; neutral_continue -> continue_conversation. Do not infer meeting readiness from general interest. Never produce spoken copy or tool instructions. opted_out=true is a hard invariant. Choose end_conversation for stage=ended or stage=closing. For stage=opening choose continue_conversation.",
+	Instructions: "Classify the semantic intent of latest_final_lead_text using the full bounded meaning and conversation context. Return exactly one intent enum. Do not classify by literal keyword rules, do not generate spoken copy or tool instructions. Distinguish an explicit acceptance/meeting readiness from general interest. Use opt_out only when the lead clearly asks to stop contact; human_request only for an explicit request to speak with a person; capability_request only for an explicit product capability question. If meaning is unclear, use clarification_or_information_request or neutral_continue as appropriate. The opted_out context signal is a hard safety invariant.",
 	Criteria: map[string]string{
-		"continue_conversation":                 "For stage=opening, begin the conversation flow. For stage=active with last_turn_role=lead and last_transcript_state=final and signals.opted_out=false, continue unless latest_final_lead_text explicitly establishes another intent. Use the latest turn, not cumulative signals.lead_responded, to determine whose turn it is.",
-		"ask_question":                          "Use when the latest final lead turn explicitly asks for clarification/information or requests an unavailable capability; do not use merely because the text is missing.",
-		"propose_scheduling":                    "Use only for an explicit meeting request or acceptance of a concrete proposed time in latest_final_lead_text. General interest is insufficient.",
-		"propose_scheduling_interest_confirmed": "Use for explicit interest without a concrete time only when the next step is an offer to schedule; do not infer readiness from vague positive sentiment.",
-		"request_capability":                    "Request a capability only when an explicit supplied canonical signal establishes that a capability is required.",
-		"follow_up":                             "Use when the latest final lead turn explicitly commits to future contact or internal alignment at a stated future time. Do not use when no future contact was requested.",
-		"end_conversation":                      "Select end_conversation when signals.opted_out=true (hard invariant), or when stage=closing or stage=ended. Do not end an opening or active conversation solely because transcript text, intent, or completion details are absent.",
-		"handoff":                               "Hand off only when an explicit supplied canonical signal establishes that human assistance is required.",
+		"acceptance":          "The lead semantically agrees to a proposed next step, accepts a concrete suggested time, or explicitly asks to schedule. Mere interest is not acceptance.",
+		"indecision_cost":     "The lead raises price, budget, or cost as an objection without rejecting contact.",
+		"indecision_security": "The lead raises privacy, security, compliance, reliability, or trust concerns without rejecting contact.",
+		"indecision_timing_or_internal_alignment": "The lead needs more time, internal discussion, or alignment before advancing, including a requested future follow-up.",
+		"rejection":                            "The lead clearly declines the offer or says the product/project is not wanted, without asking to stop all contact.",
+		"opt_out":                              "The lead explicitly asks to stop, unsubscribe, or not be contacted again.",
+		"human_request":                        "The lead explicitly asks for a human, person, representative, or transfer.",
+		"clarification_or_information_request": "The lead asks a question or requests explanation/information before deciding.",
+		"capability_request":                   "The lead asks whether a specific capability, integration, or function is available.",
+		"neutral_continue":                     "The lead acknowledges, gives neutral conversational input, or meaning is insufficient for a more specific class.",
 	},
 }
 
@@ -172,15 +174,11 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	mapped.LastTurnRole = input.LastTurnRole
 	mapped.LastTranscriptState = input.LastTranscriptState
 	mapped.LatestFinalLeadText = salesintent.SanitizeLeadText(input.LatestFinalLeadText)
-	if mapped.LatestFinalLeadText != "" {
-		mapped.LeadIntentClass = string(salesintent.Classify(mapped.LatestFinalLeadText))
-		mapped.ExplicitFutureContact = salesintent.HasExplicitFutureContact(mapped.LatestFinalLeadText)
-		mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
-	}
+	mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
 	payload := decisionsRequest{
 		Model:     c.config.Model,
 		State:     mapped,
-		Questions: map[string]decisionQuestion{"next_action": canonicalNextActionQuestion},
+		Questions: map[string]decisionQuestion{"intent": semanticIntentQuestion},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -226,26 +224,30 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	if err := json.Unmarshal(responseBytes, &providerResponse); err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	answer, ok := providerResponse.Answers["next_action"]
+	answer, ok := providerResponse.Answers["intent"]
 	if !ok || answer.Type != "choice" {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	decision, ok := canonicalDecisionChoices[answer.Choice]
+	intent, ok := intentChoices[answer.Choice]
 	if !ok {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	validated, err := conversation.NewDecision(decision.NextAction, decision.Reason)
+	optedOut := mapped.Signals.OptedOut || input.LastTurnRole == conversation.RoleLead && input.LastTranscriptState == conversation.TranscriptFinal && salesintent.HasExplicitOptOut(mapped.LatestFinalLeadText)
+	if optedOut {
+		intent = salesintent.OptOut
+	}
+	if !optedOut && input.Stage == conversation.StageOpening {
+		intent = salesintent.NeutralContinue
+	} else if !optedOut && (input.Stage == conversation.StageClosing || input.Stage == conversation.StageEnded) {
+		intent = salesintent.Rejection
+	}
+	result, err := salesintent.Decide(intent, intent == salesintent.IndecisionTiming, mapped.MatchingExecutableCapability)
 	if err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
-	if mapped.LatestFinalLeadText != "" {
-		expected, mapErr := salesintent.Decide(salesintent.Class(mapped.LeadIntentClass), mapped.ExplicitFutureContact, mapped.MatchingExecutableCapability)
-		if mapped.Signals.OptedOut {
-			expected, mapErr = salesintent.Decide(salesintent.OptOut, false, false)
-		}
-		if mapErr != nil || validated != expected.Decision {
-			return conversation.Decision{}, ErrInvalidProviderResponse
-		}
+	validated, err := conversation.NewDecision(result.Decision.NextAction, result.Decision.Reason)
+	if err != nil {
+		return conversation.Decision{}, ErrInvalidProviderResponse
 	}
 	return validated, nil
 }

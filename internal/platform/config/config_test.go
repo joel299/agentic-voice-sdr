@@ -7,6 +7,7 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
+	t.Setenv("FALEPACO_AUDIOSOCKET_ENABLED", "false")
 	t.Setenv("HTTP_ADDR", "")
 	t.Setenv("OWNER_API_TOKEN", "")
 	t.Setenv("BARESIP_CTRL_TCP_ADDR", "")
@@ -23,6 +24,13 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ReadTimeout <= 0 || cfg.WriteTimeout <= 0 || cfg.IdleTimeout <= 0 {
 		t.Fatal("HTTP timeouts must be positive")
+	}
+}
+
+func TestLoadRejectsLegacyAudioSocketRuntime(t *testing.T) {
+	t.Setenv("FALEPACO_AUDIOSOCKET_ENABLED", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("legacy AudioSocket/Asterisk runtime must not start in the Baresip local E2E")
 	}
 }
 

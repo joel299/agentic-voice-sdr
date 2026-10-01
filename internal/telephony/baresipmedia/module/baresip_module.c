@@ -1,6 +1,10 @@
 #define _DEFAULT_SOURCE 1
 #include <re.h>
 #include <rem.h>
+/* Baresip 1.1.0's installed public header uses this enum in struct config
+ * without including its declaration. The module does not inspect the field;
+ * completing the enum here preserves the public struct's integer ABI layout. */
+enum jbuf_type { JBUF_OFF = 0, JBUF_FIXED, JBUF_ADAPTIVE };
 #include <baresip.h>
 #include <errno.h>
 #include <poll.h>

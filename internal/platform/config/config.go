@@ -22,6 +22,10 @@ type Config struct {
 	FalePacoRuntimeLogPath     string
 	OwnerAPIToken              string
 	BaresipCtrlTCPAddress      string
+	BaresipBinaryPath          string
+	BaresipProfileDir          string
+	BaresipMediaModulePath     string
+	BaresipSystemModuleDir     string
 	OutboundCallAllowlist      []string
 }
 
@@ -30,7 +34,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"), WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""), SIPConfigDir: envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, ShutdownGrace: 10 * time.Second, FalePacoAudioSocketEnabled: enabled, FalePacoAudioSocketAddr: envOrDefault("FALEPACO_AUDIOSOCKET_ADDR", "127.0.0.1:9092"), FalePacoRuntimeLogPath: envOrDefault("FALEPACO_RUNTIME_LOG_PATH", "/root/agentic-voice-sdr/.runtime-logs/falepaco/runtime.log"), OwnerAPIToken: os.Getenv("OWNER_API_TOKEN"), BaresipCtrlTCPAddress: envOrDefault("BARESIP_CTRL_TCP_ADDR", "127.0.0.1:4444"), OutboundCallAllowlist: splitCSV(os.Getenv("OUTBOUND_CALL_DESTINATION_ALLOWLIST"))}
+	cfg := Config{HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"), WhatsAppConfigPath: envOrDefault("WHATSAPP_CONFIG_PATH", ""), SIPConfigDir: envOrDefault("ASTERISK_PJSIP_CONFIG_DIR", ""), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, ShutdownGrace: 10 * time.Second, FalePacoAudioSocketEnabled: enabled, FalePacoAudioSocketAddr: envOrDefault("FALEPACO_AUDIOSOCKET_ADDR", "127.0.0.1:9092"), FalePacoRuntimeLogPath: envOrDefault("FALEPACO_RUNTIME_LOG_PATH", "/root/agentic-voice-sdr/.runtime-logs/falepaco/runtime.log"), OwnerAPIToken: os.Getenv("OWNER_API_TOKEN"), BaresipCtrlTCPAddress: envOrDefault("BARESIP_CTRL_TCP_ADDR", "127.0.0.1:4444"), BaresipBinaryPath: envOrDefault("BARESIP_BINARY_PATH", "/usr/bin/baresip"), BaresipProfileDir: envOrDefault("BARESIP_PROFILE_DIR", ""), BaresipMediaModulePath: envOrDefault("BARESIP_MEDIA_MODULE_PATH", ""), BaresipSystemModuleDir: envOrDefault("BARESIP_SYSTEM_MODULE_DIR", "/usr/lib/baresip/modules"), OutboundCallAllowlist: splitCSV(os.Getenv("OUTBOUND_CALL_DESTINATION_ALLOWLIST"))}
+	if enabled {
+		return Config{}, fmt.Errorf("AudioSocket runtime is disabled for the Baresip local E2E")
+	}
 	if strings.IndexFunc(cfg.OwnerAPIToken, unicode.IsSpace) >= 0 {
 		return Config{}, fmt.Errorf("OWNER_API_TOKEN must not contain whitespace")
 	}

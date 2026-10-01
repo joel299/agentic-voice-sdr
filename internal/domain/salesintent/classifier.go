@@ -75,32 +75,11 @@ func hasAny(s string, phrases ...string) bool {
 	return false
 }
 
-// Classify uses ordered, conservative phrase rules. Unknown text remains
-// neutral; a keyword alone never creates scheduling readiness.
-func Classify(text string) Class {
+// HasExplicitOptOut is the narrow, phrase-based safety guard. All ordinary
+// commercial intent is classified semantically by JEV.
+func HasExplicitOptOut(text string) bool {
 	s := normalized(text)
-	switch {
-	case hasAny(s, "pare", "parar", "retire meu contato", "nao me ligue", "nao ligar", "remova meu contato", "descadastrar", "opt out"):
-		return OptOut
-	case hasAny(s, "quero falar com uma pessoa", "quero falar com humano", "falar com um atendente", "pode me transferir", "quero um consultor"):
-		return HumanRequest
-	case hasAny(s, "nao temos interesse", "nao tenho interesse", "sem interesse", "nao queremos", "nao quero seguir", "nao faz sentido"):
-		return Rejection
-	case hasAny(s, "lgpd", "protecao de dados", "seguranca", "alucinacao", "confiabilidade", "privacidade", "risco de dados"):
-		return IndecisionSecurity
-	case hasAny(s, "budget congelado", "orcamento congelado", "sem verba", "sem budget", "muito caro", "custo", "orcamento", "budget"):
-		return IndecisionCost
-	case hasAny(s, "alinhar com a diretoria", "alinhar internamente", "validar internamente", "falar com a diretoria", "retorno segunda", "retorno semana que vem", "mais para frente", "no proximo trimestre", "agora nao e o momento"):
-		return IndecisionTiming
-	case hasAny(s, "quinta as 10", "quinta as 10h", "quinta-feira as 10", "podemos marcar", "vamos marcar", "quero marcar", "marcar uma reuniao", "pode agendar", "funciona para mim", "esse horario funciona", "aceito a reuniao"):
-		return Acceptance
-	case hasAny(s, "integra com", "integram com", "integracao com", "consegue integrar", "tem api", "oferece", "suporta", "voces fazem"):
-		return CapabilityRequest
-	case strings.Contains(text, "?") || hasAny(s, "como funciona", "quais informacoes", "me explique", "quero entender", "tem suporte", "me fale sobre"):
-		return Clarification
-	default:
-		return NeutralContinue
-	}
+	return hasAny(s, "pare", "parar", "retire meu contato", "nao me ligue", "nao ligar", "remova meu contato", "descadastrar", "opt out", "nao entre mais em contato", "nao quero receber contato")
 }
 
 // Decide deterministically maps a class to the existing decision taxonomy.
@@ -143,13 +122,4 @@ func Decide(class Class, explicitFutureContact bool, capabilityAvailable bool) (
 		return Result{}, err
 	}
 	return Result{Class: class, Decision: d, OptedOut: optedOut}, nil
-}
-
-func ClassifyAndDecide(text string, explicitFutureContact, capabilityAvailable bool) (Result, error) {
-	return Decide(Classify(text), explicitFutureContact, capabilityAvailable)
-}
-
-func HasExplicitFutureContact(text string) bool {
-	s := normalized(text)
-	return hasAny(s, "segunda", "terca", "quarta", "quinta", "sexta", "semana que vem", "proxima semana", "mes que vem", "proximo mes", "proximo trimestre", "em 15 dias", "em 30 dias", "no dia")
 }

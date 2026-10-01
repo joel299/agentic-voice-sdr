@@ -109,7 +109,9 @@ func (salesIntentProcessor) ProcessTurn(_ context.Context, input turnruntime.Tur
 	if err != nil {
 		return conversation.TurnDirective{}, err
 	}
-	intent, err := salesintent.ClassifyAndDecide(di.LatestFinalLeadText, salesintent.HasExplicitFutureContact(di.LatestFinalLeadText), input.Capability != nil)
+	// This fixture stands in for a scripted semantic provider; production intent
+	// classification is performed by OpenRouter JEV, never by text keywords.
+	intent, err := salesintent.Decide(salesintent.Acceptance, false, input.Capability != nil)
 	if err != nil {
 		return conversation.TurnDirective{}, err
 	}

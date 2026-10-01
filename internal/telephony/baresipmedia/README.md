@@ -77,3 +77,19 @@ The module loader resolves Baresip API symbols from the Baresip process. Load
 the resulting `.so` from a test profile's `module_path`; do not modify the
 working SIP account file or the ctrl_tcp listener to build or fixture-test
 this media boundary.
+
+GRU-152 local runtime startup creates the adapter first, then generates a
+private Baresip profile from only the source `config` and `accounts` files.
+It injects the adapter's actual `rx.sock`/`tx.sock` paths, loads
+`gru151_media.so` and `ctrl_tcp.so`, and pins the control listener to
+`127.0.0.1:4444`. The source profile is never edited. The generated profile
+and copied credentials are mode-restricted and removed when the process exits.
+The API supervises Baresip in the foreground and discards its SIP logs so
+authorization headers cannot enter application logs. Startup fails unless
+both OpenRouter JEV and Gemini Live credentials are configured; no call is
+started by runtime initialization.
+
+The v1.1.0 public header currently refers to `enum jbuf_type` before declaring
+it. The external module supplies an ABI-sized enum declaration before including
+`baresip.h`; this completes the public field type without changing the host
+header or Baresip installation.

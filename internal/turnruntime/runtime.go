@@ -74,7 +74,7 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 	turns := input.State.Turns()
 	if len(turns) > 0 {
 		last := turns[len(turns)-1]
-		if last.Role == conversation.RoleLead && last.Transcript == conversation.TranscriptFinal && salesintent.Classify(last.Text) == salesintent.OptOut {
+		if last.Role == conversation.RoleLead && last.Transcript == conversation.TranscriptFinal && salesintent.HasExplicitOptOut(last.Text) {
 			if err := input.State.RecordSignal(conversation.SignalOptedOut); err != nil {
 				return conversation.TurnDirective{}, err
 			}

@@ -30,7 +30,7 @@ func TestClassifierFixtures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.text, func(t *testing.T) {
-			result, err := ClassifyAndDecide(tc.text, tc.class == IndecisionTiming, false)
+			result, err := Decide(tc.class, tc.class == IndecisionTiming, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,16 +38,6 @@ func TestClassifierFixtures(t *testing.T) {
 				t.Fatalf("got %+v, want class=%s action=%s reason=%s optedOut=%v", result, tc.class, tc.action, tc.reason, tc.optedOut)
 			}
 		})
-	}
-}
-
-func TestClassifierDoesNotPromoteAmbiguousInterestToScheduling(t *testing.T) {
-	result, err := ClassifyAndDecide("Tenho interesse em saber mais", false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Class != NeutralContinue || result.Decision.NextAction == conversation.ActionProposeScheduling {
-		t.Fatalf("ambiguous interest promoted: %+v", result)
 	}
 }
 
@@ -72,11 +62,11 @@ func TestCapabilityRequiresAvailableContext(t *testing.T) {
 	}
 }
 
-func TestFutureContactRequiresExplicitPeriod(t *testing.T) {
-	if !HasExplicitFutureContact("te retorno segunda") {
-		t.Fatal("explicit follow-up time was not detected")
+func TestOptOutGuardIsExplicitAndNarrow(t *testing.T) {
+	if !HasExplicitOptOut("Prefiro não continuar essa conversa. Por favor, retire meu contato.") {
+		t.Fatal("explicit opt-out was not detected")
 	}
-	if HasExplicitFutureContact("preciso alinhar internamente") {
-		t.Fatal("unspecified timing was treated as a follow-up commitment")
+	if HasExplicitOptOut("Não temos interesse neste momento") {
+		t.Fatal("ordinary rejection was misclassified as opt-out")
 	}
 }

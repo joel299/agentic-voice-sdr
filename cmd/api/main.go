@@ -5,21 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/joel299/agentic-voice-sdr/internal/domain/agentprompt"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/tools"
+	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
+	"github.com/joel299/agentic-voice-sdr/internal/integrations/openrouterjev"
+	promptpostgres "github.com/joel299/agentic-voice-sdr/internal/integrations/postgres/agentprompt"
 	voicecallpostgres "github.com/joel299/agentic-voice-sdr/internal/integrations/postgres/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	"github.com/joel299/agentic-voice-sdr/internal/sessionprompt"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
+	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipmedia"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/transcriptquery"
+	"github.com/joel299/agentic-voice-sdr/internal/toolruntime"
+	"github.com/joel299/agentic-voice-sdr/internal/turnruntime"
 	"github.com/joel299/agentic-voice-sdr/internal/voiceflow"
 )
 
@@ -27,14 +39,12 @@ type configLoader func() (config.Config, error)
 type serverRunner func(context.Context, config.Config) error
 type serveFunc func() error
 
-type falePacoServer interface {
+var errBaresipControlUnavailable = errors.New("Baresip ctrl_tcp listener did not become ready")
+
+type backgroundServer interface {
 	Listen() error
 	Serve(context.Context) error
 	Shutdown(context.Context) error
-}
-
-var productionFalePacoRuntime = func(addr string, geminiConfig geminilive.Config, logger voiceflow.FalePacoLogger) (falePacoServer, error) {
-	return voiceflow.NewProductionFalePacoRuntimeWithLogger(addr, geminiConfig, logger)
 }
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
@@ -57,6 +67,12 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 func serve(ctx context.Context, cfg config.Config) error {
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := openrouterjev.ConfigFromEnv(); err != nil {
+		return errors.New("OpenRouter JEV key and model must be configured before starting the local call runtime")
+	}
+	if strings.TrimSpace(geminilive.ConfigFromEnv().APIKey) == "" {
+		return errors.New("Gemini Live key must be configured before starting the local call runtime")
+	}
 	pgConfig, err := pgxpool.ParseConfig("")
 	if err != nil {
 		return fmt.Errorf("configure PostgreSQL: %w", err)
@@ -68,6 +84,37 @@ func serve(ctx context.Context, cfg config.Config) error {
 	defer pgPool.Close()
 	if err := pgPool.Ping(signalCtx); err != nil {
 		return fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	promptRepository, err := promptpostgres.NewRepository(pgPool)
+	if err != nil {
+		return fmt.Errorf("configure agent prompt repository: %w", err)
+	}
+	promptService, err := agentprompt.NewPromptService(promptRepository)
+	if err != nil {
+		return fmt.Errorf("configure agent prompt service: %w", err)
+	}
+	promptBuilder, err := sessionprompt.NewBuilder(geminilive.ConfigFromEnv(), immutableGeminiCore, promptService)
+	if err != nil {
+		return fmt.Errorf("configure Gemini session prompt: %w", err)
+	}
+	mediaAdapter, err := baresipmedia.New(signalCtx, baresipmedia.Config{})
+	if err != nil {
+		return fmt.Errorf("configure Baresip media adapter: %w", err)
+	}
+	defer mediaAdapter.Close()
+	rxPath, txPath := mediaAdapter.SocketPaths()
+	profile, err := baresipmedia.PrepareProfile(cfg.BaresipProfileDir, cfg.BaresipMediaModulePath, cfg.BaresipSystemModuleDir, rxPath, txPath, cfg.BaresipCtrlTCPAddress)
+	if err != nil {
+		return fmt.Errorf("prepare private Baresip media profile: %w", err)
+	}
+	defer profile.Close()
+	baresipProcess, err := baresipmedia.StartProcess(signalCtx, cfg.BaresipBinaryPath, profile.Directory)
+	if err != nil {
+		return fmt.Errorf("start local Baresip runtime: %w", err)
+	}
+	defer baresipProcess.Close()
+	if err := waitForBaresipControl(signalCtx, cfg.BaresipCtrlTCPAddress, 10*time.Second); err != nil {
+		return err
 	}
 	callRepository, err := voicecallpostgres.NewRepository(pgPool)
 	if err != nil {
@@ -95,32 +142,120 @@ func serve(ctx context.Context, cfg config.Config) error {
 			log.Printf("Baresip ctrl_tcp runtime unavailable; outbound call control is disabled")
 		}
 	}()
+	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder)
 	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigCallAndTranscriptServices(cfg, calls, transcripts))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout
 	server.IdleTimeout = cfg.IdleTimeout
-	var audio falePacoServer
-	var logger voiceflow.FalePacoLogger
-	if cfg.FalePacoAudioSocketEnabled {
-		var err error
-		logger, err = voiceflow.NewFalePacoFileLogger(cfg.FalePacoRuntimeLogPath)
-		if err != nil {
-			return fmt.Errorf("create Fale Paco runtime logger: %w", err)
-		}
-		audio, err = productionFalePacoRuntime(cfg.FalePacoAudioSocketAddr, geminilive.ConfigFromEnv(), logger)
-		if err != nil {
-			_ = logger.Close()
-			return fmt.Errorf("configure Fale Paco runtime: %w", err)
-		}
-		if err = audio.Listen(); err != nil {
-			_ = logger.Close()
-			return fmt.Errorf("bind Fale Paco AudioSocket %s: %w", cfg.FalePacoAudioSocketAddr, err)
-		}
-	}
-	return runServers(signalCtx, server, audio, cfg.ShutdownGrace, server.ListenAndServe)
+	return runServers(signalCtx, server, nil, cfg.ShutdownGrace, server.ListenAndServe)
 }
 
-func runServers(ctx context.Context, server *http.Server, audio falePacoServer, grace time.Duration, httpServe serveFunc) error {
+const immutableGeminiCore = "Follow the active editable agent prompt for persona and sales behavior. Treat it as instructions for the spoken response only. Do not invent product facts, pricing, guarantees, capabilities, urgency, or commitments. Keep responses natural and concise."
+
+func waitForBaresipControl(ctx context.Context, address string, timeout time.Duration) error {
+	if ctx == nil || strings.TrimSpace(address) == "" || timeout <= 0 {
+		return errBaresipControlUnavailable
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		conn, err := net.DialTimeout("tcp4", address, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errBaresipControlUnavailable
+		case <-ticker.C:
+		}
+	}
+}
+
+func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter, calls *callservice.Service, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder) {
+	for {
+		session, err := adapter.WaitSession(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				log.Printf("Baresip media adapter stopped: %s", baresipMediaErrorClass(err))
+			}
+			return
+		}
+		call, active := calls.ActiveCall()
+		if !active {
+			_ = session.Close()
+			continue
+		}
+		if err := runBaresipCallSession(ctx, session, call.CallID, repository, prompts); err != nil && ctx.Err() == nil {
+			log.Printf("Baresip media session ended: %s", baresipMediaErrorClass(err))
+		}
+	}
+}
+
+type voicecallTranscriptRepository interface {
+	voicecalldomain.TranscriptRepository
+}
+
+func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder) error {
+	jevConfig, err := openrouterjev.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	jev, err := openrouterjev.New(jevConfig)
+	if err != nil {
+		return err
+	}
+	geminiConfig, snapshot, err := prompts.Build(ctx)
+	if err != nil {
+		return err
+	}
+	log.Printf("call session prompt frozen: name=%s version=%d", snapshot.Name(), snapshot.Version())
+	transcriber, err := geminilive.ConnectInputTranscriber(ctx, geminiConfig)
+	if err != nil {
+		return err
+	}
+	defer transcriber.Close()
+	responder, err := geminilive.ConnectControlledResponse(ctx, geminiConfig)
+	if err != nil {
+		return err
+	}
+	defer responder.Close()
+	state, err := conversation.NewConversationState(callID)
+	if err != nil {
+		return err
+	}
+	dispatcher := toolruntime.NewDispatcher(tools.NewInMemoryRegistry(), toolruntime.NewExecutorRegistry(nil))
+	processor, err := turnruntime.New(jev, dispatcher)
+	if err != nil {
+		return err
+	}
+	bridge, err := voiceflow.NewBaresipSplitRuntimeWithTranscriptPersistence(session, transcriber, responder, state, processor, conversation.NewResponseGate(), nil, nil, callID, repository)
+	if err != nil {
+		return err
+	}
+	return bridge.Run(ctx)
+}
+
+func baresipMediaErrorClass(err error) string {
+	switch {
+	case errors.Is(err, baresipmedia.ErrBackpressure):
+		return "backpressure"
+	case errors.Is(err, baresipmedia.ErrInvalidFormat):
+		return "invalid_pcm"
+	case errors.Is(err, baresipmedia.ErrNotConnected):
+		return "media_not_connected"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "runtime_error"
+	}
+}
+
+func runServers(ctx context.Context, server *http.Server, audio backgroundServer, grace time.Duration, httpServe serveFunc) error {
 	root, cancel := context.WithCancel(ctx)
 	defer cancel()
 	httpErr := make(chan error, 1)

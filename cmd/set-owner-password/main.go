@@ -34,7 +34,9 @@ func run() error {
 	if len(first) == 0 || !bytes.Equal(first, second) {
 		return fmt.Errorf("passwords must match and must not be empty")
 	}
-	if len(first) > 72 { return fmt.Errorf("bcrypt passwords must be at most 72 bytes") }
+	if len(first) > 72 {
+		return fmt.Errorf("bcrypt passwords must be at most 72 bytes")
+	}
 	hash, err := ownerauth.HashPassword(string(first))
 	if err != nil {
 		return fmt.Errorf("hash password")

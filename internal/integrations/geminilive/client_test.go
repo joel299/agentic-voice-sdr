@@ -2,13 +2,17 @@ package geminilive
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -193,8 +197,43 @@ func TestControlledResponderClassifiesRemoteCloseWithoutPayload(t *testing.T) {
 	}
 	defer responder.Close()
 	event, err := responder.Receive(context.Background())
-	if err != nil || event.Kind != EventClosed || event.CloseStatusClass != CloseStatusGoingAway || event.Error != "" || event.Text != "" {
+	if err != nil || event.Kind != EventClosed || event.CloseStatusClass != CloseStatusGoingAway || event.TransportClass != TransportRemoteClose || event.Error != "" || event.Text != "" {
 		t.Fatalf("remote close event=%+v err=%v", event, err)
+	}
+}
+
+func TestControlledResponderSurfacesDiagnosticServerStatus(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		if _, _, err := c.Read(context.Background()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"setupComplete":{}}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"serverContent":{"waitingForInput":true,"interactionStatus":"IDLE"}}`)); err != nil {
+			t.Error(err)
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	responder, err := ConnectControlledResponse(ctx, Config{APIKey: "test", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	event, err := responder.Receive(ctx)
+	if err != nil || event.Kind != EventServerStatus || !event.WaitingForInput || event.InteractionStatus != "IDLE" {
+		t.Fatalf("server status event=%+v err=%v", event, err)
 	}
 }
 
@@ -222,6 +261,53 @@ func TestParseGenerationCompleteTurnCompleteAndGoAwaySeparately(t *testing.T) {
 	got = parseEvents(map[string]json.RawMessage{"goAway": json.RawMessage(`{"timeLeft":"30s","private":"must-not-escape"}`)})
 	if len(got) != 1 || got[0].Kind != EventGoAway || got[0].Text != "" || got[0].Error != "" {
 		t.Fatalf("GoAway was not safely classified: %+v", got)
+	}
+}
+
+func TestParseWaitingForInputAndInteractionStatus(t *testing.T) {
+	events := parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"waitingForInput":true,"interactionStatus":"IN_PROGRESS"}`)})
+	if len(events) != 1 || events[0].Kind != EventServerStatus || !events[0].WaitingForInput || events[0].InteractionStatus != "IN_PROGRESS" {
+		t.Fatalf("server status event=%+v", events)
+	}
+	events = parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"outputTranscription":{"text":"short"},"interactionStatus":"IDLE"}`)})
+	if len(events) != 1 || events[0].Kind != EventOutputTranscription || events[0].InteractionStatus != "IDLE" {
+		t.Fatalf("status metadata not attached to output: %+v", events)
+	}
+}
+
+type diagnosticTimeoutError struct{}
+
+func (diagnosticTimeoutError) Error() string   { return "opaque timeout detail" }
+func (diagnosticTimeoutError) Timeout() bool   { return true }
+func (diagnosticTimeoutError) Temporary() bool { return true }
+
+func TestClassifyTransportErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadlineCtx, deadlineCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer deadlineCancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want TransportErrorClass
+	}{
+		{name: "context cancel", ctx: ctx, err: context.Canceled, want: TransportContextCancel},
+		{name: "context deadline", ctx: deadlineCtx, err: context.DeadlineExceeded, want: TransportContextDeadline},
+		{name: "normal websocket close", err: websocket.CloseError{Code: websocket.StatusNormalClosure, Reason: "private"}, want: TransportRemoteClose},
+		{name: "going away websocket close", err: websocket.CloseError{Code: websocket.StatusGoingAway}, want: TransportRemoteClose},
+		{name: "eof", err: fmt.Errorf("read wrapper: %w", io.EOF), want: TransportIOEOF},
+		{name: "unexpected eof", err: fmt.Errorf("read wrapper: %w", io.ErrUnexpectedEOF), want: TransportUnexpectedEOF},
+		{name: "network timeout", err: diagnosticTimeoutError{}, want: TransportNetworkTimeout},
+		{name: "connection reset", err: fmt.Errorf("read wrapper: %w", syscall.ECONNRESET), want: TransportConnectionReset},
+		{name: "tls", err: &tls.RecordHeaderError{Msg: "opaque TLS detail"}, want: TransportTLS},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyTransportError(tt.ctx, tt.err); got != tt.want {
+				t.Fatalf("class=%q want %q", got, tt.want)
+			}
+		})
 	}
 }
 

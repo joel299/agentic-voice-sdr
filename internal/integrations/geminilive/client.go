@@ -3,15 +3,18 @@ package geminilive
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"nhooyr.io/websocket"
 )
@@ -85,6 +88,7 @@ const (
 type Error struct {
 	Kind             ErrorKind
 	CloseStatusClass CloseStatusClass
+	TransportClass   TransportErrorClass
 	Err              error
 }
 
@@ -124,6 +128,9 @@ type Event struct {
 	TurnID               string
 	TurnComplete         bool
 	CloseStatusClass     CloseStatusClass
+	TransportClass       TransportErrorClass
+	WaitingForInput      bool
+	InteractionStatus    string
 }
 
 type InputTranscriptState string
@@ -144,11 +151,26 @@ const (
 	EventGenerationComplete  EventKind = "generation_complete"
 	EventTurnComplete        EventKind = "turn_complete"
 	EventGoAway              EventKind = "go_away"
+	EventServerStatus        EventKind = "server_status"
 	EventInterrupted         EventKind = "interrupted"
 	EventToolCall            EventKind = "tool_call"
 	EventAPIError            EventKind = "api_error"
 	EventUnknown             EventKind = "unknown"
 	EventClosed              EventKind = "closed"
+)
+
+type TransportErrorClass string
+
+const (
+	TransportContextCancel   TransportErrorClass = "context_cancel"
+	TransportContextDeadline TransportErrorClass = "context_deadline"
+	TransportRemoteClose     TransportErrorClass = "websocket_remote_close"
+	TransportIOEOF           TransportErrorClass = "io_eof"
+	TransportUnexpectedEOF   TransportErrorClass = "unexpected_eof"
+	TransportNetworkTimeout  TransportErrorClass = "network_timeout"
+	TransportConnectionReset TransportErrorClass = "connection_reset"
+	TransportTLS             TransportErrorClass = "tls_transport"
+	TransportOther           TransportErrorClass = "transport_other"
 )
 
 type CloseStatusClass string
@@ -376,12 +398,12 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 	typ, data, err := s.conn.Read(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, wrap(ErrorCanceled, ctx.Err())
+			return nil, &Error{Kind: ErrorCanceled, TransportClass: classifyTransportError(ctx, ctx.Err()), Err: ctx.Err()}
 		}
 		if status := websocket.CloseStatus(err); status != -1 {
-			return nil, &Error{Kind: ErrorRemoteClose, CloseStatusClass: classifyCloseStatus(status), Err: ErrRemoteClosed}
+			return nil, &Error{Kind: ErrorRemoteClose, CloseStatusClass: classifyCloseStatus(status), TransportClass: TransportRemoteClose, Err: ErrRemoteClosed}
 		}
-		return nil, wrap(ErrorReceive, errors.New("WebSocket read failed"))
+		return nil, &Error{Kind: ErrorReceive, TransportClass: classifyTransportError(ctx, err), Err: errors.New("WebSocket read failed")}
 	}
 	if typ != websocket.MessageText && typ != websocket.MessageBinary {
 		return nil, wrap(ErrorProtocol, errors.New("unexpected WebSocket frame type"))
@@ -391,6 +413,42 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 		return nil, wrap(ErrorProtocol, errors.New("malformed server JSON"))
 	}
 	return msg, nil
+}
+
+func classifyTransportError(ctx context.Context, err error) TransportErrorClass {
+	if ctx != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return TransportContextDeadline
+		}
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+			return TransportContextCancel
+		}
+	}
+	if websocket.CloseStatus(err) != -1 {
+		return TransportRemoteClose
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return TransportUnexpectedEOF
+	}
+	if errors.Is(err, io.EOF) {
+		return TransportIOEOF
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return TransportNetworkTimeout
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return TransportConnectionReset
+	}
+	var recordHeaderErr *tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return TransportTLS
+	}
+	var verificationErr *tls.CertificateVerificationError
+	if errors.As(err, &verificationErr) {
+		return TransportTLS
+	}
+	return TransportOther
 }
 
 func classifyCloseStatus(status websocket.StatusCode) CloseStatusClass {
@@ -503,22 +561,36 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 			OutputTranscription struct {
 				Text string `json:"text"`
 			} `json:"outputTranscription"`
-			TurnComplete       bool `json:"turnComplete"`
-			GenerationComplete bool `json:"generationComplete"`
-			Interrupted        bool `json:"interrupted"`
+			TurnComplete       bool   `json:"turnComplete"`
+			GenerationComplete bool   `json:"generationComplete"`
+			Interrupted        bool   `json:"interrupted"`
+			WaitingForInput    bool   `json:"waitingForInput"`
+			InteractionStatus  string `json:"interactionStatus"`
 		}
 		if json.Unmarshal(raw, &c) == nil {
+			status := Event{WaitingForInput: c.WaitingForInput, InteractionStatus: c.InteractionStatus}
+			addStatus := func(events []Event) []Event {
+				for i := range events {
+					events[i].WaitingForInput = status.WaitingForInput
+					events[i].InteractionStatus = status.InteractionStatus
+				}
+				if len(events) == 0 && (status.WaitingForInput || status.InteractionStatus != "") {
+					status.Kind = EventServerStatus
+					return []Event{status}
+				}
+				return events
+			}
 			if c.Interrupted {
-				return []Event{{Kind: EventInterrupted}}
+				return addStatus([]Event{{Kind: EventInterrupted}})
 			}
 			if c.InputTranscription.Text != "" {
-				return []Event{{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}})
 			}
 			if c.FinalInputTranscription.Text != "" {
-				return []Event{{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}})
 			}
 			if c.InterimInputTranscription.Text != "" {
-				return []Event{{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}})
 			}
 			events := make([]Event, 0, 2)
 			if c.OutputTranscription.Text != "" {
@@ -545,7 +617,10 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 				events = append(events, Event{Kind: EventTurnComplete})
 			}
 			if len(events) > 0 {
-				return events
+				return addStatus(events)
+			}
+			if status.WaitingForInput || status.InteractionStatus != "" {
+				return addStatus(nil)
 			}
 		}
 	}

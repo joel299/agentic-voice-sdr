@@ -47,6 +47,19 @@ func TestCallTranscriptOpenAPILimitMatchesRuntimeCap(t *testing.T) {
 	}
 }
 
+func TestCallOpenAPIDocumentsSeparateAIRuntimeStatus(t *testing.T) {
+	spec, err := os.ReadFile("../../openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(spec)
+	for _, fragment := range []string{"required: [call_id, to, status, ai_runtime_status]", "ai_runtime_status: { type: string, enum: [not_started, starting, running, failed, degraded, stopped]", "ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended]", "failed/degraded does not dispatch Hangup"} {
+		if !strings.Contains(text, fragment) {
+			t.Errorf("Call OpenAPI contract missing %q", fragment)
+		}
+	}
+}
+
 func TestOwnerTuningOpenAPIContract(t *testing.T) {
 	spec, err := os.ReadFile("../../openapi.yaml")
 	if err != nil {

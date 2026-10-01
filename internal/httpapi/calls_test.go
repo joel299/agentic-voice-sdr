@@ -41,7 +41,7 @@ func (s *fakeOutboundCallService) Get(id string) (callservice.Call, error) {
 	if id != "call-123" {
 		return callservice.Call{}, callservice.ErrCallNotFound
 	}
-	return callservice.Call{CallID: id, To: "+5567981340687", Status: callservice.StatusFailed, ProviderCallID: "baresip-9", TerminalReason: "sip_403"}, nil
+	return callservice.Call{CallID: id, To: "+5567981340687", Status: callservice.StatusFailed, ProviderCallID: "baresip-9", TerminalReason: "sip_403", AIRuntimeStatus: "failed", AIFailureClass: "receive_failed"}, nil
 }
 func (s *fakeOutboundCallService) Hangup(_ context.Context, id string) (callservice.Call, error) {
 	s.hangups++
@@ -111,7 +111,7 @@ func TestCallRoutesGetUnknownHangupAndSafeErrors(t *testing.T) {
 	service := &fakeOutboundCallService{}
 	handler := callTestHandler(service)
 	res := callRequest(t, handler, http.MethodGet, "/v1/calls/call-123", "", true)
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"provider_call_id":"baresip-9"`) || !strings.Contains(res.Body.String(), `"terminal_reason":"sip_403"`) {
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"provider_call_id":"baresip-9"`) || !strings.Contains(res.Body.String(), `"terminal_reason":"sip_403"`) || !strings.Contains(res.Body.String(), `"ai_runtime_status":"failed"`) || !strings.Contains(res.Body.String(), `"ai_failure_class":"receive_failed"`) {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body)
 	}
 	res = callRequest(t, handler, http.MethodGet, "/v1/calls/unknown", "", true)

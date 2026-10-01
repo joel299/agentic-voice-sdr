@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/sessionprompt"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipmedia"
+	telephonybridge "github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/transcriptquery"
 	"github.com/joel299/agentic-voice-sdr/internal/toolruntime"
@@ -195,11 +197,55 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		}
 		call, active := calls.ActiveCall()
 		if !active {
+			log.Printf("media_session_close call_id=none reason=no_active_call")
 			_ = session.Close()
 			continue
 		}
-		if err := runBaresipCallSession(ctx, session, call.CallID, repository, prompts, tuning, baseGemini); err != nil && ctx.Err() == nil {
-			log.Printf("Baresip media session ended: %s", baresipMediaErrorClass(err))
+		openedAt := time.Now().UTC()
+		log.Printf("media_session_open api_call_id=%s at=%s", call.CallID, openedAt.Format(time.RFC3339Nano))
+		recordAIRuntimeStatus(ctx, calls, call.CallID, "starting", "")
+		callCtx, cancelCall := context.WithCancel(ctx)
+		go func() {
+			if err := calls.WaitCallEnd(callCtx, call.CallID); err == nil {
+				cancelCall()
+			}
+		}()
+		aiErr := runBaresipCallSession(callCtx, session, calls, call.CallID, repository, prompts, tuning, baseGemini)
+		currentCall, stillActive := calls.ActiveCall()
+		if ctx.Err() == nil && (!stillActive || currentCall.CallID != call.CallID) {
+			// CallService only clears the active call for a real terminal Baresip
+			// event or an owner Hangup reconciliation. That is an allowed owner
+			// of media teardown.
+			cancelCall()
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "")
+			_ = session.Close()
+			metrics := session.Metrics()
+			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
+			continue
+		}
+		failureClass := aiFailureClass(aiErr)
+		var mediaErr error
+		if ctx.Err() == nil {
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "failed", failureClass)
+			log.Printf("ai_runtime_status=failed api_call_id=%s ai_failure_class=%s at=%s media_mode=degraded", call.CallID, failureClass, time.Now().UTC().Format(time.RFC3339Nano))
+			mediaErr = session.ServeDegraded(callCtx)
+		}
+		currentCall, stillActive = calls.ActiveCall()
+		terminalCall := !stillActive || currentCall.CallID != call.CallID
+		cancelCall()
+		metrics := session.Metrics()
+		if ctx.Err() != nil {
+			recordAIRuntimeStatus(context.Background(), calls, call.CallID, "stopped", "")
+			_ = session.Close()
+			log.Printf("media_session_close api_call_id=%s reason=runtime_shutdown at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
+		} else if terminalCall {
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "")
+			_ = session.Close()
+			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
+		} else {
+			metrics = session.Metrics()
+			reason := mediaCloseReason(mediaErr)
+			log.Printf("media_session_close api_call_id=%s reason=%s at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, reason, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 		}
 	}
 }
@@ -208,7 +254,7 @@ type voicecallTranscriptRepository interface {
 	voicecalldomain.TranscriptRepository
 }
 
-func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) error {
+func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, calls *callservice.Service, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) error {
 	jevConfig, err := openrouterjev.ConfigFromEnv()
 	if err != nil {
 		return err
@@ -254,7 +300,65 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 	if err != nil {
 		return err
 	}
-	return bridge.Run(ctx)
+	log.Printf("ai_runtime_status=running api_call_id=%s at=%s", callID, time.Now().UTC().Format(time.RFC3339Nano))
+	recordAIRuntimeStatus(ctx, calls, callID, "running", "")
+	err = bridge.Run(ctx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// A Gemini/AI session can fail independently from a live Baresip call. Keep
+	// RX drained and feed bounded silence into the media source until Baresip
+	// reports media teardown or the whole runtime is stopped.
+	return err
+}
+
+func recordAIRuntimeStatus(ctx context.Context, calls *callservice.Service, callID, status, failureClass string) {
+	if err := calls.UpdateAIRuntimeStatus(ctx, callID, status, failureClass); err != nil {
+		log.Printf("ai_runtime_status_persisted=no api_call_id=%s requested_status=%s error_class=persistence", callID, status)
+	}
+}
+
+func aiFailureClass(err error) string {
+	switch {
+	case err == nil:
+		return "session_ended"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, telephonybridge.ErrReceiveFailed):
+		return "receive_failed"
+	case errors.Is(err, telephonybridge.ErrProviderAPI):
+		return "provider_api"
+	case errors.Is(err, baresipmedia.ErrSessionClosed):
+		return "media_closed"
+	default:
+		if err != nil {
+			message := strings.ToLower(err.Error())
+			if strings.Contains(message, "receive_transport_other") || strings.Contains(message, "receive failed") || strings.Contains(message, "receive error") {
+				return "receive_failed"
+			}
+			if strings.Contains(message, "provider api") {
+				return "provider_api"
+			}
+		}
+		return "runtime_error"
+	}
+}
+
+func mediaCloseReason(err error) string {
+	switch {
+	case err == nil:
+		return "closed"
+	case errors.Is(err, context.Canceled):
+		return "runtime_shutdown"
+	case errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed):
+		return "peer_closed"
+	case errors.Is(err, baresipmedia.ErrSessionClosed):
+		return "owner_or_runtime_close"
+	default:
+		return "transport_error"
+	}
 }
 
 func baresipMediaErrorClass(err error) string {

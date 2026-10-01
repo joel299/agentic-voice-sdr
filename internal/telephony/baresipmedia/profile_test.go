@@ -1,11 +1,66 @@
 package baresipmedia
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestAPIProfilePreservesWorkingFalePacoSIPIdentity(t *testing.T) {
+	root := t.TempDir()
+	source, systemModules := filepath.Join(root, "owner"), filepath.Join(root, "system-modules")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(systemModules, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ownerConfig := "module_path\t/usr/lib/baresip/modules\n" +
+		"audio_player\talsa,default\n" +
+		"audio_source\talsa,default\n" +
+		"ctrl_tcp_listen\t127.0.0.1:4444\n"
+	if err := os.WriteFile(filepath.Join(source, "config"), []byte(ownerConfig), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, err := RenderFalePacoAccount("fixture-password")
+	if err != nil {
+		t.Fatal("render canonical account")
+	}
+	if err := os.WriteFile(filepath.Join(source, "accounts"), account, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(systemModules, "ctrl_tcp.so"), []byte("system module"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mediaModule := filepath.Join(root, "gru151_media.so")
+	if err := os.WriteFile(mediaModule, []byte("media module"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := PrepareProfile(source, mediaModule, systemModules, "/tmp/api-rx.sock", "/tmp/api-tx.sock", "127.0.0.1:4444")
+	if err != nil {
+		t.Fatal("prepare API Baresip profile")
+	}
+	defer profile.Close()
+	generatedAccount, err := os.ReadFile(filepath.Join(profile.Directory, "accounts"))
+	if err != nil || !bytes.Equal(generatedAccount, account) {
+		t.Fatal("normal API startup changed the working SIP account identity")
+	}
+	configured, domain, username, tcp, registration := InspectFalePacoAccount(generatedAccount)
+	if !configured || !domain || !username || !tcp || !registration {
+		t.Fatal("generated API profile differs from the canonical Fale Paco registration identity")
+	}
+	generatedConfig, err := os.ReadFile(filepath.Join(profile.Directory, "config"))
+	if err != nil {
+		t.Fatal("read generated profile config")
+	}
+	for _, want := range []string{"audio_player\tgru151_media,/tmp/api-rx.sock", "audio_source\tgru151_media,/tmp/api-tx.sock", "ctrl_tcp_listen\t127.0.0.1:4444"} {
+		if !strings.Contains(string(generatedConfig), want) {
+			t.Fatalf("generated API profile missing intentional media/control override %q", want)
+		}
+	}
+}
 
 func TestPrepareProfileUsesGeneratedSocketsWithoutMutatingSource(t *testing.T) {
 	root := t.TempDir()

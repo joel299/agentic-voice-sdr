@@ -56,11 +56,28 @@ func (r *Repository) UpdateLifecycle(ctx context.Context, id, status, providerCa
 	return nil
 }
 
+func (r *Repository) UpdateAIRuntimeStatus(ctx context.Context, id, status, failureClass string) error {
+	if ctx == nil || id == "" || (status != "starting" && status != "running" && status != "failed" && status != "degraded" && status != "stopped") {
+		return ErrInvalidRecord
+	}
+	if failureClass != "" && failureClass != "timeout" && failureClass != "canceled" && failureClass != "receive_failed" && failureClass != "provider_api" && failureClass != "media_closed" && failureClass != "runtime_error" && failureClass != "session_ended" {
+		return ErrInvalidRecord
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE voice_calls SET ai_runtime_status=$2, ai_failure_class=NULLIF($3,''), updated_at=now() WHERE call_id=$1`, id, status, failureClass)
+	if err != nil {
+		return ErrDatabaseOperation
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCallNotFound
+	}
+	return nil
+}
+
 func (r *Repository) GetCall(ctx context.Context, id string) (domain.Call, error) {
 	var c domain.Call
-	var providerCallID, terminalReason pgtype.Text
+	var providerCallID, terminalReason, aiRuntimeStatus, aiFailureClass pgtype.Text
 	var connectedAt, endedAt pgtype.Timestamptz
-	err := r.pool.QueryRow(ctx, `SELECT call_id,destination,status,provider,provider_call_id,started_at,connected_at,ended_at,terminal_reason,created_at,updated_at FROM voice_calls WHERE call_id=$1`, id).Scan(&c.ID, &c.Destination, &c.Status, &c.Provider, &providerCallID, &c.StartedAt, &connectedAt, &endedAt, &terminalReason, &c.CreatedAt, &c.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `SELECT call_id,destination,status,provider,provider_call_id,started_at,connected_at,ended_at,terminal_reason,ai_runtime_status,ai_failure_class,created_at,updated_at FROM voice_calls WHERE call_id=$1`, id).Scan(&c.ID, &c.Destination, &c.Status, &c.Provider, &providerCallID, &c.StartedAt, &connectedAt, &endedAt, &terminalReason, &aiRuntimeStatus, &aiFailureClass, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Call{}, ErrCallNotFound
 	}
@@ -80,6 +97,12 @@ func (r *Repository) GetCall(ctx context.Context, id string) (domain.Call, error
 	}
 	if terminalReason.Valid {
 		c.TerminalReason = terminalReason.String
+	}
+	if aiRuntimeStatus.Valid {
+		c.AIRuntimeStatus = aiRuntimeStatus.String
+	}
+	if aiFailureClass.Valid {
+		c.AIFailureClass = aiFailureClass.String
 	}
 	return c, nil
 }

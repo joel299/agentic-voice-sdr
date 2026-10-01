@@ -17,6 +17,14 @@ type TranscriptHandler interface {
 	HandleTranscript(context.Context, geminilive.TranscriptEvent) error
 }
 
+type contextAudioReader interface {
+	ReadFrameContext(context.Context) (audiosocket.Frame, error)
+}
+
+type contextAudioWriter interface {
+	WriteFrameContext(context.Context, audiosocket.Frame) error
+}
+
 // SplitBridge connects independent input-transcription and controlled-response
 // sessions. The two sessions have separate receive owners and capabilities.
 type SplitBridge struct {
@@ -50,7 +58,9 @@ func (b *SplitBridge) Run(ctx context.Context) error {
 	defer cancel()
 	var once sync.Once
 	closeAll := func() {
-		once.Do(func() { closeIfPossible(b.input); _ = b.transcriber.Close(); _ = b.responder.Close() })
+		// Telephony owns its transport lifetime. A provider failure or a caller
+		// cancellation of this AI bridge must never close the underlying call.
+		once.Do(func() { _ = b.transcriber.Close(); _ = b.responder.Close() })
 	}
 	type result struct {
 		err      error
@@ -94,7 +104,7 @@ func (b *SplitBridge) Run(ctx context.Context) error {
 
 func (b *SplitBridge) runSplitIngress(ctx context.Context) error {
 	for {
-		frame, err := b.input.ReadFrame()
+		frame, err := readFrame(ctx, b.input)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return b.transcriber.EndAudio(ctx)
@@ -199,7 +209,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			}
 			begin()
 			if len(event.Audio) > 0 && disposition == providerTurnOwned {
-				if err := b.output.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+				if err := writeFrame(ctx, b.output, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
 					fail(ErrAudioOutputFailed)
 					return err
 				}
@@ -238,6 +248,20 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func readFrame(ctx context.Context, reader AudioReader) (audiosocket.Frame, error) {
+	if contextual, ok := reader.(contextAudioReader); ok {
+		return contextual.ReadFrameContext(ctx)
+	}
+	return reader.ReadFrame()
+}
+
+func writeFrame(ctx context.Context, writer AudioWriter, frame audiosocket.Frame) error {
+	if contextual, ok := writer.(contextAudioWriter); ok {
+		return contextual.WriteFrameContext(ctx, frame)
+	}
+	return writer.WriteFrame(frame)
 }
 
 func safeCloseStatus(status geminilive.CloseStatusClass) geminilive.CloseStatusClass {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
@@ -92,12 +93,30 @@ type mediaSession struct {
 	rxOnce  sync.Once
 	wg      sync.WaitGroup
 
-	errMu sync.Mutex
-	err   error
+	errMu   sync.Mutex
+	err     error
+	metrics sessionMetrics
 
 	txMu      sync.Mutex
 	txPartial [txFrameBytes]byte
 	txUsed    int
+}
+
+type sessionMetrics struct {
+	rxFramesDropped  atomic.Uint64
+	rxQueueHighWater atomic.Uint64
+	txQueueHighWater atomic.Uint64
+	txWaitCount      atomic.Uint64
+	txWaitDurationNS atomic.Uint64
+}
+
+// SessionMetrics contains counters for one call-scoped media session.
+type SessionMetrics struct {
+	RXFramesDropped  uint64
+	RXQueueHighWater uint64
+	TXQueueHighWater uint64
+	TXWaitCount      uint64
+	TXWaitDurationMS uint64
 }
 
 var (
@@ -359,8 +378,15 @@ func (a *Adapter) currentSession() (*Session, error) {
 }
 
 func (s *Session) ReadFrame() (audiosocket.Frame, error) {
+	return s.ReadFrameContext(context.Background())
+}
+
+func (s *Session) ReadFrameContext(ctx context.Context) (audiosocket.Frame, error) {
 	if s == nil || s.state == nil {
 		return audiosocket.Frame{}, ErrSessionClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	state := s.state
 	select {
@@ -378,6 +404,8 @@ func (s *Session) ReadFrame() (audiosocket.Frame, error) {
 		}
 	case <-state.done:
 		return s.endedFrame()
+	case <-ctx.Done():
+		return audiosocket.Frame{}, ctx.Err()
 	}
 }
 
@@ -398,13 +426,17 @@ func (s *Session) endedFrame() (audiosocket.Frame, error) {
 }
 
 func (s *Session) WriteFrame(frame audiosocket.Frame) error {
+	return s.WriteFrameContext(context.Background(), frame)
+}
+
+func (s *Session) WriteFrameContext(ctx context.Context, frame audiosocket.Frame) error {
 	if s == nil || s.state == nil {
 		return ErrSessionClosed
 	}
 	if err := validateVariableFrame(frame, audiosocket.TypeSlin24); err != nil {
 		return err
 	}
-	return s.state.enqueuePCM(frame.Payload)
+	return s.state.enqueuePCM(ctx, frame.Payload)
 }
 
 func (s *Session) Close() error {
@@ -429,7 +461,10 @@ func validateVariableFrame(frame audiosocket.Frame, want audiosocket.FrameType) 
 	return validateFrame(frame, want)
 }
 
-func (s *mediaSession) enqueuePCM(payload []byte) error {
+func (s *mediaSession) enqueuePCM(ctx context.Context, payload []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 	select {
@@ -444,11 +479,29 @@ func (s *mediaSession) enqueuePCM(payload []byte) error {
 	copy(combined[s.txUsed:], payload)
 	for offset := 0; offset < frameCount*txFrameBytes; offset += txFrameBytes {
 		frame := audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: append([]byte(nil), combined[offset:offset+txFrameBytes]...)}
-		select {
-		case <-s.done:
-			return ErrSessionClosed
-		case s.txQueue <- frame:
+		if len(s.txQueue) == cap(s.txQueue) {
+			started := time.Now()
+			s.metrics.txWaitCount.Add(1)
+			select {
+			case <-s.done:
+				s.metrics.txWaitDurationNS.Add(uint64(time.Since(started)))
+				return ErrSessionClosed
+			case <-ctx.Done():
+				s.metrics.txWaitDurationNS.Add(uint64(time.Since(started)))
+				return ctx.Err()
+			case s.txQueue <- frame:
+				s.metrics.txWaitDurationNS.Add(uint64(time.Since(started)))
+			}
+		} else {
+			select {
+			case <-s.done:
+				return ErrSessionClosed
+			case <-ctx.Done():
+				return ctx.Err()
+			case s.txQueue <- frame:
+			}
 		}
+		updateHighWater(&s.metrics.txQueueHighWater, uint64(len(s.txQueue)))
 	}
 	remainder := combinedLen - frameCount*txFrameBytes
 	clear(s.txPartial[:])
@@ -479,9 +532,125 @@ func (a *Adapter) readRX(s *mediaSession) {
 		case <-s.done:
 			return
 		case s.rxQueue <- frame:
+			updateHighWater(&s.metrics.rxQueueHighWater, uint64(len(s.rxQueue)))
 		default:
-			a.endSession(s, ErrBackpressure)
+			// Keep the newest real-time audio and discard exactly one stale
+			// queued frame. The queue remains bounded and SIP stays alive.
+			select {
+			case stale := <-s.rxQueue:
+				clear(stale.Payload)
+				s.metrics.rxFramesDropped.Add(1)
+			default:
+			}
+			select {
+			case <-s.done:
+				return
+			case s.rxQueue <- frame:
+				updateHighWater(&s.metrics.rxQueueHighWater, uint64(len(s.rxQueue)))
+			default:
+				clear(frame.Payload)
+				s.metrics.rxFramesDropped.Add(1)
+			}
+		}
+	}
+}
+
+func updateHighWater(value *atomic.Uint64, candidate uint64) {
+	for current := value.Load(); candidate > current; current = value.Load() {
+		if value.CompareAndSwap(current, candidate) {
 			return
+		}
+	}
+}
+
+// Metrics returns a safe snapshot of queue pressure for this call.
+func (s *Session) Metrics() SessionMetrics {
+	if s == nil || s.state == nil {
+		return SessionMetrics{}
+	}
+	m := &s.state.metrics
+	return SessionMetrics{
+		RXFramesDropped:  m.rxFramesDropped.Load(),
+		RXQueueHighWater: m.rxQueueHighWater.Load(),
+		TXQueueHighWater: m.txQueueHighWater.Load(),
+		TXWaitCount:      m.txWaitCount.Load(),
+		TXWaitDurationMS: m.txWaitDurationNS.Load() / uint64(time.Millisecond),
+	}
+}
+
+// WaitClosed waits until the Baresip media peer ends this call or shutdown
+// closes the adapter-owned transport.
+func (s *Session) WaitClosed(ctx context.Context) error {
+	if s == nil || s.state == nil {
+		return ErrSessionClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-s.state.done:
+		return s.state.sessionError()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// IsClosed reports whether this call-scoped media transport has terminated.
+func (s *Session) IsClosed() bool {
+	if s == nil || s.state == nil {
+		return true
+	}
+	select {
+	case <-s.state.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// ServeDegraded drains inbound frames and writes silence at the negotiated
+// source cadence until the telephony session closes or runtime shuts down.
+func (s *Session) ServeDegraded(ctx context.Context) error {
+	if s == nil || s.state == nil {
+		return ErrSessionClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			frame, err := s.ReadFrameContext(ctx)
+			if err != nil {
+				return
+			}
+			clear(frame.Payload)
+		}
+	}()
+	ticker := time.NewTicker(ptimeMillis * time.Millisecond)
+	defer ticker.Stop()
+	silence := make([]byte, txFrameBytes)
+	for {
+		select {
+		case <-s.state.done:
+			<-drainDone
+			return s.state.sessionError()
+		case <-ctx.Done():
+			<-drainDone
+			return ctx.Err()
+		case <-ticker.C:
+			if err := s.WriteFrameContext(ctx, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: silence}); err != nil {
+				if errors.Is(err, ErrSessionClosed) {
+					<-drainDone
+					return s.state.sessionError()
+				}
+				if ctx.Err() != nil {
+					<-drainDone
+					return ctx.Err()
+				}
+				return err
+			}
 		}
 	}
 }

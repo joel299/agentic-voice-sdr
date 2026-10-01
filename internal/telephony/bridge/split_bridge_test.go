@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 
@@ -40,12 +41,13 @@ func (a *splitAudio) WriteFrame(f audiosocket.Frame) error {
 func (a *splitAudio) Close() error { a.once.Do(func() { close(a.closed) }); return nil }
 
 type splitInput struct {
-	mu       sync.Mutex
-	sent     [][]byte
-	events   chan geminilive.TranscriptEvent
-	receives int
-	closed   chan struct{}
-	once     sync.Once
+	mu         sync.Mutex
+	sent       [][]byte
+	events     chan geminilive.TranscriptEvent
+	receives   int
+	closed     chan struct{}
+	once       sync.Once
+	receiveErr bool
 }
 
 func (s *splitInput) SendAudio(_ context.Context, p []byte) error {
@@ -62,9 +64,20 @@ func (s *splitInput) Receive(ctx context.Context) (geminilive.TranscriptEvent, e
 	select {
 	case e := <-s.events:
 		return e, nil
+	case <-s.errorSignal():
+		return geminilive.TranscriptEvent{}, errors.New("receive_transport_other")
 	case <-ctx.Done():
 		return geminilive.TranscriptEvent{}, ctx.Err()
 	}
+}
+
+func (s *splitInput) errorSignal() <-chan struct{} {
+	if !s.receiveErr {
+		return nil
+	}
+	c := make(chan struct{})
+	close(c)
+	return c
 }
 func (s *splitInput) Close() error { s.once.Do(func() { close(s.closed) }); return nil }
 
@@ -210,4 +223,53 @@ func TestSplitBridgeFailsActiveResponseOnRemoteCloseBeforeTurnComplete(t *testin
 	if lifecycle.fail != 1 || lifecycle.complete != 0 {
 		t.Fatalf("response lifecycle complete=%d fail=%d", lifecycle.complete, lifecycle.fail)
 	}
+}
+
+type splitOwnedAudio struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (a *splitOwnedAudio) ReadFrame() (audiosocket.Frame, error) {
+	<-a.closed
+	return audiosocket.Frame{}, io.EOF
+}
+func (a *splitOwnedAudio) ReadFrameContext(ctx context.Context) (audiosocket.Frame, error) {
+	select {
+	case <-ctx.Done():
+		return audiosocket.Frame{}, ctx.Err()
+	case <-a.closed:
+		return audiosocket.Frame{}, io.EOF
+	}
+}
+func (a *splitOwnedAudio) WriteFrame(audiosocket.Frame) error { return nil }
+func (a *splitOwnedAudio) WriteFrameContext(ctx context.Context, _ audiosocket.Frame) error {
+	return ctx.Err()
+}
+func (a *splitOwnedAudio) Close() error { a.once.Do(func() { close(a.closed) }); return nil }
+
+func TestSplitBridgeProviderFailureDoesNotCloseTelephonyOwnedAudio(t *testing.T) {
+	audio := &splitOwnedAudio{closed: make(chan struct{})}
+	input := &splitInput{events: make(chan geminilive.TranscriptEvent), closed: make(chan struct{}), receiveErr: true}
+	response := &splitResponse{events: make(chan geminilive.Event), closed: make(chan struct{})}
+	bridge := NewSplit(audio, audio, input, response, &splitTranscriptHandler{finals: make(chan string, 1)}, nil)
+	if err := bridge.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "receive_transport_other") {
+		t.Fatalf("Run error=%v, want provider receive error", err)
+	}
+	select {
+	case <-audio.closed:
+		t.Fatal("AI bridge closed telephony-owned media after provider failure")
+	default:
+	}
+	select {
+	case <-input.closed:
+	default:
+		t.Fatal("Gemini transcriber was not closed after provider failure")
+	}
+	select {
+	case <-response.closed:
+	default:
+		t.Fatal("Gemini responder was not closed after provider failure")
+	}
+	_ = audio.Close()
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,10 +46,11 @@ func (a *e2eAudio) WriteFrame(f audiosocket.Frame) error {
 func (a *e2eAudio) Close() error { return nil }
 
 type e2eInput struct {
-	mu     sync.Mutex
-	events chan geminilive.TranscriptEvent
-	sent   [][]byte
-	seen   chan geminilive.TranscriptEvent
+	mu         sync.Mutex
+	events     chan geminilive.TranscriptEvent
+	sent       [][]byte
+	seen       chan geminilive.TranscriptEvent
+	receiveErr bool
 }
 
 func (s *e2eInput) SendAudio(_ context.Context, p []byte) error {
@@ -57,8 +59,22 @@ func (s *e2eInput) SendAudio(_ context.Context, p []byte) error {
 	s.mu.Unlock()
 	return nil
 }
+func (s *e2eInput) sentCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sent)
+}
 func (s *e2eInput) EndAudio(context.Context) error { return nil }
 func (s *e2eInput) Receive(ctx context.Context) (geminilive.TranscriptEvent, error) {
+	select {
+	case e := <-s.events:
+		s.seen <- e
+		return e, nil
+	default:
+		if s.receiveErr {
+			return geminilive.TranscriptEvent{}, errors.New("receive_transport_other")
+		}
+	}
 	select {
 	case e := <-s.events:
 		s.seen <- e
@@ -67,6 +83,80 @@ func (s *e2eInput) Receive(ctx context.Context) (geminilive.TranscriptEvent, err
 		return geminilive.TranscriptEvent{}, ctx.Err()
 	}
 }
+
+func TestGeminiReceiveFailureKeepsBaresipMediaAliveAndDegradesSafely(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mediaDir, err := os.MkdirTemp("/tmp", "vf-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(mediaDir)
+	media, err := baresipmedia.New(ctx, baresipmedia.Config{ParentDir: mediaDir, BufferFrames: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	rxPath, txPath := media.SocketPaths()
+	dialer := net.Dialer{}
+	rxPeer, err := dialer.DialContext(ctx, "unix", rxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rxPeer.Close()
+	txPeer, err := dialer.DialContext(ctx, "unix", txPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txPeer.Close()
+	session, err := media.WaitSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := conversation.NewConversationState("call_media_failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := &e2eInput{events: make(chan geminilive.TranscriptEvent), seen: make(chan geminilive.TranscriptEvent, 1), receiveErr: true}
+	response := &e2eResponse{sendCalled: make(chan struct{}), events: make(chan geminilive.Event)}
+	runtime, err := NewBaresipSplitRuntimeWithTranscriptPersistence(session, input, response, state, &e2eProcessor{}, conversation.NewResponseGate(), nil, nil, "call_media_failure", &transcriptRepoFake{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Run(ctx); err == nil || !strings.Contains(err.Error(), "receive_transport_other") {
+		t.Fatalf("runtime error=%v, want fake Gemini receive failure", err)
+	}
+	if session.IsClosed() {
+		t.Fatal("Gemini receive failure ended the Baresip media session")
+	}
+	if err := audiosocket.NewStream(nil, rxPeer).WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin16, Payload: fixturePCM(640)}); err != nil {
+		t.Fatalf("Baresip RX peer disconnected after Gemini failure: %v", err)
+	}
+	degradedDone := make(chan error, 1)
+	go func() { degradedDone <- session.ServeDegraded(ctx) }()
+	_ = txPeer.SetReadDeadline(time.Now().Add(time.Second))
+	silence, err := audiosocket.NewStream(txPeer, nil).ReadFrame()
+	if err != nil {
+		t.Fatalf("degraded TX did not send silence: %v", err)
+	}
+	for _, sample := range silence.Payload {
+		if sample != 0 {
+			t.Fatal("degraded TX generated non-silence audio")
+		}
+	}
+	if err := rxPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-degradedDone:
+	case <-time.After(time.Second):
+		t.Fatal("degraded media did not stop after Baresip peer teardown")
+	}
+	if err := session.WaitClosed(context.Background()); err == nil {
+		t.Fatal("expected peer teardown to close the media session")
+	}
+}
+
 func (s *e2eInput) Close() error { return nil }
 
 type e2eResponse struct {
@@ -172,6 +262,10 @@ func TestNewSplitRuntimeEndToEndUsesOneControlledSession(t *testing.T) {
 	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: " the answer.", EventID: "receive-3"}
 	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{9, 8}, AudioMimeType: "audio/pcm;rate=24000"}
 	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	deadline := time.Now().Add(time.Second)
+	for input.sentCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -407,6 +501,10 @@ func TestBaresipNoCallIntegratedFixturePersistsClassifiedTurnAndGETTranscript(t 
 		t.Fatal("local TX PCM was not sent")
 	}
 	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	deadline := time.Now().Add(time.Second)
+	for input.sentCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
 	select {
 	case err := <-done:

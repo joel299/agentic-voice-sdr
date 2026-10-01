@@ -116,7 +116,7 @@ func TestTXQueueAppliesBoundedBackpressureWithoutEndingSession(t *testing.T) {
 	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
 	pcm := pcmSamples(txFrameBytes)
 	writeDone := make(chan error, 1)
-	go func() { writeDone <- state.enqueuePCM(pcm) }()
+	go func() { writeDone <- state.enqueuePCM(context.Background(), pcm) }()
 
 	deadline := time.Now().Add(time.Second)
 	for len(state.txQueue) == 0 && time.Now().Before(deadline) {
@@ -153,7 +153,7 @@ func TestTXQueueBackpressureStopsOnSessionCancellation(t *testing.T) {
 	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
 	state.txQueue <- audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes)}
 	writeDone := make(chan error, 1)
-	go func() { writeDone <- state.enqueuePCM(pcmSamples(2 * txFrameBytes)) }()
+	go func() { writeDone <- state.enqueuePCM(context.Background(), pcmSamples(2*txFrameBytes)) }()
 
 	select {
 	case err := <-writeDone:
@@ -168,6 +168,70 @@ func TestTXQueueBackpressureStopsOnSessionCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("writer did not stop after session cancellation")
+	}
+}
+
+func TestFiveSecondGeminiTXBurstPreservesOrderAndQueueBounds(t *testing.T) {
+	const frames = 250 // 5s of 20ms, mono 24kHz, S16LE audio.
+	const queueCapacity = 8
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a, err := New(ctx, Config{ParentDir: shortTempDir(t), BufferFrames: queueCapacity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	rxPath, txPath := a.SocketPaths()
+	peerRX, peerTX, session := connectPair(t, a, rxPath, txPath)
+	defer peerRX.Close()
+	defer peerTX.Close()
+	defer session.Close()
+	want := make([]byte, frames*txFrameBytes)
+	for frame := 0; frame < frames; frame++ {
+		for i := 0; i < txFrameBytes; i++ {
+			want[frame*txFrameBytes+i] = byte(frame)
+		}
+	}
+	consumerErr := make(chan error, 1)
+	go func() {
+		stream := audiosocket.NewStream(peerTX, nil)
+		for frame := 0; frame < frames; frame++ {
+			got, err := stream.ReadFrame()
+			if err != nil {
+				consumerErr <- err
+				return
+			}
+			if got.Type != audiosocket.TypeSlin24 || !bytes.Equal(got.Payload, want[frame*txFrameBytes:(frame+1)*txFrameBytes]) {
+				consumerErr <- errors.New("TX burst frame order or PCM content changed")
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		consumerErr <- nil
+	}()
+	// 16 native PCM chunks arrive in immediate bursts. The fixed-size
+	// queue forces the producer to wait while the socket consumer plays in order.
+	for offset := 0; offset < len(want); offset += 16 * txFrameBytes {
+		end := offset + 16*txFrameBytes
+		if end > len(want) {
+			end = len(want)
+		}
+		if err := session.WriteFrameContext(ctx, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: want[offset:end]}); err != nil {
+			t.Fatalf("send PCM burst at %d: %v", offset, err)
+		}
+	}
+	if err := <-consumerErr; err != nil {
+		t.Fatal(err)
+	}
+	if session.IsClosed() {
+		t.Fatal("TX burst ended the media session")
+	}
+	metrics := session.Metrics()
+	if metrics.TXQueueHighWater > queueCapacity {
+		t.Fatalf("TX high-water=%d exceeds configured capacity %d", metrics.TXQueueHighWater, queueCapacity)
+	}
+	if metrics.TXWaitCount == 0 || metrics.TXWaitDurationMS == 0 {
+		t.Fatalf("TX backpressure metrics did not record waits: %+v", metrics)
 	}
 }
 
@@ -327,7 +391,7 @@ func TestRejectsWrongTypeOddPCMAndOversizeChunk(t *testing.T) {
 	}
 }
 
-func TestRXQueueOverflowEndsOnlyCurrentSession(t *testing.T) {
+func TestRXQueueOverflowDropsStaleFrameWithoutEndingSession(t *testing.T) {
 	a, err := New(context.Background(), Config{ParentDir: shortTempDir(t), BufferFrames: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -338,28 +402,34 @@ func TestRXQueueOverflowEndsOnlyCurrentSession(t *testing.T) {
 	frame := audiosocket.Frame{Type: audiosocket.TypeSlin16, Payload: pcmSamples(320)}
 	for range 16 {
 		if err := writeSocketFrame(peerRX, frame); err != nil {
-			select {
-			case <-session.state.done:
-				break
-			default:
-				t.Fatal(err)
-			}
-			break
+			t.Fatal(err)
 		}
 	}
 	select {
 	case <-session.state.done:
-	case <-time.After(time.Second):
-		t.Fatal("RX queue did not fail closed after bounded overflow")
+		t.Fatal("RX overflow terminated the media session")
+	case <-time.After(20 * time.Millisecond):
 	}
-	if err := session.state.sessionError(); !errors.Is(err, ErrBackpressure) {
-		t.Fatalf("session error=%v, want ErrBackpressure", err)
+	metrics := session.Metrics()
+	if metrics.RXFramesDropped == 0 {
+		t.Fatal("RX overflow did not increment dropped frame metric")
 	}
-	_ = peerRX.Close()
-	_ = peerTX.Close()
-	waitIdle(t, a)
-	assertSocketExists(t, rxPath)
-	assertSocketExists(t, txPath)
+	if metrics.RXQueueHighWater > 1 {
+		t.Fatalf("RX queue high-water=%d, want bounded capacity 1", metrics.RXQueueHighWater)
+	}
+	if got, err := session.ReadFrame(); err != nil || got.Type != audiosocket.TypeSlin16 {
+		t.Fatalf("latest RX frame type=%s err=%v", got.Type, err)
+	}
+	if err := session.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes / 2)}); err != nil {
+		t.Fatalf("TX after RX overload: %v", err)
+	}
+	_ = peerTX.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := audiosocket.DecodeReader(peerTX); err != nil {
+		t.Fatalf("TX socket closed after RX overload: %v", err)
+	}
+	if metrics.TXQueueHighWater > 1 {
+		t.Fatalf("TX queue high-water=%d, want bounded capacity 1", metrics.TXQueueHighWater)
+	}
 }
 
 func TestCancellationClosesListenersAndCleansPrivatePaths(t *testing.T) {

@@ -14,9 +14,29 @@ import (
 	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
+	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	telephonybridge "github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
+
+func TestAIFailureDiagnosticsPreserveSafeStageAndProviderClass(t *testing.T) {
+	err := &telephonybridge.StageError{Stage: "input_transcription_receive", Cause: &geminilive.Error{Kind: geminilive.ErrorReceive, TransportClass: geminilive.TransportOther}}
+	stage := aiFailureStage(err)
+	if stage != "input_transcription_receive" {
+		t.Fatalf("failure stage=%q", stage)
+	}
+	if class := aiFailureClass(err, stage); class != "provider_transport" {
+		t.Fatalf("failure class=%q", class)
+	}
+	if strings.Contains(err.Error(), "TransportOther") || strings.Contains(err.Error(), "receive_transport_other") {
+		t.Fatalf("diagnostic error leaked provider detail: %v", err)
+	}
+	var staged interface{ AIStage() string }
+	if !errors.As(err, &staged) || staged.AIStage() != stage {
+		t.Fatalf("stage error does not support safe unwrapping: %v", err)
+	}
+}
 
 func TestServerConfiguresExplicitTimeouts(t *testing.T) {
 	server := newHTTPServer(":0", nil)

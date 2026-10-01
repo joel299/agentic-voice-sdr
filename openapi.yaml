@@ -447,7 +447,7 @@ components:
         to: { type: string, description: E.164 destination; normalized and checked against the server allowlist before dialing, example: '+5567981340687' }
     Call:
       type: object
-      required: [call_id, to, status, ai_runtime_status]
+      required: [call_id, to, status, ai_runtime_status, ai_runtime_stage]
       properties:
         call_id: { type: string, description: API lifecycle identifier }
         provider_call_id: { type: string, description: Baresip runtime CallID when observed }
@@ -455,7 +455,9 @@ components:
         status: { type: string, enum: [dialing, ringing, connected, completed, busy, no_answer, failed, canceled] }
         terminal_reason: { type: string, pattern: '^(local_hangup|normal|busy|no_answer|canceled|failed|unknown|transport_error|sip_[45][0-9]{2})$', description: Sanitized provider close category or SIP status code; never includes raw SIP headers or credentials. }
         ai_runtime_status: { type: string, enum: [not_started, starting, running, failed, degraded, stopped], description: AI state is independent from SIP call status; failed/degraded does not dispatch Hangup. }
-        ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended], description: Sanitized failure category only; provider payloads are never returned. }
+        ai_runtime_stage: { type: string, enum: [not_started, runtime_starting, jev_config, jev_client_init, prompt_snapshot, gemini_input_connect, gemini_response_connect, conversation_state, turn_runtime_init, bridge_init, bridge_run, media_ingress, input_transcription_send, input_transcription_receive, input_transcription_handler, jev_provider, turn_directive, gemini_response_send, gemini_response_receive, media_egress, turn_complete, degraded_mode, runtime_shutdown, runtime_unknown], description: Last safe runtime stage or the stage that failed. }
+        ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended, jev_config, jev_client_init, prompt_snapshot, gemini_input_connect, gemini_response_connect, conversation_state, turn_runtime_init, bridge_init, media_ingress, input_transcription_send, input_transcription_receive, jev_provider, turn_directive, gemini_response_send, gemini_response_receive, media_egress, provider_transport, runtime_unknown], description: Sanitized failure category only; provider payloads are never returned. }
+        ai_failure_at: { type: string, format: date-time, nullable: true, description: Timestamp of the AI runtime failure. }
     CallTranscriptResponse:
       type: object
       required: [call_id, status, turns]

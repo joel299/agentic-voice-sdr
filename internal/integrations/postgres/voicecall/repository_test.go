@@ -81,6 +81,13 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if _, err = pool.Exec(ctx, string(aiMigration)); err != nil {
 		t.Fatal("apply AI runtime migration")
 	}
+	stageMigration, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../db/migrations/0007_call_ai_runtime_stage.sql"))
+	if err != nil {
+		t.Fatal("read AI stage migration")
+	}
+	if _, err = pool.Exec(ctx, string(stageMigration)); err != nil {
+		t.Fatal("apply AI stage migration")
+	}
 	repo, err := repository.NewRepository(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +102,8 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if err := repo.UpdateLifecycle(ctx, call.ID, "connected", "provider-1", ""); err != nil {
 		t.Fatalf("connected update: %v", err)
 	}
-	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "receive_failed"); err != nil {
+	failureAt := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "input_transcription_receive", "provider_transport", &failureAt); err != nil {
 		t.Fatalf("AI runtime update: %v", err)
 	}
 	lead, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", " Olá, quero informações. ", "gemini_input", "lead:"+call.ID+":lead-000001")
@@ -169,7 +177,7 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal("get call")
 	}
-	if stored.Status != "completed" || stored.ProviderCallID != "provider-1" || stored.ConnectedAt == nil || stored.EndedAt == nil || stored.TerminalReason != "completed" || stored.AIRuntimeStatus != "failed" || stored.AIFailureClass != "receive_failed" {
+	if stored.Status != "completed" || stored.ProviderCallID != "provider-1" || stored.ConnectedAt == nil || stored.EndedAt == nil || stored.TerminalReason != "completed" || stored.AIRuntimeStatus != "failed" || stored.AIRuntimeStage != "input_transcription_receive" || stored.AIFailureClass != "provider_transport" || stored.AIFailureAt == nil || !stored.AIFailureAt.Equal(failureAt) {
 		t.Fatalf("stored lifecycle incomplete: %#v", stored)
 	}
 	retained, err := repo.ListFinalTurns(ctx, call.ID, 100)

@@ -53,13 +53,15 @@ func (s Status) terminal() bool {
 }
 
 type Call struct {
-	CallID          string `json:"call_id"`
-	ProviderCallID  string `json:"provider_call_id,omitempty"`
-	To              string `json:"to"`
-	Status          Status `json:"status"`
-	TerminalReason  string `json:"terminal_reason,omitempty"`
-	AIRuntimeStatus string `json:"ai_runtime_status"`
-	AIFailureClass  string `json:"ai_failure_class,omitempty"`
+	CallID          string     `json:"call_id"`
+	ProviderCallID  string     `json:"provider_call_id,omitempty"`
+	To              string     `json:"to"`
+	Status          Status     `json:"status"`
+	TerminalReason  string     `json:"terminal_reason,omitempty"`
+	AIRuntimeStatus string     `json:"ai_runtime_status"`
+	AIRuntimeStage  string     `json:"ai_runtime_stage"`
+	AIFailureClass  string     `json:"ai_failure_class,omitempty"`
+	AIFailureAt     *time.Time `json:"ai_failure_at,omitempty"`
 }
 
 type DestinationPolicy interface {
@@ -233,7 +235,7 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		s.mu.Unlock()
 		return Call{}, ErrProviderFailure
 	}
-	call := Call{CallID: callID, To: canonical, Status: StatusDialing, AIRuntimeStatus: "not_started"}
+	call := Call{CallID: callID, To: canonical, Status: StatusDialing, AIRuntimeStatus: "not_started", AIRuntimeStage: "not_started"}
 	if s.repository != nil {
 		if err := s.repository.CreateCall(ctx, voicecalldomain.Call{ID: callID, Destination: canonical, Status: string(StatusDialing), Provider: "baresip"}); err != nil {
 			s.mu.Lock()
@@ -296,8 +298,8 @@ func (s *Service) Get(callID string) (Call, error) {
 
 // UpdateAIRuntimeStatus records AI state independently of the SIP call state.
 // It never dispatches Hangup or otherwise changes telephony lifecycle.
-func (s *Service) UpdateAIRuntimeStatus(ctx context.Context, callID, status, failureClass string) error {
-	if ctx == nil || callID == "" || !validAIRuntimeStatus(status) || !validAIFailureClass(failureClass) {
+func (s *Service) UpdateAIRuntimeStatus(ctx context.Context, callID, status, stage, failureClass string, failureAt *time.Time) error {
+	if ctx == nil || callID == "" || !validAIRuntimeStatus(status) || !validAIRuntimeStage(stage) || !validAIFailureClass(failureClass) {
 		return ErrProviderFailure
 	}
 	s.mu.Lock()
@@ -307,16 +309,27 @@ func (s *Service) UpdateAIRuntimeStatus(ctx context.Context, callID, status, fai
 		return ErrCallNotFound
 	}
 	call.AIRuntimeStatus = status
+	call.AIRuntimeStage = stage
 	call.AIFailureClass = failureClass
+	call.AIFailureAt = failureAt
 	s.calls[callID] = call
 	s.mu.Unlock()
 	if s.repository != nil {
-		if err := s.repository.UpdateAIRuntimeStatus(ctx, callID, status, failureClass); err != nil {
+		if err := s.repository.UpdateAIRuntimeStatus(ctx, callID, status, stage, failureClass, failureAt); err != nil {
 			s.setPersistenceError(err)
 			return ErrPersistenceFailure
 		}
 	}
 	return nil
+}
+
+func validAIRuntimeStage(value string) bool {
+	switch value {
+	case "not_started", "runtime_starting", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "bridge_run", "media_ingress", "input_transcription_send", "input_transcription_receive", "input_transcription_handler", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "turn_complete", "degraded_mode", "runtime_shutdown", "runtime_unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 func validAIRuntimeStatus(value string) bool {
@@ -333,7 +346,7 @@ func validAIFailureClass(value string) bool {
 		return true
 	}
 	switch value {
-	case "timeout", "canceled", "receive_failed", "provider_api", "media_closed", "runtime_error", "session_ended":
+	case "timeout", "canceled", "receive_failed", "provider_api", "media_closed", "runtime_error", "session_ended", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "media_ingress", "input_transcription_send", "input_transcription_receive", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "provider_transport", "runtime_unknown":
 		return true
 	default:
 		return false

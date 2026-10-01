@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -203,31 +204,49 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		}
 		openedAt := time.Now().UTC()
 		log.Printf("media_session_open api_call_id=%s at=%s", call.CallID, openedAt.Format(time.RFC3339Nano))
-		recordAIRuntimeStatus(ctx, calls, call.CallID, "starting", "")
+		recordAIRuntimeStatus(ctx, calls, call.CallID, "starting", "runtime_starting", "", nil)
 		callCtx, cancelCall := context.WithCancel(ctx)
 		go func() {
 			if err := calls.WaitCallEnd(callCtx, call.CallID); err == nil {
 				cancelCall()
 			}
 		}()
-		aiErr := runBaresipCallSession(callCtx, session, calls, call.CallID, repository, prompts, tuning, baseGemini)
+		var runtimeReady atomic.Bool
+		observe := func(stage, outcome string) {
+			if !safeStageToken(stage) || !safeStageToken(outcome) {
+				return
+			}
+			at := time.Now().UTC()
+			category := stageCategory(stage)
+			status := "starting"
+			if runtimeReady.Load() || (stage == "bridge_run" && outcome == "started") {
+				runtimeReady.Store(true)
+				status = "running"
+			}
+			recordAIRuntimeStatus(callCtx, calls, call.CallID, status, category, "", nil)
+			log.Printf("ai_runtime_milestone api_call_id=%s stage=%s outcome=%s at=%s", call.CallID, stage, outcome, at.Format(time.RFC3339Nano))
+		}
+		aiErr := runBaresipCallSession(callCtx, session, calls, call.CallID, repository, prompts, tuning, baseGemini, observe)
 		currentCall, stillActive := calls.ActiveCall()
 		if ctx.Err() == nil && (!stillActive || currentCall.CallID != call.CallID) {
 			// CallService only clears the active call for a real terminal Baresip
 			// event or an owner Hangup reconciliation. That is an allowed owner
 			// of media teardown.
 			cancelCall()
-			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "")
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
 			_ = session.Close()
 			metrics := session.Metrics()
 			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 			continue
 		}
-		failureClass := aiFailureClass(aiErr)
+		failureStage := aiFailureStage(aiErr)
+		failureClass := aiFailureClass(aiErr, failureStage)
 		var mediaErr error
 		if ctx.Err() == nil {
-			recordAIRuntimeStatus(ctx, calls, call.CallID, "failed", failureClass)
-			log.Printf("ai_runtime_status=failed api_call_id=%s ai_failure_class=%s at=%s media_mode=degraded", call.CallID, failureClass, time.Now().UTC().Format(time.RFC3339Nano))
+			failedAt := time.Now().UTC()
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "failed", failureStage, failureClass, &failedAt)
+			log.Printf("ai_runtime_status=failed api_call_id=%s ai_runtime_stage=%s ai_failure_class=%s ai_failure_at=%s media_mode=degraded", call.CallID, failureStage, failureClass, failedAt.Format(time.RFC3339Nano))
+			log.Printf("ai_runtime_milestone api_call_id=%s stage=degraded_mode outcome=started at=%s", call.CallID, failedAt.Format(time.RFC3339Nano))
 			mediaErr = session.ServeDegraded(callCtx)
 		}
 		currentCall, stillActive = calls.ActiveCall()
@@ -235,11 +254,11 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		cancelCall()
 		metrics := session.Metrics()
 		if ctx.Err() != nil {
-			recordAIRuntimeStatus(context.Background(), calls, call.CallID, "stopped", "")
+			recordAIRuntimeStatus(context.Background(), calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
 			_ = session.Close()
 			log.Printf("media_session_close api_call_id=%s reason=runtime_shutdown at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 		} else if terminalCall {
-			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "")
+			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
 			_ = session.Close()
 			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 		} else {
@@ -254,10 +273,22 @@ type voicecallTranscriptRepository interface {
 	voicecalldomain.TranscriptRepository
 }
 
-func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, calls *callservice.Service, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) error {
+func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, calls *callservice.Service, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config, observe telephonybridge.StageObserver) error {
+	failAtStage := func(stage string, err error) error {
+		if err == nil {
+			return nil
+		}
+		if observe != nil {
+			observe(stage, "failed")
+		}
+		return &telephonybridge.StageError{Stage: stage, Cause: err}
+	}
+	if observe != nil {
+		observe("jev_config", "started")
+	}
 	jevConfig, err := openrouterjev.ConfigFromEnv()
 	if err != nil {
-		return err
+		return failAtStage("jev_config", err)
 	}
 	jevSettings := tuning.JEV()
 	jevConfig.Model = jevSettings.Model
@@ -265,43 +296,78 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 	jevConfig.DecisionGuidance = jevSettings.DecisionGuidance
 	jev, err := openrouterjev.NewWithTimeout(jevConfig, time.Duration(jevSettings.TimeoutMS)*time.Millisecond)
 	if err != nil {
-		return err
+		return failAtStage("jev_client_init", err)
+	}
+	if observe != nil {
+		observe("jev_client_init", "ready")
 	}
 	geminiSettings := tuning.Gemini()
 	baseGemini.Model = geminiSettings.Model
 	baseGemini.VoiceName = geminiSettings.VoiceName
 	baseGemini.VoiceDescription = geminiSettings.Description
 	baseGemini.VoiceStyle = geminiSettings.Style
+	if observe != nil {
+		observe("prompt_snapshot", "started")
+	}
 	geminiConfig, snapshot, err := prompts.BuildWithConfig(ctx, baseGemini)
 	if err != nil {
-		return err
+		return failAtStage("prompt_snapshot", err)
 	}
 	log.Printf("call session prompt frozen: name=%s version=%d", snapshot.Name(), snapshot.Version())
+	if observe != nil {
+		observe("prompt_snapshot", "ready")
+	}
+	if observe != nil {
+		observe("gemini_input_connect", "started")
+	}
 	transcriber, err := geminilive.ConnectInputTranscriber(ctx, geminiConfig)
 	if err != nil {
-		return err
+		return failAtStage("gemini_input_connect", err)
 	}
 	defer transcriber.Close()
+	if observe != nil {
+		observe("gemini_input_connect", "ready")
+	}
+	if observe != nil {
+		observe("gemini_response_connect", "started")
+	}
 	responder, err := geminilive.ConnectControlledResponse(ctx, geminiConfig)
 	if err != nil {
-		return err
+		return failAtStage("gemini_response_connect", err)
 	}
 	defer responder.Close()
+	if observe != nil {
+		observe("gemini_response_connect", "ready")
+	}
 	state, err := conversation.NewConversationState(callID)
 	if err != nil {
-		return err
+		return failAtStage("conversation_state", err)
 	}
 	dispatcher := toolruntime.NewDispatcher(tools.NewInMemoryRegistry(), toolruntime.NewExecutorRegistry(nil))
+	if observe != nil {
+		observe("turn_runtime_init", "started")
+	}
 	processor, err := turnruntime.New(jev, dispatcher)
 	if err != nil {
-		return err
+		return failAtStage("turn_runtime_init", err)
+	}
+	if observe != nil {
+		processor.SetStageObserver(observe)
+	}
+	if observe != nil {
+		observe("bridge_init", "started")
 	}
 	bridge, err := voiceflow.NewBaresipSplitRuntimeWithTranscriptPersistence(session, transcriber, responder, state, processor, conversation.NewResponseGate(), nil, nil, callID, repository)
 	if err != nil {
-		return err
+		return failAtStage("bridge_init", err)
 	}
-	log.Printf("ai_runtime_status=running api_call_id=%s at=%s", callID, time.Now().UTC().Format(time.RFC3339Nano))
-	recordAIRuntimeStatus(ctx, calls, callID, "running", "")
+	if observe != nil {
+		observe("bridge_init", "ready")
+		bridge.SetStageObserver(observe)
+		observe("bridge_run", "started")
+	}
+	log.Printf("ai_runtime_status=running api_call_id=%s ai_runtime_stage=bridge_run at=%s", callID, time.Now().UTC().Format(time.RFC3339Nano))
+	recordAIRuntimeStatus(ctx, calls, callID, "running", "bridge_run", "", nil)
 	err = bridge.Run(ctx)
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -312,13 +378,24 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 	return err
 }
 
-func recordAIRuntimeStatus(ctx context.Context, calls *callservice.Service, callID, status, failureClass string) {
-	if err := calls.UpdateAIRuntimeStatus(ctx, callID, status, failureClass); err != nil {
+func recordAIRuntimeStatus(ctx context.Context, calls *callservice.Service, callID, status, stage, failureClass string, failureAt *time.Time) {
+	if err := calls.UpdateAIRuntimeStatus(ctx, callID, status, stage, failureClass, failureAt); err != nil {
 		log.Printf("ai_runtime_status_persisted=no api_call_id=%s requested_status=%s error_class=persistence", callID, status)
 	}
 }
 
-func aiFailureClass(err error) string {
+func aiFailureStage(err error) string {
+	if err == nil {
+		return "bridge_run"
+	}
+	var staged interface{ AIStage() string }
+	if errors.As(err, &staged) && validAIStage(staged.AIStage()) {
+		return staged.AIStage()
+	}
+	return "runtime_unknown"
+}
+
+func aiFailureClass(err error, stage string) string {
 	switch {
 	case err == nil:
 		return "session_ended"
@@ -330,20 +407,63 @@ func aiFailureClass(err error) string {
 		return "receive_failed"
 	case errors.Is(err, telephonybridge.ErrProviderAPI):
 		return "provider_api"
+	case errors.Is(err, geminilive.ErrTranscriptionAPI):
+		return "provider_api"
+	case errors.Is(err, geminilive.ErrTranscriptionClosed):
+		return "provider_transport"
 	case errors.Is(err, baresipmedia.ErrSessionClosed):
 		return "media_closed"
 	default:
-		if err != nil {
-			message := strings.ToLower(err.Error())
-			if strings.Contains(message, "receive_transport_other") || strings.Contains(message, "receive failed") || strings.Contains(message, "receive error") {
-				return "receive_failed"
-			}
-			if strings.Contains(message, "provider api") {
-				return "provider_api"
-			}
+		var providerErr *geminilive.Error
+		if errors.As(err, &providerErr) && (providerErr.Kind == geminilive.ErrorReceive || providerErr.Kind == geminilive.ErrorRemoteClose || providerErr.Kind == geminilive.ErrorSend) {
+			return "provider_transport"
 		}
-		return "runtime_error"
+		if stage == "runtime_unknown" {
+			return "runtime_unknown"
+		}
+		return stage
 	}
+}
+
+func stageCategory(stage string) string {
+	switch stage {
+	case "first_final_transcription", "input_transcription_receive":
+		return "input_transcription_receive"
+	case "input_transcription_handler":
+		return "input_transcription_handler"
+	case "gemini_output_transcription", "gemini_audio", "generation_complete", "gemini_response_receive":
+		return "gemini_response_receive"
+	case "media_egress":
+		return "media_egress"
+	case "input_transcription_send":
+		return "input_transcription_send"
+	case "media_ingress":
+		return "media_ingress"
+	case "jev_provider", "turn_directive":
+		return stage
+	case "turn_complete":
+		return "turn_complete"
+	case "controlled_response_sent":
+		return "gemini_response_send"
+	default:
+		return stage
+	}
+}
+
+func safeStageToken(value string) bool {
+	if len(value) == 0 || len(value) > 48 {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validAIStage(value string) bool {
+	return safeStageToken(value) && stageCategory(value) == value && value != "first_final_transcription" && value != "gemini_audio" && value != "generation_complete"
 }
 
 func mediaCloseReason(err error) string {

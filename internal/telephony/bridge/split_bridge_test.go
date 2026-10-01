@@ -253,7 +253,9 @@ func TestSplitBridgeProviderFailureDoesNotCloseTelephonyOwnedAudio(t *testing.T)
 	input := &splitInput{events: make(chan geminilive.TranscriptEvent), closed: make(chan struct{}), receiveErr: true}
 	response := &splitResponse{events: make(chan geminilive.Event), closed: make(chan struct{})}
 	bridge := NewSplit(audio, audio, input, response, &splitTranscriptHandler{finals: make(chan string, 1)}, nil)
-	if err := bridge.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "receive_transport_other") {
+	var stageErr *StageError
+	err := bridge.Run(context.Background())
+	if !errors.As(err, &stageErr) || stageErr.Stage != "input_transcription_receive" || strings.Contains(err.Error(), "receive_transport_other") {
 		t.Fatalf("Run error=%v, want provider receive error", err)
 	}
 	select {

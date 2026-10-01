@@ -53,7 +53,7 @@ func TestCallOpenAPIDocumentsSeparateAIRuntimeStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(spec)
-	for _, fragment := range []string{"required: [call_id, to, status, ai_runtime_status]", "ai_runtime_status: { type: string, enum: [not_started, starting, running, failed, degraded, stopped]", "ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended]", "failed/degraded does not dispatch Hangup"} {
+	for _, fragment := range []string{"required: [call_id, to, status, ai_runtime_status, ai_runtime_stage]", "ai_runtime_status: { type: string, enum: [not_started, starting, running, failed, degraded, stopped]", "ai_runtime_stage: { type: string, enum: [not_started, runtime_starting", "ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended", "ai_failure_at: { type: string, format: date-time", "failed/degraded does not dispatch Hangup"} {
 		if !strings.Contains(text, fragment) {
 			t.Errorf("Call OpenAPI contract missing %q", fragment)
 		}

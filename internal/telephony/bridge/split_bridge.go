@@ -25,6 +25,33 @@ type contextAudioWriter interface {
 	WriteFrameContext(context.Context, audiosocket.Frame) error
 }
 
+// StageObserver receives fixed, non-sensitive runtime milestones. It must not
+// be used to report provider payloads, transcript text, or raw errors.
+type StageObserver func(stage, outcome string)
+
+// StageError identifies the bridge boundary that returned an error without
+// including provider error text in its message. The cause remains available
+// to internal errors.Is/errors.As checks.
+type StageError struct {
+	Stage string
+	Cause error
+}
+
+func (e *StageError) Error() string   { return "bridge stage failed: " + e.Stage }
+func (e *StageError) Unwrap() error   { return e.Cause }
+func (e *StageError) AIStage() string { return e.Stage }
+
+func stageError(stage string, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var staged interface{ AIStage() string }
+	if errors.As(err, &staged) {
+		return err
+	}
+	return &StageError{Stage: stage, Cause: err}
+}
+
 // SplitBridge connects independent input-transcription and controlled-response
 // sessions. The two sessions have separate receive owners and capabilities.
 type SplitBridge struct {
@@ -35,6 +62,7 @@ type SplitBridge struct {
 	transcript  TranscriptHandler
 	events      EventHandler
 	lifecycle   ResponseLifecycle
+	observe     StageObserver
 }
 
 func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.InputTranscriberSession, responder geminilive.ControlledResponseSession, transcript TranscriptHandler, events EventHandler, lifecycle ...ResponseLifecycle) *SplitBridge {
@@ -43,6 +71,20 @@ func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.Inpu
 		lc = lifecycle[0]
 	}
 	return &SplitBridge{input: input, output: output, transcriber: transcriber, responder: responder, transcript: transcript, events: events, lifecycle: lc}
+}
+
+// SetStageObserver installs call-scoped, fixed-name runtime telemetry before
+// Run. Callers should set it before starting the bridge.
+func (b *SplitBridge) SetStageObserver(observer StageObserver) {
+	if b != nil {
+		b.observe = observer
+	}
+}
+
+func (b *SplitBridge) observeStage(stage, outcome string) {
+	if b.observe != nil {
+		b.observe(stage, outcome)
+	}
 }
 
 // Run owns exactly one Receive loop for each provider session. PCM is sent
@@ -107,27 +149,29 @@ func (b *SplitBridge) runSplitIngress(ctx context.Context) error {
 		frame, err := readFrame(ctx, b.input)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return b.transcriber.EndAudio(ctx)
+				return stageError("input_transcription_send", b.transcriber.EndAudio(ctx))
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return err
+			return stageError("media_ingress", err)
 		}
 		switch frame.Type {
 		case audiosocket.TypeSlin16:
 			if len(frame.Payload) == 0 {
 				continue
 			}
+			b.observeStage("media_ingress", "frame_received")
 			if err := b.transcriber.SendAudio(ctx, frame.Payload); err != nil {
-				return err
+				return stageError("input_transcription_send", err)
 			}
+			b.observeStage("input_transcription_send", "audio_sent")
 		case audiosocket.TypeHangup:
-			return b.transcriber.EndAudio(ctx)
+			return stageError("input_transcription_send", b.transcriber.EndAudio(ctx))
 		case audiosocket.TypeID, audiosocket.TypeDTMF:
 			continue
 		default:
-			return fmt.Errorf("%w: AudioSocket %s cannot be sent as Gemini PCM16", ErrFormatIncompatible, frame.Type)
+			return stageError("media_ingress", fmt.Errorf("%w: AudioSocket %s cannot be sent as Gemini PCM16", ErrFormatIncompatible, frame.Type))
 		}
 	}
 }
@@ -139,10 +183,17 @@ func (b *SplitBridge) runSplitTranscripts(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return err
+			return stageError("input_transcription_receive", err)
+		}
+		b.observeStage("input_transcription_receive", string(event.State))
+		if event.State == geminilive.TranscriptFinal {
+			b.observeStage("first_final_transcription", "received")
 		}
 		if err := b.transcript.HandleTranscript(ctx, event); err != nil {
-			return err
+			return stageError("input_transcription_handler", err)
+		}
+		if event.State == geminilive.TranscriptFinal {
+			b.observeStage("input_transcription_handler", "completed")
 		}
 	}
 }
@@ -198,21 +249,34 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 				return ctx.Err()
 			}
 			failSession(ErrReceiveFailed)
-			return err
+			return stageError("gemini_response_receive", err)
+		}
+		if event.Kind == geminilive.EventOutputTranscription {
+			b.observeStage("gemini_output_transcription", "received")
+		}
+		if event.Kind == geminilive.EventGenerationComplete {
+			b.observeStage("generation_complete", "received")
+		}
+		if event.Kind == geminilive.EventTurnComplete || event.TurnComplete {
+			b.observeStage("turn_complete", "received")
+		}
+		if event.Kind == geminilive.EventAudio {
+			b.observeStage("gemini_audio", "received")
 		}
 		turnComplete := event.Kind == geminilive.EventTurnComplete || event.TurnComplete
 		switch event.Kind {
 		case geminilive.EventAudio:
 			if event.AudioMimeType != "audio/pcm;rate=24000" {
 				fail(ErrFormatIncompatible)
-				return fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType)
+				return stageError("media_egress", fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType))
 			}
 			begin()
 			if len(event.Audio) > 0 && disposition == providerTurnOwned {
 				if err := writeFrame(ctx, b.output, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
 					fail(ErrAudioOutputFailed)
-					return err
+					return stageError("media_egress", err)
 				}
+				b.observeStage("media_egress", "audio_written")
 			}
 		case geminilive.EventOutputTranscription, geminilive.EventToolCall:
 			begin()
@@ -220,12 +284,13 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			fail(ErrResponseInterrupted)
 		case geminilive.EventAPIError:
 			failSession(ErrProviderAPI)
+			return stageError("gemini_response_receive", ErrProviderAPI)
 		case geminilive.EventClosed:
 			if disposition == providerTurnOwned {
 				if b.events != nil {
 					if err := b.events(ctx, event); err != nil {
 						fail(ErrResponseTurnIncomplete)
-						return err
+						return stageError("turn_complete", err)
 					}
 				}
 				fail(ErrResponseTurnIncomplete)
@@ -236,12 +301,12 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 		if b.events != nil {
 			if err := b.events(ctx, event); err != nil {
 				fail(err)
-				return err
+				return stageError("gemini_response_receive", err)
 			}
 		}
 		if turnComplete {
 			if err := complete(); err != nil {
-				return err
+				return stageError("turn_complete", err)
 			}
 		}
 		if event.Kind == geminilive.EventClosed {

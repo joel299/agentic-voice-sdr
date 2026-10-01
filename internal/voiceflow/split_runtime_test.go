@@ -123,7 +123,9 @@ func TestGeminiReceiveFailureKeepsBaresipMediaAliveAndDegradesSafely(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Run(ctx); err == nil || !strings.Contains(err.Error(), "receive_transport_other") {
+	var stageErr interface{ AIStage() string }
+	err = runtime.Run(ctx)
+	if !errors.As(err, &stageErr) || stageErr.AIStage() != "input_transcription_receive" || strings.Contains(err.Error(), "receive_transport_other") {
 		t.Fatalf("runtime error=%v, want fake Gemini receive failure", err)
 	}
 	if session.IsClosed() {

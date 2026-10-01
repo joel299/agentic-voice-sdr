@@ -30,7 +30,7 @@ type callRepositoryFake struct {
 	mu        sync.Mutex
 	created   []voicecalldomain.Call
 	updates   []struct{ id, status, providerID, reason string }
-	aiUpdates []struct{ id, status, failureClass string }
+	aiUpdates []struct{ id, status, stage, failureClass string }
 	err       error
 }
 
@@ -46,10 +46,10 @@ func (r *callRepositoryFake) UpdateLifecycle(_ context.Context, id, status, prov
 	r.updates = append(r.updates, struct{ id, status, providerID, reason string }{id, status, providerID, reason})
 	return r.err
 }
-func (r *callRepositoryFake) UpdateAIRuntimeStatus(_ context.Context, id, status, failureClass string) error {
+func (r *callRepositoryFake) UpdateAIRuntimeStatus(_ context.Context, id, status, stage, failureClass string, _ *time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.aiUpdates = append(r.aiUpdates, struct{ id, status, failureClass string }{id, status, failureClass})
+	r.aiUpdates = append(r.aiUpdates, struct{ id, status, stage, failureClass string }{id, status, stage, failureClass})
 	return r.err
 }
 func (*callRepositoryFake) GetCall(context.Context, string) (voicecalldomain.Call, error) {
@@ -211,11 +211,12 @@ func TestAIFailureStatusPersistsWithoutEndingOrHangingUpCall(t *testing.T) {
 	}
 	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", State: control.CallStateConnected, CallID: "baresip-ai-failure", PeerURI: "sip:+5567981340687@example.test"}
 	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
-	if err := service.UpdateAIRuntimeStatus(context.Background(), call.CallID, "failed", "receive_failed"); err != nil {
+	failedAt := time.Now().UTC()
+	if err := service.UpdateAIRuntimeStatus(context.Background(), call.CallID, "failed", "input_transcription_receive", "provider_transport", &failedAt); err != nil {
 		t.Fatal(err)
 	}
 	got, err := service.Get(call.CallID)
-	if err != nil || got.Status != StatusConnected || got.AIRuntimeStatus != "failed" || got.AIFailureClass != "receive_failed" {
+	if err != nil || got.Status != StatusConnected || got.AIRuntimeStatus != "failed" || got.AIRuntimeStage != "input_transcription_receive" || got.AIFailureClass != "provider_transport" || got.AIFailureAt == nil || !got.AIFailureAt.Equal(failedAt) {
 		t.Fatalf("call after isolated AI failure=%+v err=%v", got, err)
 	}
 	if _, active := service.ActiveCall(); !active {
@@ -227,7 +228,7 @@ func TestAIFailureStatusPersistsWithoutEndingOrHangingUpCall(t *testing.T) {
 	}
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
-	if len(repo.aiUpdates) != 1 || repo.aiUpdates[0].status != "failed" || repo.aiUpdates[0].failureClass != "receive_failed" {
+	if len(repo.aiUpdates) != 1 || repo.aiUpdates[0].status != "failed" || repo.aiUpdates[0].stage != "input_transcription_receive" || repo.aiUpdates[0].failureClass != "provider_transport" {
 		t.Fatalf("persisted AI status=%+v", repo.aiUpdates)
 	}
 }

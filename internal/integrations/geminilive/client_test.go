@@ -15,6 +15,13 @@ import (
 	"nhooyr.io/websocket"
 )
 
+func TestDefaultEndpointUsesGemini38LiveProtocol(t *testing.T) {
+	const want = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+	if DefaultEndpoint != want {
+		t.Fatalf("default endpoint = %q, want %q", DefaultEndpoint, want)
+	}
+}
+
 func TestSessionContractAndEvents(t *testing.T) {
 	type observed struct {
 		setup, text, audio, audioStreamEnd, activityEnd bool
@@ -80,6 +87,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]}}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"interrupted":true}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"toolCall":{"functionCalls":[{"id":"1","name":"schedule","args":{"x":1}}]}}`))
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"eventId":"combined-1","serverContent":{"outputTranscription":{"text":"combined text"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"BAUG"}}]},"turnComplete":true}}`))
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -116,6 +124,14 @@ func TestSessionContractAndEvents(t *testing.T) {
 	e, err = s.Receive(context.Background())
 	if err != nil || e.Kind != EventToolCall || len(e.ToolCalls) != 1 || e.ToolCalls[0].Name != "schedule" {
 		t.Fatalf("tool event: %+v %v", e, err)
+	}
+	e, err = s.Receive(context.Background())
+	if err != nil || e.Kind != EventOutputTranscription || e.Text != "combined text" || e.TurnComplete || e.EventID != "combined-1" {
+		t.Fatalf("combined transcription event: %+v %v", e, err)
+	}
+	e, err = s.Receive(context.Background())
+	if err != nil || e.Kind != EventAudio || len(e.Audio) != 3 || !e.TurnComplete || e.EventID != "combined-1" {
+		t.Fatalf("combined audio event: %+v %v", e, err)
 	}
 }
 
@@ -274,6 +290,22 @@ func TestOutputTranscriptionCarriesCompletionAndNoSyntheticReceiveIdentity(t *te
 		t.Fatalf("provider did not send an event ID but parser synthesized %q", got.EventID)
 	}
 
+}
+
+func TestCombinedOutputTranscriptionAndAudioAreBothDelivered(t *testing.T) {
+	serverContent := json.RawMessage(`{"outputTranscription":{"text":"resposta final"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]},"turnComplete":true}`)
+	events := parseEvents(map[string]json.RawMessage{
+		"serverContent": serverContent,
+	})
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want transcription and audio", events)
+	}
+	if events[0].Kind != EventOutputTranscription || events[0].Text != "resposta final" || events[0].TurnComplete {
+		t.Fatalf("transcription event = %+v", events[0])
+	}
+	if events[1].Kind != EventAudio || len(events[1].Audio) != 3 || events[1].AudioMimeType != "audio/pcm;rate=24000" || !events[1].TurnComplete {
+		t.Fatalf("audio event = %+v", events[1])
+	}
 }
 
 func TestParsePreservesAllToolCalls(t *testing.T) {

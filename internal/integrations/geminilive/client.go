@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DefaultEndpoint  = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+	DefaultEndpoint  = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
 	DefaultModel     = "gemini-3.8-live"
 	InputSampleRate  = 16000
 	OutputSampleRate = 24000
@@ -169,6 +169,7 @@ type providerSession struct {
 	closeOnce     sync.Once
 	done          chan struct{}
 	receiveActive atomic.Bool
+	pendingEvents []Event
 }
 
 func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
@@ -377,6 +378,7 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 	}
 	return msg, nil
 }
+
 func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if s == nil || s.conn == nil {
 		return Event{}, ErrNotReady
@@ -388,19 +390,32 @@ func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if len(s.pendingEvents) > 0 {
+		event := s.pendingEvents[0]
+		s.pendingEvents = s.pendingEvents[1:]
+		return event, nil
+	}
 	msg, err := s.readJSON(ctx)
 	if err != nil {
 		return Event{}, err
 	}
-	event := parseEvent(msg)
+	events := parseEvents(msg)
 	for _, key := range []string{"eventId", "event_id"} {
 		var id string
 		if json.Unmarshal(msg[key], &id) == nil && id != "" {
-			event.EventID = id
+			for i := range events {
+				events[i].EventID = id
+			}
 			break
 		}
 	}
-	return event, nil
+	if len(events) == 0 {
+		return Event{Kind: EventUnknown}, nil
+	}
+	if len(events) > 1 {
+		s.pendingEvents = append(s.pendingEvents[:0], events[1:]...)
+	}
+	return events[0], nil
 }
 func parseAPIError(msg map[string]json.RawMessage) string {
 	if raw, ok := msg["error"]; ok {
@@ -413,20 +428,28 @@ func parseAPIError(msg map[string]json.RawMessage) string {
 	return ""
 }
 func parseEvent(msg map[string]json.RawMessage) Event {
+	events := parseEvents(msg)
+	if len(events) == 0 {
+		return Event{Kind: EventUnknown}
+	}
+	return events[0]
+}
+
+func parseEvents(msg map[string]json.RawMessage) []Event {
 	if parseAPIError(msg) != "" {
-		return Event{Kind: EventAPIError, Error: "remote API error"}
+		return []Event{{Kind: EventAPIError, Error: "remote API error"}}
 	}
 	if _, ok := msg["setupComplete"]; ok {
-		return Event{Kind: EventSetupComplete}
+		return []Event{{Kind: EventSetupComplete}}
 	}
 	if raw, ok := msg["toolCall"]; ok {
 		var t struct {
 			FunctionCalls []ToolCall `json:"functionCalls"`
 		}
 		if json.Unmarshal(raw, &t) == nil && len(t.FunctionCalls) > 0 {
-			return Event{Kind: EventToolCall, ToolCalls: t.FunctionCalls}
+			return []Event{{Kind: EventToolCall, ToolCalls: t.FunctionCalls}}
 		}
-		return Event{Kind: EventToolCall}
+		return []Event{{Kind: EventToolCall}}
 	}
 	if raw, ok := msg["serverContent"]; ok {
 		var c struct {
@@ -455,32 +478,43 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 		}
 		if json.Unmarshal(raw, &c) == nil {
 			if c.Interrupted {
-				return Event{Kind: EventInterrupted}
+				return []Event{{Kind: EventInterrupted}}
 			}
 			if c.InputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}
+				return []Event{{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}}
 			}
 			if c.FinalInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}
+				return []Event{{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}}
 			}
 			if c.InterimInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}
+				return []Event{{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}}
 			}
+			events := make([]Event, 0, 2)
 			if c.OutputTranscription.Text != "" {
-				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete}
+				events = append(events, Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete})
 			}
-			if len(c.ModelTurn.Parts) > 0 && c.ModelTurn.Parts[0].InlineData.Data != "" {
-				b, err := base64.StdEncoding.DecodeString(c.ModelTurn.Parts[0].InlineData.Data)
-				if err == nil {
-					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType, TurnComplete: c.TurnComplete}
+			for _, part := range c.ModelTurn.Parts {
+				if part.InlineData.Data == "" {
+					continue
 				}
+				b, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
+				if err != nil {
+					continue
+				}
+				if len(events) > 0 && c.TurnComplete {
+					events[0].TurnComplete = false
+				}
+				events = append(events, Event{Kind: EventAudio, Audio: b, AudioMimeType: part.InlineData.MimeType, TurnComplete: c.TurnComplete})
+			}
+			if len(events) > 0 {
+				return events
 			}
 			if c.TurnComplete {
-				return Event{Kind: EventTurnComplete}
+				return []Event{{Kind: EventTurnComplete}}
 			}
 		}
 	}
-	return Event{Kind: EventUnknown}
+	return []Event{{Kind: EventUnknown}}
 }
 func (s *providerSession) Close() error {
 	if s == nil {

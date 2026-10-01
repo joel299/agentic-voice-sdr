@@ -312,7 +312,7 @@ func TestClassifyTransportErrors(t *testing.T) {
 }
 
 func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
-	msg := setupMessage(Config{Model: "test-model", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}}, roleControlledResponse)
+	msg := setupMessage(Config{Model: "test-model", VoiceName: "Kore", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}}, roleControlledResponse)
 	setup, ok := msg["setup"].(map[string]any)
 	if !ok {
 		t.Fatal("setup envelope missing")
@@ -326,6 +326,14 @@ func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
 	}
 	if _, ok := setup["responseModalities"]; ok {
 		t.Fatal("response modalities must be nested in generationConfig")
+	}
+	speech := generation["speechConfig"].(map[string]any)
+	voice := speech["voiceConfig"].(map[string]any)["prebuiltVoiceConfig"].(map[string]string)
+	if voice["voiceName"] != "Kore" {
+		t.Fatalf("voice mapping = %#v", voice)
+	}
+	if _, ok := generation["speech_metadata"]; ok {
+		t.Fatal("Live setup must not send standalone TTS speech_metadata")
 	}
 }
 

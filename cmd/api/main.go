@@ -67,10 +67,12 @@ func run(ctx context.Context, load configLoader, serve serverRunner) error {
 func serve(ctx context.Context, cfg config.Config) error {
 	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if _, err := openrouterjev.ConfigFromEnv(); err != nil {
+	baseJEV, err := openrouterjev.ConfigFromEnv()
+	if err != nil {
 		return errors.New("OpenRouter JEV key and model must be configured before starting the local call runtime")
 	}
-	if strings.TrimSpace(geminilive.ConfigFromEnv().APIKey) == "" {
+	baseGemini := geminilive.ConfigFromEnv()
+	if strings.TrimSpace(baseGemini.APIKey) == "" {
 		return errors.New("Gemini Live key must be configured before starting the local call runtime")
 	}
 	pgConfig, err := pgxpool.ParseConfig("")
@@ -93,9 +95,17 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("configure agent prompt service: %w", err)
 	}
-	promptBuilder, err := sessionprompt.NewBuilder(geminilive.ConfigFromEnv(), immutableGeminiCore, promptService)
+	promptBuilder, err := sessionprompt.NewBuilder(baseGemini, immutableGeminiCore, promptService)
 	if err != nil {
 		return fmt.Errorf("configure Gemini session prompt: %w", err)
+	}
+	geminiModel := baseGemini.Model
+	if strings.TrimSpace(geminiModel) == "" {
+		geminiModel = geminilive.DefaultModel
+	}
+	tuning, err := httpapi.NewTuningStore(httpapi.JEVSettings{Model: baseJEV.Model, TimeoutMS: openrouterjev.CanonicalDefaultTimeoutMS, Description: "Classificador comercial SDR responsável por selecionar a próxima ação.", DecisionGuidance: "Classifique semanticamente o último turno FINAL e selecione a próxima ação comercial."}, httpapi.GeminiSettings{Model: geminiModel, VoiceName: "Kore", Description: "Voz comercial brasileira, humana e consultiva. Deve transmitir clareza, proximidade e confiança sem parecer locução publicitária.", Style: "Calmo e confiante. Ritmo moderado. Frases curtas. Tom acolhedor e profissional."})
+	if err != nil {
+		return fmt.Errorf("configure owner tuning: %w", err)
 	}
 	mediaAdapter, err := baresipmedia.New(signalCtx, baresipmedia.Config{})
 	if err != nil {
@@ -142,8 +152,9 @@ func serve(ctx context.Context, cfg config.Config) error {
 			log.Printf("Baresip ctrl_tcp runtime unavailable; outbound call control is disabled")
 		}
 	}()
-	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder)
-	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigCallAndTranscriptServices(cfg, calls, transcripts))
+	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder, tuning, baseGemini)
+	calibration := newCalibrationServices(baseJEV, baseGemini, promptBuilder, promptService, provider, tuning)
+	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCalibration(cfg, calls, transcripts, calibration))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout
 	server.IdleTimeout = cfg.IdleTimeout
@@ -176,7 +187,7 @@ func waitForBaresipControl(ctx context.Context, address string, timeout time.Dur
 	}
 }
 
-func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter, calls *callservice.Service, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder) {
+func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter, calls *callservice.Service, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) {
 	for {
 		session, err := adapter.WaitSession(ctx)
 		if err != nil {
@@ -190,7 +201,7 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 			_ = session.Close()
 			continue
 		}
-		if err := runBaresipCallSession(ctx, session, call.CallID, repository, prompts); err != nil && ctx.Err() == nil {
+		if err := runBaresipCallSession(ctx, session, call.CallID, repository, prompts, tuning, baseGemini); err != nil && ctx.Err() == nil {
 			log.Printf("Baresip media session ended: %s", baresipMediaErrorClass(err))
 		}
 	}
@@ -200,16 +211,25 @@ type voicecallTranscriptRepository interface {
 	voicecalldomain.TranscriptRepository
 }
 
-func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder) error {
+func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, callID string, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) error {
 	jevConfig, err := openrouterjev.ConfigFromEnv()
 	if err != nil {
 		return err
 	}
-	jev, err := openrouterjev.New(jevConfig)
+	jevSettings := tuning.JEV()
+	jevConfig.Model = jevSettings.Model
+	jevConfig.Description = jevSettings.Description
+	jevConfig.DecisionGuidance = jevSettings.DecisionGuidance
+	jev, err := openrouterjev.NewWithTimeout(jevConfig, time.Duration(jevSettings.TimeoutMS)*time.Millisecond)
 	if err != nil {
 		return err
 	}
-	geminiConfig, snapshot, err := prompts.Build(ctx)
+	geminiSettings := tuning.Gemini()
+	baseGemini.Model = geminiSettings.Model
+	baseGemini.VoiceName = geminiSettings.VoiceName
+	baseGemini.VoiceDescription = geminiSettings.Description
+	baseGemini.VoiceStyle = geminiSettings.Style
+	geminiConfig, snapshot, err := prompts.BuildWithConfig(ctx, baseGemini)
 	if err != nil {
 		return err
 	}

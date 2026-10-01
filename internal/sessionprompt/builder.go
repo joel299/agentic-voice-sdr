@@ -49,6 +49,12 @@ func NewBuilder(base geminilive.Config, immutableCore string, source SnapshotSou
 // Build resolves the active prompt exactly once and returns the fixed config and
 // exact snapshot that belong to this session. No builder state is mutated.
 func (b *Builder) Build(ctx context.Context) (geminilive.Config, agentprompt.PromptSnapshot, error) {
+	return b.BuildWithConfig(ctx, b.base)
+}
+
+// BuildWithConfig snapshots the active prompt once and freezes provider and
+// voice delivery settings into this session configuration.
+func (b *Builder) BuildWithConfig(ctx context.Context, base geminilive.Config) (geminilive.Config, agentprompt.PromptSnapshot, error) {
 	if b == nil || isNilInterface(b.source) || strings.TrimSpace(b.core) == "" {
 		return geminilive.Config{}, agentprompt.PromptSnapshot{}, ErrInvalidBuilder
 	}
@@ -80,10 +86,13 @@ func (b *Builder) Build(ctx context.Context) (geminilive.Config, agentprompt.Pro
 	}
 
 	instruction := compose(b.core, snapshot)
+	if strings.TrimSpace(base.VoiceDescription) != "" || strings.TrimSpace(base.VoiceStyle) != "" {
+		instruction += "\n\n[VOICE DELIVERY]\nDescription:\n" + strings.TrimSpace(base.VoiceDescription) + "\n\nStyle:\n" + strings.TrimSpace(base.VoiceStyle) + "\n[/VOICE DELIVERY]"
+	}
 	if len(instruction) > MaxSystemInstructionBytes {
 		return geminilive.Config{}, agentprompt.PromptSnapshot{}, ErrInstructionTooLarge
 	}
-	config := cloneConfig(b.base)
+	config := cloneConfig(base)
 	config.SystemInstruction = instruction
 	return config, snapshot, nil
 }

@@ -81,6 +81,32 @@ func TestBuildCallsSourceExactlyOnceAndPreservesBaseConfig(t *testing.T) {
 	}
 }
 
+func TestBuildWithConfigFreezesVoiceDeliveryIntoPromptSnapshot(t *testing.T) {
+	var calls int
+	builder, err := NewBuilder(geminilive.Config{APIKey: "env-key", Model: "env-model"}, "fixed safety core", sourceFunc(func(context.Context) (agentprompt.PromptSnapshot, error) {
+		calls++
+		return snapshot(3, "Persona", "Prompt rules"), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, snap, err := builder.BuildWithConfig(context.Background(), geminilive.Config{APIKey: "env-key", Model: "tuned-model", VoiceName: "Kore", VoiceDescription: "Voz humana", VoiceStyle: "Ritmo moderado"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || snap.Version() != 3 {
+		t.Fatalf("snapshot calls=%d version=%d", calls, snap.Version())
+	}
+	for _, part := range []string{"[ACTIVE EDITABLE AGENT PROMPT v3: Persona]", "[VOICE DELIVERY]", "Description:\nVoz humana", "Style:\nRitmo moderado", "[/VOICE DELIVERY]"} {
+		if !strings.Contains(cfg.SystemInstruction, part) {
+			t.Errorf("frozen system instruction missing %q", part)
+		}
+	}
+	if cfg.Model != "tuned-model" || cfg.VoiceName != "Kore" {
+		t.Fatalf("provider voice config not frozen: %#v", cfg)
+	}
+}
+
 func TestBuildFreezesSnapshotPerSessionAcrossActivation(t *testing.T) {
 	var mu sync.RWMutex
 	active := snapshot(1, "Persona", "prompt-v1")

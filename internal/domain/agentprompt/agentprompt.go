@@ -145,6 +145,25 @@ func (s *PromptService) CreateVersion(ctx context.Context, draft PromptDraft) (P
 	return s.repository.CreateVersion(ctx, normalized)
 }
 
+// CreateAndActivate stores a new immutable version and activates that exact
+// version through the repository's serialized activation boundary.
+func (s *PromptService) CreateAndActivate(ctx context.Context, draft PromptDraft) (PromptVersion, error) {
+	if atomic, ok := s.repository.(interface {
+		CreateAndActivate(context.Context, PromptDraft) (PromptVersion, error)
+	}); ok {
+		normalized, err := draft.normalized()
+		if err != nil {
+			return PromptVersion{}, err
+		}
+		return atomic.CreateAndActivate(ctx, normalized)
+	}
+	created, err := s.CreateVersion(ctx, draft)
+	if err != nil {
+		return PromptVersion{}, err
+	}
+	return s.ActivateVersion(ctx, created.Version())
+}
+
 func (s *PromptService) GetActive(ctx context.Context) (PromptVersion, error) {
 	return s.repository.GetActive(ctx)
 }

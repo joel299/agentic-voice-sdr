@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,9 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
+
+//go:embed openapi.yaml static/scalar.html static/scalar.js
+var apiDocs embed.FS
 
 type configAPI struct {
 	whatsapp  *whatsapp.Service
@@ -36,6 +40,10 @@ func NewRouterWithConfigAndCallService(cfg config.Config, calls OutboundCallServ
 }
 
 func NewRouterWithConfigCallAndTranscriptServices(cfg config.Config, calls OutboundCallService, transcripts CallTranscriptReader) http.Handler {
+	return NewRouterWithConfigAndCalibration(cfg, calls, transcripts, CalibrationServices{})
+}
+
+func NewRouterWithConfigAndCalibration(cfg config.Config, calls OutboundCallService, transcripts CallTranscriptReader, calibration CalibrationServices) http.Handler {
 	var store whatsapp.ConfigStore = whatsapp.NewMemoryConfigStore()
 	if cfg.WhatsAppConfigPath != "" {
 		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
@@ -44,7 +52,7 @@ func NewRouterWithConfigCallAndTranscriptServices(cfg config.Config, calls Outbo
 	if cfg.OwnerAPIToken != "" {
 		authorizer, _ = NewStaticBearerAuthorizer(cfg.OwnerAPIToken)
 	}
-	return NewRouterWithServicesCallsAndTranscript(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, transcripts, authorizer)
+	return NewRouterWithCalibration(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, transcripts, authorizer, calibration)
 }
 
 func configuredSIPConfigurator(_ config.Config) SIPConfigurator {
@@ -67,10 +75,31 @@ func NewRouterWithServicesAndCalls(whatsappService *whatsapp.Service, sipConfigu
 }
 
 func NewRouterWithServicesCallsAndTranscript(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer) http.Handler {
+	return NewRouterWithCalibration(whatsappService, sipConfigurator, calls, transcripts, authorizer, CalibrationServices{})
+}
+
+func NewRouterWithCalibration(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer, calibration CalibrationServices) http.Handler {
 	a := &configAPI{whatsapp: whatsappService, sip: sipConfigurator}
 	router := chi.NewRouter()
 	router.Get("/healthz", health)
 	router.Get("/readyz", ready)
+	router.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		data, _ := apiDocs.ReadFile("openapi.yaml")
+		_, _ = w.Write(data)
+	})
+	router.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		data, _ := apiDocs.ReadFile("static/scalar.html")
+		_, _ = w.Write(data)
+	})
+	router.Get("/scalar.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		data, _ := apiDocs.ReadFile("static/scalar.js")
+		_, _ = w.Write(data)
+	})
 	router.Put("/v1/config/whatsapp", a.putWhatsApp)
 	router.Get("/v1/config/whatsapp", a.getWhatsApp)
 	router.Get("/v1/config/whatsapp/instances", a.getWhatsAppInstances)
@@ -79,6 +108,7 @@ func NewRouterWithServicesCallsAndTranscript(whatsappService *whatsapp.Service, 
 	router.Put("/v1/config/sip-trunk", a.putSIP)
 	router.Get("/v1/config/sip-trunk", a.getSIP)
 	registerCallRoutes(router, calls, transcripts, authorizer)
+	registerCalibrationRoutes(router, authorizer, calibration)
 	return router
 }
 func health(w http.ResponseWriter, _ *http.Request) { writeStatus(w, http.StatusOK, "ok") }

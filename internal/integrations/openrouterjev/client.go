@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	defaultBaseURL  = "https://openrouter.ai/api"
-	defaultTimeout  = 400 * time.Millisecond
-	maxResponseSize = 1 << 20
+	defaultBaseURL            = "https://openrouter.ai/api"
+	defaultTimeout            = 400 * time.Millisecond
+	CanonicalDefaultTimeoutMS = 400
+	maxResponseSize           = 1 << 20
 )
 
 var (
@@ -35,7 +36,7 @@ var (
 )
 
 // Config contains provider settings. APIKey is never included in returned errors.
-type Config struct{ APIKey, BaseURL, Model string }
+type Config struct{ APIKey, BaseURL, Model, Description, DecisionGuidance string }
 
 // ConfigFromEnv loads OpenRouter settings. A model is mandatory; no model ID is
 // selected implicitly. The official OpenRouter API base URL is used if omitted.
@@ -165,8 +166,19 @@ func decisionsEndpoint(baseURL string) string {
 // Decide sends only the typed decision snapshot and validates the provider result
 // using the domain's canonical NewDecision constructor.
 func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
+	result, err := c.DecideDetailed(ctx, input)
+	return result.Decision, err
+}
+
+// DetailedResult contains only the validated intent enum and canonical decision.
+type DetailedResult struct {
+	Intent   salesintent.Class
+	Decision conversation.Decision
+}
+
+func (c *Client) DecideDetailed(ctx context.Context, input conversation.DecisionInput) (DetailedResult, error) {
 	if ctx == nil {
-		return conversation.Decision{}, ErrConfiguration
+		return DetailedResult{}, ErrConfiguration
 	}
 	var mapped requestInput
 	mapped.Stage = input.Stage
@@ -177,20 +189,27 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	mapped.LastTranscriptState = input.LastTranscriptState
 	mapped.LatestFinalLeadText = salesintent.SanitizeLeadText(input.LatestFinalLeadText)
 	mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
+	question := decisionQuestion{Type: semanticIntentQuestion.Type, Instructions: semanticIntentQuestion.Instructions, Criteria: semanticIntentQuestion.Criteria}
+	if strings.TrimSpace(c.config.Description) != "" {
+		question.Instructions += " Classifier description: " + strings.TrimSpace(c.config.Description)
+	}
+	if strings.TrimSpace(c.config.DecisionGuidance) != "" {
+		question.Instructions += " Owner decision guidance: " + strings.TrimSpace(c.config.DecisionGuidance)
+	}
 	payload := decisionsRequest{
 		Model:     c.config.Model,
 		State:     mapped,
-		Questions: map[string]decisionQuestion{"intent": semanticIntentQuestion},
+		Questions: map[string]decisionQuestion{"intent": question},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, decisionsEndpoint(c.config.BaseURL), bytes.NewReader(body))
 	if err != nil {
-		return conversation.Decision{}, ErrConfiguration
+		return DetailedResult{}, ErrConfiguration
 	}
 	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -198,41 +217,41 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return conversation.Decision{}, ctx.Err()
+			return DetailedResult{}, ctx.Err()
 		}
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return conversation.Decision{}, ErrTimeout
+			return DetailedResult{}, ErrTimeout
 		}
-		return conversation.Decision{}, ErrTransport
+		return DetailedResult{}, ErrTransport
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return conversation.Decision{}, ErrProviderRejected
+		return DetailedResult{}, ErrProviderRejected
 	}
 	responseBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		if ctx.Err() != nil {
-			return conversation.Decision{}, ctx.Err()
+			return DetailedResult{}, ctx.Err()
 		}
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return conversation.Decision{}, ErrTimeout
+			return DetailedResult{}, ErrTimeout
 		}
-		return conversation.Decision{}, ErrTransport
+		return DetailedResult{}, ErrTransport
 	}
 	if len(responseBytes) == 0 || len(responseBytes) > maxResponseSize {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	var providerResponse decisionsResponse
 	if err := json.Unmarshal(responseBytes, &providerResponse); err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	answer, ok := providerResponse.Answers["intent"]
 	if !ok || answer.Type != "choice" {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	intent, ok := intentChoices[answer.Choice]
 	if !ok {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	optedOut := mapped.Signals.OptedOut || input.LastTurnRole == conversation.RoleLead && input.LastTranscriptState == conversation.TranscriptFinal && salesintent.HasExplicitOptOut(mapped.LatestFinalLeadText)
 	if optedOut {
@@ -245,11 +264,11 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	}
 	result, err := salesintent.Decide(intent, mapped.MatchingExecutableCapability)
 	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	validated, err := conversation.NewDecision(result.Decision.NextAction, result.Decision.Reason)
 	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
-	return validated, nil
+	return DetailedResult{Intent: intent, Decision: validated}, nil
 }

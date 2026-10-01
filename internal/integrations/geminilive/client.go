@@ -37,6 +37,9 @@ type Config struct {
 	Model              string
 	Endpoint           string
 	SystemInstruction  string
+	VoiceName          string
+	VoiceDescription   string
+	VoiceStyle         string
 	Tools              []ToolDefinition
 	ResponseModalities []string
 }
@@ -296,6 +299,11 @@ func setupMessage(cfg Config, role providerRole) map[string]any {
 		"generationConfig": map[string]any{
 			"responseModalities": cfg.ResponseModalities,
 		},
+	}
+	if role == roleControlledResponse && strings.TrimSpace(cfg.VoiceName) != "" {
+		setup["generationConfig"].(map[string]any)["speechConfig"] = map[string]any{
+			"voiceConfig": map[string]any{"prebuiltVoiceConfig": map[string]string{"voiceName": cfg.VoiceName}},
+		}
 	}
 	switch role {
 	case roleInputTranscription:

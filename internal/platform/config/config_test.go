@@ -17,8 +17,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.HTTPAddr != ":8080" {
-		t.Fatalf("HTTPAddr = %q, want %q", cfg.HTTPAddr, ":8080")
+	if cfg.HTTPAddr != "127.0.0.1:8080" {
+		t.Fatalf("HTTPAddr = %q, want %q", cfg.HTTPAddr, "127.0.0.1:8080")
 	}
 	if cfg.BaresipCtrlTCPAddress != "127.0.0.1:4444" || len(cfg.OutboundCallAllowlist) != 0 || cfg.OwnerAPIToken != "" {
 		t.Fatalf("unexpected outbound call defaults: %+v", cfg)

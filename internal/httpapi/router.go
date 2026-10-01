@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
@@ -17,10 +16,7 @@ import (
 var apiDocs embed.FS
 
 type configAPI struct {
-	whatsapp  *whatsapp.Service
-	sip       SIPConfigurator
-	mu        sync.RWMutex
-	sipConfig *SIPSafeResponse
+	whatsapp *whatsapp.Service
 }
 
 func NewRouter() http.Handler {
@@ -78,8 +74,8 @@ func NewRouterWithServicesCallsAndTranscript(whatsappService *whatsapp.Service, 
 	return NewRouterWithCalibration(whatsappService, sipConfigurator, calls, transcripts, authorizer, CalibrationServices{})
 }
 
-func NewRouterWithCalibration(whatsappService *whatsapp.Service, sipConfigurator SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer, calibration CalibrationServices) http.Handler {
-	a := &configAPI{whatsapp: whatsappService, sip: sipConfigurator}
+func NewRouterWithCalibration(whatsappService *whatsapp.Service, _ SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer, calibration CalibrationServices) http.Handler {
+	a := &configAPI{whatsapp: whatsappService}
 	router := chi.NewRouter()
 	router.Get("/healthz", health)
 	router.Get("/readyz", ready)
@@ -105,8 +101,6 @@ func NewRouterWithCalibration(whatsappService *whatsapp.Service, sipConfigurator
 	router.Get("/v1/config/whatsapp/instances", a.getWhatsAppInstances)
 	router.Put("/v1/config/whatsapp/instance", a.putWhatsAppInstance)
 	router.Post("/v1/config/whatsapp/test", a.testWhatsApp)
-	router.Put("/v1/config/sip-trunk", a.putSIP)
-	router.Get("/v1/config/sip-trunk", a.getSIP)
 	registerCallRoutes(router, calls, transcripts, authorizer)
 	registerCalibrationRoutes(router, authorizer, calibration)
 	return router
@@ -163,43 +157,6 @@ func (a *configAPI) testWhatsApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": result})
-}
-
-func (a *configAPI) putSIP(w http.ResponseWriter, r *http.Request) {
-	var input SIPConfigRequest
-	if decodeJSON(w, r, &input) != nil {
-		return
-	}
-	if err := input.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := a.sip.Configure(r.Context(), input); err != nil {
-		if errors.Is(err, errSIPCanonicalValidation) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid SIP configuration"})
-			return
-		}
-		if errors.Is(err, errSIPBoundaryUnavailable) {
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "SIP operational boundary unavailable"})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "SIP configuration failed"})
-		return
-	}
-	safe := input.SafeView()
-	a.mu.Lock()
-	a.sipConfig = &safe
-	a.mu.Unlock()
-	writeJSON(w, http.StatusOK, safe)
-}
-func (a *configAPI) getSIP(w http.ResponseWriter, _ *http.Request) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.sipConfig == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "SIP configuration not found"})
-		return
-	}
-	writeJSON(w, http.StatusOK, *a.sipConfig)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {

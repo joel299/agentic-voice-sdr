@@ -115,6 +115,7 @@ type GeminiTurnMetadata struct {
 type CalibrationServices struct {
 	Prompts       AgentPromptManager
 	Tuning        *TuningStore
+	FalePacoSIP   FalePacoSIPProfileService
 	TestJEV       func(context.Context, string, string) (JEVTestResult, error)
 	TestAgentTurn func(context.Context, string, string, string) (AgentTurnResult, []byte, error)
 	RuntimeStatus func(context.Context) (map[string]any, error)
@@ -125,6 +126,15 @@ type calibrationAPI struct {
 }
 
 func registerCalibrationRoutes(r chi.Router, auth OwnerAuthorizer, deps CalibrationServices) {
+	if deps.FalePacoSIP != nil {
+		sip := &falePacoSIPAPI{service: deps.FalePacoSIP}
+		r.Route("/v1/config/sip-trunk", func(p chi.Router) {
+			p.Use(ownerOnly(auth))
+			p.Get("/", sip.get)
+			p.Put("/", sip.put)
+			p.Post("/validate", sip.validate)
+		})
+	}
 	if deps.Tuning == nil {
 		return
 	}

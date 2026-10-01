@@ -91,6 +91,56 @@ func TestOwnerTuningOpenAPIContract(t *testing.T) {
 	}
 }
 
+func TestFalePacoSIPOpenAPIIsPasswordOnlyAndCanonical(t *testing.T) {
+	spec, err := os.ReadFile("../../openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(spec)
+	start := strings.Index(text, "  /v1/config/sip-trunk:\n")
+	if start < 0 {
+		t.Fatal("Fale Paco SIP operations are missing from OpenAPI")
+	}
+	end := strings.Index(text[start:], "  /v1/config/sip-trunk/validate:\n")
+	if end < 0 {
+		t.Fatal("Fale Paco SIP validation operation is missing from OpenAPI")
+	}
+	operation := text[start : start+end]
+	for _, fragment := range []string{"security: [{ BearerAuth: [] }]", "provider: 'Fale Paco'", "host: '98034.falepaco.com.br'", "port: 5060", "transport: tcp", "username: '100'", "caller_id: '551155200455'", "password_configured: true", "example: { secret: YOUR_SIP_PASSWORD }", "All provider, host, port, transport, username, realm, registrar, proxy, caller ID, and registration fields are server-controlled"} {
+		if !strings.Contains(operation, fragment) {
+			t.Errorf("Fale Paco SIP OpenAPI missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"FalePacoSIPPassword:", "additionalProperties: false", "title: Password", "writeOnly: true"} {
+		if !strings.Contains(text, fragment) {
+			t.Errorf("Fale Paco write-only password schema missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"SIPConfigRequest", "SIPSafeResponse", "codecs: [\"\"]", "auth: { secret:"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("obsolete or unsafe SIP contract remains: %q", forbidden)
+		}
+	}
+	validationStart := strings.Index(text, "  /v1/config/sip-trunk/validate:\n")
+	if validationStart < 0 {
+		t.Fatal("Fale Paco validation operation is missing from OpenAPI")
+	}
+	validationEnd := strings.Index(text[validationStart:], "\n  /")
+	if validationEnd < 0 {
+		validationEnd = len(text) - validationStart
+	}
+	validation := text[validationStart : validationStart+validationEnd]
+	for _, fragment := range []string{"security: [{ BearerAuth: [] }]", "does not send an INVITE", "realm_match", "registration_state", "REGISTERED"} {
+		if !strings.Contains(validation, fragment) {
+			t.Errorf("Fale Paco validation contract missing %q", fragment)
+		}
+	}
+	embedded, err := os.ReadFile("openapi.yaml")
+	if err != nil || string(embedded) != string(spec) {
+		t.Fatal("embedded Scalar OpenAPI spec differs from root OpenAPI spec")
+	}
+}
+
 func TestEmbeddedScalarDocsAreServedLocally(t *testing.T) {
 	h := NewRouterWithServicesCallsAndTranscript(nil, unavailableSIPConfigurator{}, nil, nil, nil)
 	for _, tc := range []struct{ path, contentType, contains string }{{"/docs", "text/html", "/scalar.js"}, {"/openapi.yaml", "application/yaml", "/v1/config/jev"}, {"/scalar.js", "text/javascript", "Scalar"}} {

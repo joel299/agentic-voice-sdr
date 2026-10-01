@@ -3,13 +3,19 @@ info:
   title: Agentic Voice SDR API
   version: 1.0.0
   description: |
-    Agentic Voice SDR exposes a private owner console for prompt management, JEV decision calibration, and Gemini Live voice tuning. The local runtime is Baresip 1.1.0 plus ctrl_tcp and the GRU-151 Unix-socket media adapter; secrets remain in the local environment. The owner Bearer token is required on prompt, tuning, test, runtime-status, and call routes.
+    Esta API permite configurar, testar e operar um agente de vendas por voz baseado em inteligência artificial. O agente interpreta o que o lead disse, decide o próximo passo comercial e gera uma resposta falada. A API permite ajustar e testar o comportamento antes de realizar chamadas reais.
 
-    Responsibility boundaries: the immutable Prompt versions define agent identity, commercial rules, and guardrails; JEV selects a typed next action and never writes spoken copy; Gemini Live follows the canonical TurnDirective, frozen prompt snapshot, and voice-delivery guidance; Baresip owns SIP/RTP and media codec boundaries. WhatsApp and scheduling remain deferred. No Asterisk, FreeSWITCH, or AudioSocket is used.
+    Com esta API você pode configurar o comportamento e as instruções do agente, escolher e ajustar a voz, configurar decisões comerciais, testar frases sem telefonar, ouvir o áudio gerado, medir o tempo de resposta, consultar o estado dos serviços, iniciar e acompanhar chamadas e consultar transcrições.
 
-    Interactive Scalar documentation is served locally at /docs and the complete OpenAPI contract at /openapi.yaml.
+    Fluxo recomendado: (1) faça login; (2) consulte GET /v1/runtime/status para verificar o estado do sistema; (3) confira ou altere o prompt; (4) ajuste decisão comercial, voz e estilo de fala; (5) teste uma frase de lead; (6) confira a decisão e execute um teste de resposta do agente; (7) ouça o áudio; (8) ajuste configurações se necessário; (9) somente depois realize uma chamada real. Os testes sem chamada permitem avaliar intenção, próximo passo, latência, resposta gerada e áudio.
 
-    Recommended no-call owner workflow: (1) GET /v1/runtime/status; (2) GET /api/v1/agent/prompt; (3) PUT a prompt only if needed (this creates and activates a new immutable version); (4) inspect GET /v1/config/jev and GET /v1/config/gemini; (5) tune only their owner-controlled fields; (6) POST /v1/test/jev to inspect semantic intent and latency; (7) POST /v1/test/agent-turn to run real JEV then Gemini Live without SIP; (8) read its actual output_transcription and open its short-lived audio_url; (9) review readiness before separately authorizing a phone E2E.
+    O mecanismo de decisão comercial seleciona um próximo passo, como continuar, perguntar, tratar uma objeção, propor uma ação, fazer follow-up, encerrar ou solicitar atendimento humano. Em seguida, o modelo de voz gera a resposta. Isso separa estratégia comercial de personalidade, estilo, voz, ritmo e tom.
+
+    Segurança: endpoints administrativos exigem autenticação Bearer. Senhas SIP e chaves de provedores nunca são retornadas. O perfil telefônico Fale Paco já vem preenchido com os valores conhecidos; o único dado que o owner informa é a senha SIP. Host, porta, transporte, usuário, realm, registrar, proxy, caller ID, domínio From e exigência de registro são controlados pelo servidor para evitar configuração incorreta. Use GET /v1/config/sip-trunk para consultar o perfil seguro, PUT /v1/config/sip-trunk para salvar a senha e POST /v1/config/sip-trunk/validate para validar o registro sem fazer chamada.
+
+    Perfil Fale Paco: host e registrar 98034.falepaco.com.br, porta 5060, transporte TCP, usuário e realm 100 e 98034.falepaco.com.br, caller ID 551155200455, registro obrigatório. A senha é write-only e fica apenas no arquivo local protegido do runtime Baresip. A validação não envia INVITE nem retorna dados de autenticação SIP.
+
+    Telefonia usa Baresip 1.1.0, ctrl_tcp e o adaptador de mídia local; não usa Asterisk, FreeSWITCH ou AudioSocket. WhatsApp e agendamento permanecem opcionais e podem ser disponibilizados futuramente. A documentação interativa Scalar está em /docs e o contrato OpenAPI completo em /openapi.yaml.
 servers:
   - url: /
 paths:
@@ -114,23 +120,46 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '502': { $ref: '#/components/responses/ProviderFailure' }
   /v1/config/sip-trunk:
+    get:
+      operationId: getFalePacoSIPProfile
+      tags: [Fale Paco telephony]
+      summary: Read the effective Fale Paco Baresip profile
+      description: Returns the server-controlled canonical profile and whether a password is configured. The password and SIP authentication material are never returned.
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Effective safe Fale Paco profile, content: { application/json: { schema: { $ref: '#/components/schemas/FalePacoSIPProfile' }, example: { provider: 'Fale Paco', host: '98034.falepaco.com.br', port: 5060, transport: tcp, registrar: '98034.falepaco.com.br', outbound_proxy: '98034.falepaco.com.br:5060', auth: { type: userpass, username: '100', realm: '98034.falepaco.com.br' }, from_user: '100', from_domain: '98034.falepaco.com.br', caller_id: '551155200455', registration_required: true, enabled: true, password_configured: true } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: Baresip profile unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     put:
-      operationId: configureSIPTrunk
+      operationId: setFalePacoSIPPassword
+      tags: [Fale Paco telephony]
+      summary: Set the Fale Paco SIP password
+      description: All provider, host, port, transport, username, realm, registrar, proxy, caller ID, and registration fields are server-controlled. Store the supplied password only in the protected local Baresip runtime account file. This operation restarts Baresip to apply the profile and sends no call.
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
+        description: The owner's SIP password. No other SIP fields are accepted.
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/SIPConfigRequest' }
+            schema: { $ref: '#/components/schemas/FalePacoSIPPassword' }
+            example: { secret: YOUR_SIP_PASSWORD }
       responses:
-        '200': { description: Safe SIP configuration, content: { application/json: { schema: { $ref: '#/components/schemas/SIPSafeResponse' } } } }
+        '200': { description: Safe effective profile; secret is omitted, content: { application/json: { schema: { $ref: '#/components/schemas/FalePacoSIPProfile' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '501': { description: Operational SIP boundary unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { description: An active call prevents restarting Baresip, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         '502': { $ref: '#/components/responses/RuntimeFailure' }
-    get:
-      operationId: getSIPTrunk
+  /v1/config/sip-trunk/validate:
+    post:
+      operationId: validateFalePacoRegistration
+      tags: [Fale Paco telephony]
+      summary: Validate Fale Paco registration without making a call
+      description: Reports safe credential presence, canonical domain and username matches, TCP transport, registration requirement, and current Baresip registration state. Does not return password or SIP authentication digests and does not send an INVITE.
+      security: [{ BearerAuth: [] }]
       responses:
-        '200': { description: Safe SIP configuration, content: { application/json: { schema: { $ref: '#/components/schemas/SIPSafeResponse' } } } }
-        '404': { description: SIP configuration not found }
+        '200': { description: No-call registration readiness, content: { application/json: { schema: { $ref: '#/components/schemas/FalePacoSIPValidation' }, example: { ok: true, password_configured: true, credential_present: true, domain_match: true, username_match: true, realm_match: true, transport: tcp, registration_required: true, registration_state: REGISTERED } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/RuntimeFailure' }
   /api/v1/agent/prompt:
     get:
       tags: [Owner prompt]
@@ -390,24 +419,45 @@ components:
         name: { type: string }
         phone: { type: string }
         status: { type: string, enum: [CONNECTED, READY, DISCONNECTED] }
-    SIPConfigRequest:
+    FalePacoSIPPassword:
       type: object
-      required: [provider, name, host, port, transport, auth]
+      additionalProperties: false
+      required: [secret]
       properties:
-        provider: { type: string }
-        name: { type: string }
-        host: { type: string, description: Public SIP destination; production runtime resolves and pins the operational IP }
-        port: { type: integer, minimum: 1, maximum: 65535 }
-        transport: { type: string, enum: [udp, tcp, tls] }
-        registrar: { type: string, description: Optional SIP registrar destination; resolved and pinned by the production runtime }
-        outbound_proxy: { type: string, description: Optional SIP outbound proxy destination; resolved and pinned by the production runtime }
-        auth: { $ref: '#/components/schemas/SIPAuth' }
-        from_user: { type: string }
-        from_domain: { type: string }
-        caller_id: { type: string }
-        codecs: { type: array, items: { type: string } }
-        registration_required: { type: boolean }
-        enabled: { type: boolean }
+        secret: { type: string, title: Password, minLength: 1, writeOnly: true, description: Owner-supplied Fale Paco SIP password. Stored only in the protected local Baresip runtime profile. Baresip account syntax currently accepts up to 512 UTF-8 bytes and rejects semicolons, quotation marks, backslashes, and control characters to keep account parameters unambiguous. }
+      example: { secret: YOUR_SIP_PASSWORD }
+    FalePacoSIPProfile:
+      type: object
+      additionalProperties: false
+      required: [provider, host, port, transport, registrar, outbound_proxy, auth, from_user, from_domain, caller_id, registration_required, enabled, password_configured]
+      description: Canonical server-controlled Fale Paco profile. The only owner-supplied value is its write-only password; no codecs are advertised here because Baresip uses its configured runtime defaults.
+      properties:
+        provider: { type: string, const: 'Fale Paco', description: Provider is fixed by the server. }
+        host: { type: string, const: '98034.falepaco.com.br' }
+        port: { type: integer, const: 5060 }
+        transport: { type: string, const: tcp }
+        registrar: { type: string, const: '98034.falepaco.com.br' }
+        outbound_proxy: { type: string, const: '98034.falepaco.com.br:5060' }
+        auth: { type: object, required: [type, username, realm], properties: { type: { type: string, const: userpass }, username: { type: string, const: '100' }, realm: { type: string, const: '98034.falepaco.com.br' } } }
+        from_user: { type: string, const: '100' }
+        from_domain: { type: string, const: '98034.falepaco.com.br' }
+        caller_id: { type: string, const: '551155200455' }
+        registration_required: { type: boolean, const: true }
+        enabled: { type: boolean, const: true }
+        password_configured: { type: boolean, description: Whether a valid canonical account credential is present in protected local runtime storage. }
+    FalePacoSIPValidation:
+      type: object
+      required: [ok, password_configured, credential_present, domain_match, username_match, realm_match, transport, registration_required, registration_state]
+      properties:
+        ok: { type: boolean }
+        password_configured: { type: boolean }
+        credential_present: { type: boolean }
+        domain_match: { type: boolean }
+        username_match: { type: boolean }
+        realm_match: { type: boolean, description: True only when Baresip reports the Fale Paco registration as registered. }
+        transport: { type: string, const: tcp }
+        registration_required: { type: boolean, const: true }
+        registration_state: { type: string }
     PromptDraft:
       type: object
       additionalProperties: false
@@ -521,36 +571,3 @@ components:
         gemini_voice_name: { type: string }
         whatsapp_status: { type: string, const: deferred }
         scheduling_status: { type: string, const: deferred }
-    SIPAuth:
-      type: object
-      required: [type]
-      properties:
-        type: { type: string, enum: [userpass, ip, none] }
-        username: { type: string }
-        secret: { type: string, writeOnly: true }
-        realm: { type: string }
-    SIPSafeResponse:
-      type: object
-      required: [provider, name, host, port, transport, auth]
-      description: Safe response; auth.secret is intentionally omitted.
-      properties:
-        provider: { type: string }
-        name: { type: string }
-        host: { type: string }
-        port: { type: integer }
-        transport: { type: string, enum: [udp, tcp, tls] }
-        registrar: { type: string }
-        outbound_proxy: { type: string }
-        auth:
-          type: object
-          required: [type]
-          properties:
-            type: { type: string, enum: [userpass, ip, none] }
-            username: { type: string }
-            realm: { type: string }
-        from_user: { type: string }
-        from_domain: { type: string }
-        caller_id: { type: string }
-        codecs: { type: array, items: { type: string } }
-        registration_required: { type: boolean }
-        enabled: { type: boolean }

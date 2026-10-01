@@ -113,19 +113,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer mediaAdapter.Close()
 	rxPath, txPath := mediaAdapter.SocketPaths()
-	profile, err := baresipmedia.PrepareProfile(cfg.BaresipProfileDir, cfg.BaresipMediaModulePath, cfg.BaresipSystemModuleDir, rxPath, txPath, cfg.BaresipCtrlTCPAddress)
-	if err != nil {
-		return fmt.Errorf("prepare private Baresip media profile: %w", err)
-	}
-	defer profile.Close()
-	baresipProcess, err := baresipmedia.StartProcess(signalCtx, cfg.BaresipBinaryPath, profile.Directory)
+	baresipRuntime, err := startBaresipRuntime(signalCtx, cfg, rxPath, txPath)
 	if err != nil {
 		return fmt.Errorf("start local Baresip runtime: %w", err)
 	}
-	defer baresipProcess.Close()
-	if err := waitForBaresipControl(signalCtx, cfg.BaresipCtrlTCPAddress, 10*time.Second); err != nil {
-		return err
-	}
+	defer baresipRuntime.Close()
 	callRepository, err := voicecallpostgres.NewRepository(pgPool)
 	if err != nil {
 		return fmt.Errorf("configure call persistence: %w", err)
@@ -146,6 +138,10 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer calls.Close()
 	defer provider.Close()
+	baresipRuntime.SetActiveCallCheck(func() bool {
+		_, active := calls.ActiveCall()
+		return active
+	})
 	transcripts := transcriptquery.New(callRepository, callRepository)
 	go func() {
 		if err := provider.Run(signalCtx); err != nil && !errors.Is(err, context.Canceled) {
@@ -154,6 +150,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}()
 	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder, tuning, baseGemini)
 	calibration := newCalibrationServices(baseJEV, baseGemini, promptBuilder, promptService, provider, tuning)
+	calibration.FalePacoSIP = newFalePacoSIPService(cfg.BaresipProfileDir, baresipRuntime, provider, calls)
 	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCalibration(cfg, calls, transcripts, calibration))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout

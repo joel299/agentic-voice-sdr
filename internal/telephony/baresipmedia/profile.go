@@ -31,6 +31,12 @@ func (p *Profile) Close() error {
 // PrepareProfile copies only Baresip's config and accounts, then injects the
 // adapter's generated sockets into a temporary profile before Baresip starts.
 func PrepareProfile(sourceDir, mediaModule, systemModuleDir, rxPath, txPath, ctrlAddress string) (*Profile, error) {
+	return PrepareProfileWithAccount(sourceDir, mediaModule, systemModuleDir, rxPath, txPath, ctrlAddress, nil)
+}
+
+// PrepareProfileWithAccount creates the private runtime profile and optionally
+// replaces its copied account with an explicit protected account record.
+func PrepareProfileWithAccount(sourceDir, mediaModule, systemModuleDir, rxPath, txPath, ctrlAddress string, account []byte) (*Profile, error) {
 	if strings.TrimSpace(sourceDir) == "" || strings.TrimSpace(mediaModule) == "" || strings.TrimSpace(systemModuleDir) == "" || strings.TrimSpace(rxPath) == "" || strings.TrimSpace(txPath) == "" || ctrlAddress != "127.0.0.1:4444" {
 		return nil, ErrInvalidBaresipProfile
 	}
@@ -77,7 +83,11 @@ func PrepareProfile(sourceDir, mediaModule, systemModuleDir, rxPath, txPath, ctr
 		return cleanup(err)
 	}
 	accountsPath := filepath.Join(sourceDir, "accounts")
-	if _, err := os.Stat(accountsPath); err == nil {
+	if len(account) > 0 {
+		if err := copyPrivateFileFromBytes(account, filepath.Join(dir, "accounts")); err != nil {
+			return cleanup(err)
+		}
+	} else if _, err := os.Stat(accountsPath); err == nil {
 		if err := copyPrivateFile(accountsPath, filepath.Join(dir, "accounts")); err != nil {
 			return cleanup(err)
 		}
@@ -85,6 +95,16 @@ func PrepareProfile(sourceDir, mediaModule, systemModuleDir, rxPath, txPath, ctr
 		return cleanup(err)
 	}
 	return profile, nil
+}
+
+func copyPrivateFileFromBytes(data []byte, destination string) error {
+	if len(data) == 0 {
+		return ErrInvalidBaresipProfile
+	}
+	if err := os.WriteFile(destination, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(destination, 0600)
 }
 
 func copyPrivateFile(source, destination string) error {

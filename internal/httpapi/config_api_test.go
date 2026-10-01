@@ -34,10 +34,6 @@ func (p *apiProvider) SendMessage(context.Context, string, string, string, strin
 	return nil
 }
 
-type apiSIP struct{ configured bool }
-
-func (s *apiSIP) Configure(context.Context, SIPConfigRequest) error { s.configured = true; return nil }
-
 type canonicalManager struct {
 	got   sip.TrunkConfig
 	err   error
@@ -50,11 +46,10 @@ func (m *canonicalManager) ApplyTrunk(_ context.Context, cfg sip.TrunkConfig) (s
 	return sip.StatusReport{TrunkName: cfg.Name, Status: sip.StatusReady}, m.err
 }
 
-func testAPI() (http.Handler, *apiSIP) {
+func testAPI() http.Handler {
 	provider := &apiProvider{instances: []whatsapp.Instance{{ID: "wa-1", Phone: "+5511", Status: whatsapp.StatusConnected}}}
 	wa := whatsapp.NewService(whatsapp.NewRegistry(map[string]whatsapp.WhatsAppProvider{"test": provider}), nil)
-	telephony := &apiSIP{}
-	return NewRouterWithServices(wa, telephony), telephony
+	return NewRouterWithServices(wa, unavailableSIPConfigurator{})
 }
 
 func requestJSON(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -67,7 +62,7 @@ func requestJSON(t *testing.T, handler http.Handler, method, path, body string) 
 }
 
 func TestWhatsAppConfigurationAPIAndSecretMasking(t *testing.T) {
-	handler, _ := testAPI()
+	handler := testAPI()
 	res := requestJSON(t, handler, http.MethodPut, "/v1/config/whatsapp", `{"provider":"test","base_url":"https://provider.example.test","credential":"secret-token"}`)
 	if res.Code != http.StatusOK {
 		t.Fatalf("configure status=%d body=%s", res.Code, res.Body)
@@ -93,19 +88,8 @@ func TestWhatsAppConfigurationAPIAndSecretMasking(t *testing.T) {
 	}
 }
 
-func TestSIPConfigurationBoundaryMasksSecret(t *testing.T) {
-	handler, boundary := testAPI()
-	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"generic","name":"main","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"userpass","username":"alice","secret":"secret"},"enabled":true}`)
-	if res.Code != http.StatusOK || !boundary.configured {
-		t.Fatalf("sip status=%d body=%s configured=%v", res.Code, res.Body, boundary.configured)
-	}
-	if strings.Contains(res.Body.String(), "secret") {
-		t.Fatal("SIP secret leaked")
-	}
-}
-
 func TestConfigurationValidationAndProviderErrors(t *testing.T) {
-	handler, _ := testAPI()
+	handler := testAPI()
 	res := requestJSON(t, handler, http.MethodPut, "/v1/config/whatsapp", `{"provider":"missing","base_url":"https://provider.example.test","credential":"x"}`)
 	if res.Code != http.StatusBadRequest && res.Code != http.StatusNotImplemented {
 		t.Fatalf("provider status=%d", res.Code)
@@ -140,22 +124,11 @@ func TestWhatsAppRouterCompositionWithFileConfigStore(t *testing.T) {
 	}
 }
 
-func TestSIPHTTPReachesCanonicalManagerWithExplicitMapping(t *testing.T) {
-	manager := &canonicalManager{}
-	configurator, err := NewCanonicalSIPConfigurator(manager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := NewRouterWithServices(testAPIService(), configurator)
-	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"provider-a","name":"main_trunk","host":"sip.example.test","port":5061,"transport":"tls","registrar":"sip.example.test","outbound_proxy":"proxy.example.test:5061","auth":{"type":"userpass","username":"alice","secret":"do-not-leak","realm":"example"},"from_user":"alice","from_domain":"example.test","caller_id":"Alice <sip:alice@example.test>","codecs":["opus","ulaw"],"registration_required":true,"enabled":true}`)
-	if res.Code != http.StatusOK || manager.calls != 1 {
-		t.Fatalf("status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
-	}
-	if manager.got.Provider != "provider-a" || manager.got.Name != "main_trunk" || manager.got.Transport != sip.TransportTLS || manager.got.AuthType != sip.AuthUserPass || manager.got.AuthUsername != "alice" || manager.got.Secret != "do-not-leak" || manager.got.Registrar == "" || manager.got.OutboundProxy == "" || !manager.got.RegistrationRequired || !manager.got.Enabled || len(manager.got.Codecs) != 2 {
-		t.Fatalf("canonical mapping incorrect: %#v", manager.got)
-	}
-	if strings.Contains(res.Body.String(), "do-not-leak") {
-		t.Fatalf("secret leaked in response: %s", res.Body)
+func TestGenericSIPDTOCanonicalMappingRemainsInternal(t *testing.T) {
+	request := SIPConfigRequest{Provider: "internal", Name: "test", Host: "sip.example.test", Port: 5060, Transport: "tcp", Auth: SIPAuthRequest{Type: "userpass", Username: "alice", Secret: "secret", Realm: "example"}, RegistrationRequired: true, Enabled: true}
+	canonical, err := request.ToCanonical()
+	if err != nil || canonical.Secret != "secret" || canonical.AuthUsername != "alice" || canonical.Transport != sip.TransportTCP {
+		t.Fatalf("internal SIP mapping failed: cfg=%#v err=%v", canonical, err)
 	}
 }
 
@@ -166,16 +139,6 @@ func TestSIPAuthMappingAndManagerFailure(t *testing.T) {
 		if err != nil || string(canonical.AuthType) != authType || canonical.Enabled {
 			t.Fatalf("auth mapping %q failed: cfg=%#v err=%v", authType, canonical, err)
 		}
-	}
-	manager := &canonicalManager{err: errors.New("asterisk unavailable")}
-	configurator, err := NewCanonicalSIPConfigurator(manager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := NewRouterWithServices(testAPIService(), configurator)
-	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"n","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"none"},"enabled":false}`)
-	if res.Code != http.StatusBadGateway || manager.calls != 1 || strings.Contains(res.Body.String(), "asterisk unavailable") {
-		t.Fatalf("manager failure handling incorrect: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
 	}
 }
 
@@ -191,20 +154,10 @@ func TestSIPCompositionNeverActivatesAsteriskFromRuntimeConfig(t *testing.T) {
 	}
 }
 
-func testAPIService() *whatsapp.Service {
-	return whatsapp.NewService(whatsapp.NewRegistry(map[string]whatsapp.WhatsAppProvider{"test": &apiProvider{}}), nil)
-}
-
 func TestSIPCanonicalValidationIsClientError(t *testing.T) {
-	manager := &canonicalManager{}
-	configurator, err := NewCanonicalSIPConfigurator(manager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := NewRouterWithServices(testAPIService(), configurator)
-	res := requestJSON(t, handler, http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"bad/name","host":"sip.example.test","port":5060,"transport":"udp","auth":{"type":"none"},"registration_required":true,"enabled":true}`)
-	if res.Code != http.StatusBadRequest || manager.calls != 0 || !strings.Contains(res.Body.String(), "invalid SIP configuration") {
-		t.Fatalf("canonical validation should be 400 without manager call: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	request := SIPConfigRequest{Provider: "p", Name: "bad/name", Host: "sip.example.test", Port: 5060, Transport: "udp", Auth: SIPAuthRequest{Type: "none"}, RegistrationRequired: true, Enabled: true}
+	if _, err := request.ToCanonical(); err == nil {
+		t.Fatal("invalid internal generic SIP data passed validation")
 	}
 }
 
@@ -216,9 +169,10 @@ func TestSIPDestinationPolicyBlocksBeforeManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := requestJSON(t, NewRouterWithServices(testAPIService(), configurator), http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"unsafe","host":"unsafe.example","port":5060,"transport":"udp","auth":{"type":"none"},"enabled":true}`)
-	if res.Code != http.StatusBadRequest || manager.calls != 0 {
-		t.Fatalf("unsafe destination must be rejected before manager: status=%d calls=%d body=%s", res.Code, manager.calls, res.Body)
+	request := SIPConfigRequest{Provider: "p", Name: "unsafe", Host: "unsafe.example", Port: 5060, Transport: "udp", Auth: SIPAuthRequest{Type: "none"}, Enabled: true}
+	err = configurator.Configure(context.Background(), request)
+	if !errors.Is(err, errSIPCanonicalValidation) || manager.calls != 0 {
+		t.Fatalf("unsafe destination must be rejected before manager: err=%v calls=%d", err, manager.calls)
 	}
 }
 
@@ -230,8 +184,8 @@ func TestSIPDisableDoesNotDependOnDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := requestJSON(t, NewRouterWithServices(testAPIService(), configurator), http.MethodPut, "/v1/config/sip-trunk", `{"provider":"p","name":"existing","host":"removed.provider.example","port":5060,"transport":"tls","registrar":"removed.registrar.example","outbound_proxy":"removed.proxy.example:5061","auth":{"type":"none"},"enabled":false}`)
-	if res.Code != http.StatusOK || manager.calls != 1 || manager.got.Enabled {
-		t.Fatalf("disable must reach Manager without DNS: status=%d calls=%d cfg=%#v body=%s", res.Code, manager.calls, manager.got, res.Body)
+	request := SIPConfigRequest{Provider: "p", Name: "existing", Host: "removed.provider.example", Port: 5060, Transport: "tls", Registrar: "removed.registrar.example", OutboundProxy: "removed.proxy.example:5061", Auth: SIPAuthRequest{Type: "none"}, Enabled: false}
+	if err := configurator.Configure(context.Background(), request); err != nil || manager.calls != 1 || manager.got.Enabled {
+		t.Fatalf("disable must reach Manager without DNS: err=%v calls=%d cfg=%#v", err, manager.calls, manager.got)
 	}
 }

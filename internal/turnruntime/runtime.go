@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/salesintent"
 	"github.com/joel299/agentic-voice-sdr/internal/toolruntime"
 )
 
@@ -70,11 +71,21 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 	if err := ctx.Err(); err != nil {
 		return conversation.TurnDirective{}, err
 	}
+	turns := input.State.Turns()
+	if len(turns) > 0 {
+		last := turns[len(turns)-1]
+		if last.Role == conversation.RoleLead && last.Transcript == conversation.TranscriptFinal && salesintent.Classify(last.Text) == salesintent.OptOut {
+			if err := input.State.RecordSignal(conversation.SignalOptedOut); err != nil {
+				return conversation.TurnDirective{}, err
+			}
+		}
+	}
 
 	decisionInput, err := conversation.NewDecisionInput(input.State)
 	if err != nil {
 		return conversation.TurnDirective{}, fmt.Errorf("%w: decision input: %v", ErrInvalidTurnRuntime, err)
 	}
+	decisionInput.HasMatchingExecutableCapability = input.Capability != nil && input.Capability.Validate() == nil
 	decision, err := runtime.provider.Decide(ctx, decisionInput)
 	if err != nil {
 		return conversation.TurnDirective{}, err

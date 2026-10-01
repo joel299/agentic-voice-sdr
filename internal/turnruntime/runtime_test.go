@@ -30,6 +30,16 @@ type cancelingProvider struct {
 	cancel   context.CancelFunc
 }
 
+type inputCaptureProvider struct {
+	input    conversation.DecisionInput
+	decision conversation.Decision
+}
+
+func (p *inputCaptureProvider) Decide(_ context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
+	p.input = input
+	return p.decision, nil
+}
+
 func (p *cancelingProvider) Decide(ctx context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
 	decision, err := p.provider.Decide(ctx, input)
 	p.cancel()
@@ -117,6 +127,29 @@ func TestRuntimeReturnsNonCapabilityDirectiveWithoutDispatch(t *testing.T) {
 	}
 	if provider.Calls() != 1 || dispatcher.Calls() != 0 || directive.Kind != conversation.ActionAskQuestion || directive.Capability != "" {
 		t.Fatalf("provider=%d dispatcher=%d directive=%+v", provider.Calls(), dispatcher.Calls(), directive)
+	}
+}
+
+func TestRuntimeClassifiesLatestFinalLeadAndRecordsOptOutBeforeJEV(t *testing.T) {
+	state := runtimeState(t, conversation.StageActive, false)
+	turn, err := conversation.NewTurn("turn-2", conversation.RoleLead, "Retire meu contato", conversation.TranscriptFinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecordTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+	decision, _ := conversation.NewDecision(conversation.ActionEndConversation, conversation.ReasonConversationComplete)
+	provider := &inputCaptureProvider{decision: decision}
+	runtime, err := New(provider, &fakeDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProcessTurn(context.Background(), TurnInput{State: state}); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Signals().OptedOut || !provider.input.Signals.OptedOut || provider.input.LatestFinalLeadText != "Retire meu contato" {
+		t.Fatalf("opt-out was not canonicalized before provider decision: state=%+v input=%+v", state.Signals(), provider.input)
 	}
 }
 

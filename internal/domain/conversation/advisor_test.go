@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,7 @@ func TestDecisionInputFromStateUsesMinimalSnapshot(t *testing.T) {
 		TurnCount:           1,
 		LastTurnRole:        RoleLead,
 		LastTranscriptState: TranscriptFinal,
+		LatestFinalLeadText: "tenho interesse",
 	}
 	if input != want {
 		t.Fatalf("input = %+v, want %+v", input, want)
@@ -40,6 +42,23 @@ func TestDecisionInputFromStateUsesMinimalSnapshot(t *testing.T) {
 func TestDecisionInputRejectsNilState(t *testing.T) {
 	if _, err := NewDecisionInput(nil); !errors.Is(err, ErrInvalidDecisionInput) {
 		t.Fatalf("error = %v, want %v", err, ErrInvalidDecisionInput)
+	}
+}
+
+func TestDecisionInputBoundsAndScopesLatestFinalLeadText(t *testing.T) {
+	valid := DecisionInput{Stage: StageActive, TurnCount: 1, LastTurnRole: RoleLead, LastTranscriptState: TranscriptFinal, LatestFinalLeadText: "lead answer"}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid final lead input: %v", err)
+	}
+	invalid := valid
+	invalid.LastTurnRole = RoleAgent
+	if err := invalid.validate(); !errors.Is(err, ErrInvalidDecisionInput) {
+		t.Fatalf("agent transcript error=%v", err)
+	}
+	invalid = valid
+	invalid.LatestFinalLeadText = strings.Repeat("x", maxFinalLeadTextRunes+1)
+	if err := invalid.validate(); !errors.Is(err, ErrInvalidDecisionInput) {
+		t.Fatalf("unbounded transcript error=%v", err)
 	}
 }
 

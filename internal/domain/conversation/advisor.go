@@ -3,6 +3,7 @@ package conversation
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -13,11 +14,13 @@ var (
 )
 
 type DecisionInput struct {
-	Stage               ConversationStage
-	Signals             Signals
-	TurnCount           int
-	LastTurnRole        ParticipantRole
-	LastTranscriptState TranscriptState
+	Stage                           ConversationStage
+	Signals                         Signals
+	TurnCount                       int
+	LastTurnRole                    ParticipantRole
+	LastTranscriptState             TranscriptState
+	LatestFinalLeadText             string
+	HasMatchingExecutableCapability bool
 }
 
 func NewDecisionInput(state *ConversationState) (DecisionInput, error) {
@@ -34,8 +37,27 @@ func NewDecisionInput(state *ConversationState) (DecisionInput, error) {
 		last := turns[len(turns)-1]
 		input.LastTurnRole = last.Role
 		input.LastTranscriptState = last.Transcript
+		if last.Role == RoleLead && last.Transcript == TranscriptFinal {
+			input.LatestFinalLeadText = boundFinalLeadText(last.Text)
+		}
 	}
 	return input, nil
+}
+
+const maxFinalLeadTextRunes = 1200
+
+func boundFinalLeadText(text string) string {
+	text = strings.TrimSpace(text)
+	var b strings.Builder
+	n := 0
+	for _, r := range text {
+		if n >= maxFinalLeadTextRunes {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 type NextAction string

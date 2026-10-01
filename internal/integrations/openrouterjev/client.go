@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/salesintent"
 )
 
 const (
@@ -91,9 +92,13 @@ type requestInput struct {
 		LeadResponded bool `json:"lead_responded"`
 		OptedOut      bool `json:"opted_out"`
 	} `json:"signals"`
-	TurnCount           int                          `json:"turn_count"`
-	LastTurnRole        conversation.ParticipantRole `json:"last_turn_role,omitempty"`
-	LastTranscriptState conversation.TranscriptState `json:"last_transcript_state,omitempty"`
+	TurnCount                    int                          `json:"turn_count"`
+	LastTurnRole                 conversation.ParticipantRole `json:"last_turn_role,omitempty"`
+	LastTranscriptState          conversation.TranscriptState `json:"last_transcript_state,omitempty"`
+	LatestFinalLeadText          string                       `json:"latest_final_lead_text,omitempty"`
+	LeadIntentClass              string                       `json:"lead_intent_class,omitempty"`
+	ExplicitFutureContact        bool                         `json:"explicit_future_contact"`
+	MatchingExecutableCapability bool                         `json:"matching_executable_capability"`
 }
 
 type decisionsRequest struct {
@@ -130,14 +135,14 @@ var canonicalDecisionChoices = map[string]conversation.Decision{
 
 var canonicalNextActionQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Choose exactly one canonical next action using only these supplied fields: stage, signals.lead_responded, signals.opted_out, turn_count, last_turn_role, and last_transcript_state. signals.lead_responded is cumulative historical state (the lead has responded at least once), not whether the lead responded to the most recent agent turn. For stage=active, last_turn_role and last_transcript_state describe the latest turn and take precedence over that cumulative signal: an agent last turn with turn_count>0 means the agent has just spoken and we are awaiting the next lead response; a lead last turn with final transcript means the lead just responded. Never infer lead intent, interest, readiness to schedule, or a need for clarification because no transcript text or such signal is provided. opted_out=true is a hard invariant: choose end_conversation, regardless of last turn. Choose end_conversation for stage=ended or stage=closing. For stage=opening choose continue_conversation. Use another choice only when its criterion is directly supported by the supplied structured state. Do not generate text, spoken copy, messages, or tool instructions.",
+	Instructions: "Choose exactly one canonical next action using the canonical state and latest bounded FINAL lead turn. lead_intent_class is a typed deterministic classification of latest_final_lead_text and is the primary intent signal. Class mappings: opt_out -> end_conversation; rejection -> end_conversation; human_request -> handoff; acceptance -> propose_scheduling only for explicit meeting request or accepted concrete time; indecision_timing_or_internal_alignment -> follow_up only when explicit_future_contact=true, otherwise continue_conversation; clarification_or_information_request -> ask_question; capability_request -> request_capability only if matching_executable_capability=true, otherwise ask_question; indecision_cost and indecision_security -> continue_conversation; neutral_continue -> continue_conversation. Do not infer meeting readiness from general interest. Never produce spoken copy or tool instructions. opted_out=true is a hard invariant. Choose end_conversation for stage=ended or stage=closing. For stage=opening choose continue_conversation.",
 	Criteria: map[string]string{
-		"continue_conversation":                 "For stage=opening, begin the conversation flow. For stage=active with last_turn_role=lead and last_transcript_state=final and signals.opted_out=false, continue the active flow because the lead just responded. Use the latest turn, not cumulative signals.lead_responded, to determine whose turn it is; do not infer clarification or scheduling.",
-		"ask_question":                          "Ask a clarifying question only when an explicit supplied canonical signal establishes that clarification is needed; do not infer this from lead_responded or absent transcript text.",
-		"propose_scheduling":                    "Propose scheduling only when an explicit supplied canonical signal establishes readiness; this DecisionInput has no scheduling-readiness field, so do not infer it.",
-		"propose_scheduling_interest_confirmed": "Propose scheduling only when an explicit supplied canonical signal establishes confirmed interest and readiness; do not infer either from lead_responded.",
+		"continue_conversation":                 "For stage=opening, begin the conversation flow. For stage=active with last_turn_role=lead and last_transcript_state=final and signals.opted_out=false, continue unless latest_final_lead_text explicitly establishes another intent. Use the latest turn, not cumulative signals.lead_responded, to determine whose turn it is.",
+		"ask_question":                          "Use when the latest final lead turn explicitly asks for clarification/information or requests an unavailable capability; do not use merely because the text is missing.",
+		"propose_scheduling":                    "Use only for an explicit meeting request or acceptance of a concrete proposed time in latest_final_lead_text. General interest is insufficient.",
+		"propose_scheduling_interest_confirmed": "Use for explicit interest without a concrete time only when the next step is an offer to schedule; do not infer readiness from vague positive sentiment.",
 		"request_capability":                    "Request a capability only when an explicit supplied canonical signal establishes that a capability is required.",
-		"follow_up":                             "For stage=active with last_turn_role=agent and turn_count>0 and signals.opted_out=false, select follow-up because the agent just spoke and the next lead response is awaited, regardless of signals.lead_responded (which is cumulative historical state and may be true). The latest turn takes precedence over the cumulative signal.",
+		"follow_up":                             "Use when the latest final lead turn explicitly commits to future contact or internal alignment at a stated future time. Do not use when no future contact was requested.",
 		"end_conversation":                      "Select end_conversation when signals.opted_out=true (hard invariant), or when stage=closing or stage=ended. Do not end an opening or active conversation solely because transcript text, intent, or completion details are absent.",
 		"handoff":                               "Hand off only when an explicit supplied canonical signal establishes that human assistance is required.",
 	},
@@ -166,6 +171,12 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	mapped.TurnCount = input.TurnCount
 	mapped.LastTurnRole = input.LastTurnRole
 	mapped.LastTranscriptState = input.LastTranscriptState
+	mapped.LatestFinalLeadText = salesintent.SanitizeLeadText(input.LatestFinalLeadText)
+	if mapped.LatestFinalLeadText != "" {
+		mapped.LeadIntentClass = string(salesintent.Classify(mapped.LatestFinalLeadText))
+		mapped.ExplicitFutureContact = salesintent.HasExplicitFutureContact(mapped.LatestFinalLeadText)
+		mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
+	}
 	payload := decisionsRequest{
 		Model:     c.config.Model,
 		State:     mapped,
@@ -226,6 +237,15 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	validated, err := conversation.NewDecision(decision.NextAction, decision.Reason)
 	if err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
+	}
+	if mapped.LatestFinalLeadText != "" {
+		expected, mapErr := salesintent.Decide(salesintent.Class(mapped.LeadIntentClass), mapped.ExplicitFutureContact, mapped.MatchingExecutableCapability)
+		if mapped.Signals.OptedOut {
+			expected, mapErr = salesintent.Decide(salesintent.OptOut, false, false)
+		}
+		if mapErr != nil || validated != expected.Decision {
+			return conversation.Decision{}, ErrInvalidProviderResponse
+		}
 	}
 	return validated, nil
 }

@@ -24,7 +24,7 @@ func providerBody(choice string) string {
 	return string(b)
 }
 func activeInput() conversation.DecisionInput {
-	return conversation.DecisionInput{Stage: conversation.StageActive, Signals: conversation.Signals{LeadResponded: true}, TurnCount: 3, LastTurnRole: conversation.RoleLead, LastTranscriptState: conversation.TranscriptFinal}
+	return conversation.DecisionInput{Stage: conversation.StageActive, Signals: conversation.Signals{LeadResponded: true}, TurnCount: 3, LastTurnRole: conversation.RoleLead, LastTranscriptState: conversation.TranscriptFinal, LatestFinalLeadText: "Quero marcar. Meu email é lead@example.com, telefone +55 67 98134-0687"}
 }
 
 func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
@@ -56,23 +56,23 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 			!strings.Contains(question.Criteria["continue_conversation"], "active") ||
 			!strings.Contains(question.Criteria["continue_conversation"], "last_turn_role=lead") ||
 			!strings.Contains(question.Criteria["continue_conversation"], "last_transcript_state=final") ||
-			!strings.Contains(question.Criteria["follow_up"], "stage=active") ||
-			!strings.Contains(question.Criteria["follow_up"], "last_turn_role=agent") ||
-			!strings.Contains(question.Criteria["follow_up"], "turn_count>0") ||
-			!strings.Contains(question.Criteria["follow_up"], "regardless of signals.lead_responded") ||
+			!strings.Contains(question.Criteria["follow_up"], "explicitly commits") ||
+			!strings.Contains(question.Criteria["propose_scheduling"], "explicit meeting request") ||
+			!strings.Contains(question.Instructions, "indecision_security") ||
+			!strings.Contains(question.Instructions, "latest_final_lead_text") ||
 			!strings.Contains(question.Criteria["end_conversation"], "ended") ||
 			!strings.Contains(question.Criteria["end_conversation"], "opted_out") {
 			t.Errorf("Jev criteria do not prioritize latest turn over cumulative response signal: %+v", question)
 		}
-		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal {
+		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal || !strings.Contains(req.State.LatestFinalLeadText, "Quero marcar") || strings.Contains(req.State.LatestFinalLeadText, "lead@example.com") || strings.Contains(req.State.LatestFinalLeadText, "98134-0687") || req.State.LeadIntentClass != "acceptance" || req.State.ExplicitFutureContact {
 			t.Errorf("serialized state = %+v", req.State)
 		}
 		encoded, _ := json.Marshal(req.State)
-		if strings.Contains(string(encoded), "tenho interesse") || strings.Contains(string(encoded), `"text"`) || strings.Contains(string(encoded), "transcript text") {
+		if strings.Contains(string(encoded), `"text"`) || strings.Contains(string(encoded), "lead@example.com") || strings.Contains(string(encoded), "98134-0687") {
 			t.Errorf("request included transcript content: %s", encoded)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, providerBody("ask_question"))
+		io.WriteString(w, providerBody("propose_scheduling"))
 	}))
 	defer server.Close()
 	client, err := New(testConfig(server.URL))
@@ -83,7 +83,7 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, _ := conversation.NewDecision(conversation.ActionAskQuestion, conversation.ReasonNeedsClarification)
+	want, _ := conversation.NewDecision(conversation.ActionProposeScheduling, conversation.ReasonReadyToSchedule)
 	if got != want {
 		t.Fatalf("decision = %+v, want %+v", got, want)
 	}
@@ -111,7 +111,9 @@ func TestDecideMapsJevChoiceToCanonicalDecision(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := client.Decide(context.Background(), activeInput())
+			input := activeInput()
+			input.LatestFinalLeadText = ""
+			got, err := client.Decide(context.Background(), input)
 			if err != nil {
 				t.Fatal(err)
 			}

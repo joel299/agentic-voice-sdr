@@ -3,8 +3,11 @@ package voicecall
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+var ErrCallNotFound = errors.New("call not found")
 
 type Call struct {
 	ID, Destination, Status, Provider string
@@ -28,5 +31,5 @@ type CallRepository interface {
 
 type TranscriptRepository interface {
 	AppendFinalTurn(context.Context, string, string, string, string, string) (Turn, bool, error)
-	ListFinalTurns(context.Context, string) ([]Turn, error)
+	ListFinalTurns(context.Context, string, int) ([]Turn, error)
 }

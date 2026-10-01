@@ -2,6 +2,7 @@ package voicecall_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,7 +131,11 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 			t.Fatalf("concurrent append: %v", e)
 		}
 	}
-	turns, err := repo.ListFinalTurns(ctx, call.ID)
+	limited, err := repo.ListFinalTurns(ctx, call.ID, 2)
+	if err != nil || len(limited) != 2 || limited[0].Sequence != 1 || limited[1].Sequence != 2 {
+		t.Fatalf("bounded ordered list=%+v err=%v", limited, err)
+	}
+	turns, err := repo.ListFinalTurns(ctx, call.ID, 100)
 	if err != nil {
 		t.Fatal("list turns")
 	}
@@ -142,6 +147,11 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 			t.Fatalf("turn sequence at %d=%d", i, turn.Sequence)
 		}
 	}
+	canceledCtx, cancelList := context.WithCancel(ctx)
+	cancelList()
+	if _, err := repo.ListFinalTurns(canceledCtx, call.ID, 10); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled final-turn query error=%v", err)
+	}
 	if err := repo.UpdateLifecycle(ctx, call.ID, "completed", "provider-1", "completed"); err != nil {
 		t.Fatal("terminal update")
 	}
@@ -152,7 +162,7 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if stored.Status != "completed" || stored.ProviderCallID != "provider-1" || stored.ConnectedAt == nil || stored.EndedAt == nil || stored.TerminalReason != "completed" {
 		t.Fatalf("stored lifecycle incomplete: %#v", stored)
 	}
-	retained, err := repo.ListFinalTurns(ctx, call.ID)
+	retained, err := repo.ListFinalTurns(ctx, call.ID, 100)
 	if err != nil || len(retained) != len(turns) {
 		t.Fatalf("terminal lifecycle update changed finalized turns: %d, %v", len(retained), err)
 	}

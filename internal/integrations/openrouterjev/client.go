@@ -136,19 +136,19 @@ var intentChoices = map[string]salesintent.Class{
 
 var semanticIntentQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Classify the semantic intent of latest_final_lead_text using the full bounded meaning and conversation context. Return exactly one intent enum. Do not classify by literal keyword rules, do not generate spoken copy or tool instructions. Distinguish an explicit acceptance/meeting readiness from general interest. Use internal_alignment when the lead needs internal discussion or validation but has not explicitly asked to be contacted later. Use explicit_future_follow_up only when the lead clearly asks for future contact. Use opt_out only when the lead clearly asks to stop contact; human_request only for an explicit request to speak with a person; capability_request only for an explicit product capability question. If meaning is unclear, use clarification_or_information_request or neutral_continue as appropriate. The opted_out context signal is a hard safety invariant.",
+	Instructions: "Classify the latest final lead text by semantic intent in context; choose exactly one enum, not by keywords. Do not write spoken copy or select tools. Acceptance requires agreement to a concrete next step or scheduling; interest alone is insufficient. internal_alignment means internal review without a request for later contact; explicit_future_follow_up requires a request for later contact. rejection declines the offer but allows contact; opt_out asks to stop contact. human_request asks for a person; capability_request asks whether a specific function exists. Respect opted_out as a hard override. If unclear, choose clarification_or_information_request or neutral_continue.",
 	Criteria: map[string]string{
-		"acceptance":                           "The lead semantically agrees to a proposed next step, accepts a concrete suggested time, or explicitly asks to schedule. Mere interest is not acceptance.",
-		"indecision_cost":                      "The lead raises price, budget, or cost as an objection without rejecting contact.",
-		"indecision_security":                  "The lead raises privacy, security, compliance, reliability, or trust concerns without rejecting contact.",
-		"internal_alignment":                   "The lead needs more time, internal discussion, or alignment before advancing and has not explicitly asked for later contact.",
-		"explicit_future_follow_up":            "The lead explicitly asks to be contacted again at a future time or after a future event, even if no exact date is given.",
-		"rejection":                            "The lead clearly declines the offer or says the product/project is not wanted, without asking to stop all contact.",
-		"opt_out":                              "The lead explicitly asks to stop, unsubscribe, or not be contacted again.",
-		"human_request":                        "The lead explicitly asks for a human, person, representative, or transfer.",
-		"clarification_or_information_request": "The lead asks a question or requests explanation/information before deciding.",
-		"capability_request":                   "The lead asks whether a specific capability, integration, or function is available.",
-		"neutral_continue":                     "The lead acknowledges, gives neutral conversational input, or meaning is insufficient for a more specific class.",
+		"acceptance":                           "Accepts a concrete suggested time or next step, or asks to schedule; interest alone is insufficient.",
+		"indecision_cost":                      "Raises a price, budget, or affordability concern.",
+		"indecision_security":                  "Raises a security, privacy, compliance, or trust concern.",
+		"internal_alignment":                   "Needs internal discussion or approval, without asking for later contact.",
+		"explicit_future_follow_up":            "Explicitly asks for later contact, tied to a date/event or otherwise.",
+		"rejection":                            "Declines the offer but does not ask to stop contact.",
+		"opt_out":                              "Asks to stop contact, unsubscribe, or receive no further messages.",
+		"human_request":                        "Asks for a human representative, person, or transfer.",
+		"clarification_or_information_request": "Asks for explanation or information before deciding.",
+		"capability_request":                   "Asks whether a specific feature or integration exists.",
+		"neutral_continue":                     "Neutral acknowledgment or insufficient meaning for a specific intent.",
 	},
 }
 

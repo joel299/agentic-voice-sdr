@@ -55,7 +55,11 @@ func TestDecideSendsMinimalInputToOfficialDecisionsAPI(t *testing.T) {
 		if !strings.Contains(question.Instructions, "semantic intent") ||
 			!strings.Contains(question.Criteria["indecision_security"], "security") ||
 			!strings.Contains(question.Criteria["acceptance"], "concrete suggested time") ||
-			!strings.Contains(question.Criteria["opt_out"], "stop") {
+			!strings.Contains(question.Criteria["internal_alignment"], "without asking for later contact") ||
+			!strings.Contains(question.Criteria["explicit_future_follow_up"], "asks for later contact") ||
+			!strings.Contains(question.Criteria["rejection"], "does not ask to stop contact") ||
+			!strings.Contains(question.Criteria["opt_out"], "stop contact") ||
+			!strings.Contains(question.Criteria["human_request"], "human representative") {
 			t.Errorf("JEV semantic intent contract is incomplete: %+v", question)
 		}
 		if req.State.Stage != conversation.StageActive || !req.State.Signals.LeadResponded || req.State.Signals.OptedOut || req.State.TurnCount != 3 || req.State.LastTurnRole != conversation.RoleLead || req.State.LastTranscriptState != conversation.TranscriptFinal || !strings.Contains(req.State.LatestFinalLeadText, "Quero marcar") || strings.Contains(req.State.LatestFinalLeadText, "lead@example.com") || strings.Contains(req.State.LatestFinalLeadText, "98134-0687") || req.State.MatchingExecutableCapability {

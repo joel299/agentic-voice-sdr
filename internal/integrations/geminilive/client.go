@@ -493,6 +493,7 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 			if c.OutputTranscription.Text != "" {
 				events = append(events, Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete})
 			}
+			audioEvents := make([]Event, 0, len(c.ModelTurn.Parts))
 			for _, part := range c.ModelTurn.Parts {
 				if part.InlineData.Data == "" {
 					continue
@@ -501,10 +502,16 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 				if err != nil {
 					continue
 				}
-				if len(events) > 0 && c.TurnComplete {
-					events[0].TurnComplete = false
+				audioEvents = append(audioEvents, Event{Kind: EventAudio, Audio: b, AudioMimeType: part.InlineData.MimeType})
+			}
+			if len(audioEvents) > 0 {
+				if c.TurnComplete {
+					if len(events) > 0 {
+						events[0].TurnComplete = false
+					}
+					audioEvents[len(audioEvents)-1].TurnComplete = true
 				}
-				events = append(events, Event{Kind: EventAudio, Audio: b, AudioMimeType: part.InlineData.MimeType, TurnComplete: c.TurnComplete})
+				events = append(events, audioEvents...)
 			}
 			if len(events) > 0 {
 				return events

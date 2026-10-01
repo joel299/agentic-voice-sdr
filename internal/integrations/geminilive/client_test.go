@@ -293,18 +293,21 @@ func TestOutputTranscriptionCarriesCompletionAndNoSyntheticReceiveIdentity(t *te
 }
 
 func TestCombinedOutputTranscriptionAndAudioAreBothDelivered(t *testing.T) {
-	serverContent := json.RawMessage(`{"outputTranscription":{"text":"resposta final"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]},"turnComplete":true}`)
+	serverContent := json.RawMessage(`{"outputTranscription":{"text":"resposta final"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}},{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"BAUG"}}]},"turnComplete":true}`)
 	events := parseEvents(map[string]json.RawMessage{
 		"serverContent": serverContent,
 	})
-	if len(events) != 2 {
-		t.Fatalf("events = %+v, want transcription and audio", events)
+	if len(events) != 3 {
+		t.Fatalf("events = %+v, want transcription and both audio parts", events)
 	}
 	if events[0].Kind != EventOutputTranscription || events[0].Text != "resposta final" || events[0].TurnComplete {
 		t.Fatalf("transcription event = %+v", events[0])
 	}
-	if events[1].Kind != EventAudio || len(events[1].Audio) != 3 || events[1].AudioMimeType != "audio/pcm;rate=24000" || !events[1].TurnComplete {
-		t.Fatalf("audio event = %+v", events[1])
+	if events[1].Kind != EventAudio || len(events[1].Audio) != 3 || events[1].AudioMimeType != "audio/pcm;rate=24000" || events[1].TurnComplete {
+		t.Fatalf("first audio event = %+v", events[1])
+	}
+	if events[2].Kind != EventAudio || len(events[2].Audio) != 3 || events[2].AudioMimeType != "audio/pcm;rate=24000" || !events[2].TurnComplete {
+		t.Fatalf("last audio event = %+v", events[2])
 	}
 }
 

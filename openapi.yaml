@@ -57,7 +57,7 @@ paths:
         - BearerAuth: []
       parameters:
         - { name: call_id, in: path, required: true, schema: { type: string } }
-        - { name: limit, in: query, required: false, description: Maximum returned final turns; defaults to 100 and is capped at 500., schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { name: limit, in: query, required: false, description: Maximum returned final turns. Defaults to 100. Values above 500 are capped at 500., schema: { type: integer, minimum: 1, default: 100 } }
       responses:
         '200': { description: Call status and bounded final transcript; an existing call with no final turns returns an empty turns array, content: { application/json: { schema: { $ref: '#/components/schemas/CallTranscriptResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }

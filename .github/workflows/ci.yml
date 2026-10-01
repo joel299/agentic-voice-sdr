@@ -101,7 +101,7 @@ jobs:
         id: go
         shell: bash
         run: |
-          if find . -type f -name '*.go' -not -path './.git/*' | grep -q .; then
+          if find . -type f -name '*.go' -not -path './.git/*' -print -quit | grep -q .; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"

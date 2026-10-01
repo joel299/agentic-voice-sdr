@@ -144,7 +144,7 @@ func (l *splitLease) Fail(context.Context, error) error {
 
 func TestSplitBridgeConnectsRealSessionBoundaries(t *testing.T) {
 	input := &splitInput{events: make(chan geminilive.TranscriptEvent, 2), closed: make(chan struct{})}
-	response := &splitResponse{events: make(chan geminilive.Event, 3), closed: make(chan struct{})}
+	response := &splitResponse{events: make(chan geminilive.Event, 4), closed: make(chan struct{})}
 	audio := &splitAudio{frames: []audiosocket.Frame{{Type: audiosocket.TypeSlin16, Payload: []byte{1, 2, 3}}}, closed: make(chan struct{})}
 	handler := &splitTranscriptHandler{finals: make(chan string, 1)}
 	lifecycle := &splitLifecycle{authorized: true}
@@ -155,6 +155,7 @@ func TestSplitBridgeConnectsRealSessionBoundaries(t *testing.T) {
 		done <- NewSplit(audio, audio, input, response, handler, nil, lifecycle).Run(context.Background())
 	}()
 	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{9, 8}, AudioMimeType: "audio/pcm;rate=24000"}
+	response.events <- geminilive.Event{Kind: geminilive.EventGenerationComplete}
 	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
 	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
 	if err := <-done; err != nil {
@@ -191,5 +192,22 @@ func TestSplitBridgeNeverAcceptsResponsePCM(t *testing.T) {
 	}
 	if len(input.sent) != 0 {
 		t.Fatal("unexpected input send")
+	}
+}
+
+func TestSplitBridgeFailsActiveResponseOnRemoteCloseBeforeTurnComplete(t *testing.T) {
+	input := &splitInput{events: make(chan geminilive.TranscriptEvent, 1), closed: make(chan struct{})}
+	response := &splitResponse{events: make(chan geminilive.Event, 3), closed: make(chan struct{})}
+	audio := &splitAudio{closed: make(chan struct{})}
+	lifecycle := &splitLifecycle{authorized: true}
+	response.events <- geminilive.Event{Kind: geminilive.EventOutputTranscription, Text: "partial"}
+	response.events <- geminilive.Event{Kind: geminilive.EventGenerationComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventClosed, CloseStatusClass: geminilive.CloseStatusNormal}
+	err := NewSplit(audio, audio, input, response, &splitTranscriptHandler{finals: make(chan string, 1)}, nil, lifecycle).Run(context.Background())
+	if !errors.Is(err, ErrResponseTurnIncomplete) {
+		t.Fatalf("Run error=%v, want ErrResponseTurnIncomplete", err)
+	}
+	if lifecycle.fail != 1 || lifecycle.complete != 0 {
+		t.Fatalf("response lifecycle complete=%d fail=%d", lifecycle.complete, lifecycle.fail)
 	}
 }

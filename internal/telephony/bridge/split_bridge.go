@@ -211,6 +211,16 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 		case geminilive.EventAPIError:
 			failSession(ErrProviderAPI)
 		case geminilive.EventClosed:
+			if disposition == providerTurnOwned {
+				if b.events != nil {
+					if err := b.events(ctx, event); err != nil {
+						fail(ErrResponseTurnIncomplete)
+						return err
+					}
+				}
+				fail(ErrResponseTurnIncomplete)
+				return fmt.Errorf("%w (close status: %s)", ErrResponseTurnIncomplete, safeCloseStatus(event.CloseStatusClass))
+			}
 			failSession(ErrSessionClosed)
 		}
 		if b.events != nil {
@@ -227,5 +237,14 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 		if event.Kind == geminilive.EventClosed {
 			return nil
 		}
+	}
+}
+
+func safeCloseStatus(status geminilive.CloseStatusClass) geminilive.CloseStatusClass {
+	switch status {
+	case geminilive.CloseStatusNormal, geminilive.CloseStatusGoingAway, geminilive.CloseStatusAbnormal, geminilive.CloseStatusOther:
+		return status
+	default:
+		return geminilive.CloseStatusUnknown
 	}
 }

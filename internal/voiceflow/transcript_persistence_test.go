@@ -266,3 +266,32 @@ func TestAgentOutputTranscriptionAggregatesOnlyAuthorizedCompletedResponse(t *te
 		t.Fatalf("failed write changed existing turns: %+v", repo.turns)
 	}
 }
+
+func TestAgentTranscriptFinalizesOnlyOnTurnComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []geminilive.Event
+		want   int
+	}{
+		{name: "generation then turn complete", events: []geminilive.Event{{Kind: geminilive.EventOutputTranscription, Text: "reply"}, {Kind: geminilive.EventAudio}, {Kind: geminilive.EventGenerationComplete}, {Kind: geminilive.EventTurnComplete}}, want: 1},
+		{name: "generation then close", events: []geminilive.Event{{Kind: geminilive.EventOutputTranscription, Text: "partial"}, {Kind: geminilive.EventAudio}, {Kind: geminilive.EventGenerationComplete}, {Kind: geminilive.EventGoAway}, {Kind: geminilive.EventClosed}}, want: 0},
+		{name: "turn complete without generation signal", events: []geminilive.Event{{Kind: geminilive.EventOutputTranscription, Text: "reply"}, {Kind: geminilive.EventAudio}, {Kind: geminilive.EventTurnComplete}}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &transcriptRepoFake{}
+			lifecycle := &transcriptTestLifecycle{active: true, turnID: "lead-000001"}
+			handler := FinalAgentTranscriptHandler("call_X", repo, lifecycle, nil)
+			for _, event := range tc.events {
+				if err := handler(context.Background(), event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(repo.turns) != tc.want {
+				t.Fatalf("persisted %d turns, want %d: %+v", len(repo.turns), tc.want, repo.turns)
+			}
+			if tc.want == 1 && repo.turns[0].Text != "reply" {
+				t.Fatalf("persisted partial or incorrect text: %+v", repo.turns)
+			}
+		})
+	}
+}

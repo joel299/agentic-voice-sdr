@@ -159,12 +159,17 @@ func (s *controlledResponder) Receive(ctx context.Context) (Event, error) {
 		event, err := s.provider.Receive(ctx)
 		if err != nil {
 			if errors.Is(err, ErrRemoteClosed) {
-				return Event{Kind: EventClosed}, nil
+				var providerErr *Error
+				closeClass := CloseStatusUnknown
+				if errors.As(err, &providerErr) {
+					closeClass = providerErr.CloseStatusClass
+				}
+				return Event{Kind: EventClosed, CloseStatusClass: closeClass}, nil
 			}
 			return Event{}, err
 		}
 		switch event.Kind {
-		case EventAudio, EventOutputTranscription, EventTurnComplete, EventInterrupted, EventAPIError, EventClosed:
+		case EventAudio, EventOutputTranscription, EventGenerationComplete, EventTurnComplete, EventGoAway, EventInterrupted, EventAPIError, EventClosed:
 			return event, nil
 		}
 	}

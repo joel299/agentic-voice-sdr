@@ -83,8 +83,9 @@ const (
 )
 
 type Error struct {
-	Kind ErrorKind
-	Err  error
+	Kind             ErrorKind
+	CloseStatusClass CloseStatusClass
+	Err              error
 }
 
 func (e *Error) Error() string {
@@ -122,6 +123,7 @@ type Event struct {
 	EventID              string
 	TurnID               string
 	TurnComplete         bool
+	CloseStatusClass     CloseStatusClass
 }
 
 type InputTranscriptState string
@@ -139,12 +141,24 @@ const (
 	EventAudio               EventKind = "audio"
 	EventInputTranscription  EventKind = "input_transcription"
 	EventOutputTranscription EventKind = "output_transcription"
+	EventGenerationComplete  EventKind = "generation_complete"
 	EventTurnComplete        EventKind = "turn_complete"
+	EventGoAway              EventKind = "go_away"
 	EventInterrupted         EventKind = "interrupted"
 	EventToolCall            EventKind = "tool_call"
 	EventAPIError            EventKind = "api_error"
 	EventUnknown             EventKind = "unknown"
 	EventClosed              EventKind = "closed"
+)
+
+type CloseStatusClass string
+
+const (
+	CloseStatusUnknown   CloseStatusClass = "unknown"
+	CloseStatusNormal    CloseStatusClass = "normal"
+	CloseStatusGoingAway CloseStatusClass = "going_away"
+	CloseStatusAbnormal  CloseStatusClass = "abnormal"
+	CloseStatusOther     CloseStatusClass = "other"
 )
 
 type ToolCall struct {
@@ -364,8 +378,8 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 		if ctx.Err() != nil {
 			return nil, wrap(ErrorCanceled, ctx.Err())
 		}
-		if websocket.CloseStatus(err) != -1 {
-			return nil, wrap(ErrorRemoteClose, ErrRemoteClosed)
+		if status := websocket.CloseStatus(err); status != -1 {
+			return nil, &Error{Kind: ErrorRemoteClose, CloseStatusClass: classifyCloseStatus(status), Err: ErrRemoteClosed}
 		}
 		return nil, wrap(ErrorReceive, errors.New("WebSocket read failed"))
 	}
@@ -377,6 +391,19 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 		return nil, wrap(ErrorProtocol, errors.New("malformed server JSON"))
 	}
 	return msg, nil
+}
+
+func classifyCloseStatus(status websocket.StatusCode) CloseStatusClass {
+	switch status {
+	case websocket.StatusNormalClosure:
+		return CloseStatusNormal
+	case websocket.StatusGoingAway:
+		return CloseStatusGoingAway
+	case websocket.StatusAbnormalClosure:
+		return CloseStatusAbnormal
+	default:
+		return CloseStatusOther
+	}
 }
 
 func (s *providerSession) Receive(ctx context.Context) (Event, error) {
@@ -442,6 +469,9 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 	if _, ok := msg["setupComplete"]; ok {
 		return []Event{{Kind: EventSetupComplete}}
 	}
+	if _, ok := msg["goAway"]; ok {
+		return []Event{{Kind: EventGoAway}}
+	}
 	if raw, ok := msg["toolCall"]; ok {
 		var t struct {
 			FunctionCalls []ToolCall `json:"functionCalls"`
@@ -473,8 +503,9 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 			OutputTranscription struct {
 				Text string `json:"text"`
 			} `json:"outputTranscription"`
-			TurnComplete bool `json:"turnComplete"`
-			Interrupted  bool `json:"interrupted"`
+			TurnComplete       bool `json:"turnComplete"`
+			GenerationComplete bool `json:"generationComplete"`
+			Interrupted        bool `json:"interrupted"`
 		}
 		if json.Unmarshal(raw, &c) == nil {
 			if c.Interrupted {
@@ -491,7 +522,7 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 			}
 			events := make([]Event, 0, 2)
 			if c.OutputTranscription.Text != "" {
-				events = append(events, Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete})
+				events = append(events, Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text})
 			}
 			audioEvents := make([]Event, 0, len(c.ModelTurn.Parts))
 			for _, part := range c.ModelTurn.Parts {
@@ -505,19 +536,16 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 				audioEvents = append(audioEvents, Event{Kind: EventAudio, Audio: b, AudioMimeType: part.InlineData.MimeType})
 			}
 			if len(audioEvents) > 0 {
-				if c.TurnComplete {
-					if len(events) > 0 {
-						events[0].TurnComplete = false
-					}
-					audioEvents[len(audioEvents)-1].TurnComplete = true
-				}
 				events = append(events, audioEvents...)
+			}
+			if c.GenerationComplete {
+				events = append(events, Event{Kind: EventGenerationComplete})
+			}
+			if c.TurnComplete {
+				events = append(events, Event{Kind: EventTurnComplete})
 			}
 			if len(events) > 0 {
 				return events
-			}
-			if c.TurnComplete {
-				return []Event{{Kind: EventTurnComplete}}
 			}
 		}
 	}

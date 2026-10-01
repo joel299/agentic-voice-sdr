@@ -13,12 +13,67 @@ info:
 
     Segurança: endpoints administrativos exigem autenticação Bearer. Senhas SIP e chaves de provedores nunca são retornadas. O perfil telefônico Fale Paco já vem preenchido com os valores conhecidos; o único dado que o owner informa é a senha SIP. Host, porta, transporte, usuário, realm, registrar, proxy, caller ID, domínio From e exigência de registro são controlados pelo servidor para evitar configuração incorreta. Use GET /v1/config/sip-trunk para consultar o perfil seguro, PUT /v1/config/sip-trunk para salvar a senha e POST /v1/config/sip-trunk/validate para validar o registro sem fazer chamada.
 
+    Primeiro faça login. O sistema fornecerá um token temporário. Use esse token no botão Authorize para acessar as configurações e testes administrativos. Para entrar, execute POST /v1/auth/login com o usuário owner e sua senha; copie access_token, clique em Authorize no Scalar e cole o token. Ao terminar, execute POST /v1/auth/logout. Reiniciar a API invalida as sessões interativas.
+
     Perfil Fale Paco: host e registrar 98034.falepaco.com.br, porta 5060, transporte TCP, usuário e realm 100 e 98034.falepaco.com.br, caller ID 551155200455, registro obrigatório. A senha é write-only e fica apenas no arquivo local protegido do runtime Baresip. A validação não envia INVITE nem retorna dados de autenticação SIP.
 
     Telefonia usa Baresip 1.1.0, ctrl_tcp e o adaptador de mídia local; não usa Asterisk, FreeSWITCH ou AudioSocket. WhatsApp e agendamento permanecem opcionais e podem ser disponibilizados futuramente. A documentação interativa Scalar está em /docs e o contrato OpenAPI completo em /openapi.yaml.
 servers:
   - url: /
+tags:
+  - name: Authentication
+    description: Login do owner e gerenciamento da sessão administrativa.
 paths:
+  /v1/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: ownerLogin
+      summary: Login
+      description: "Use este endpoint para entrar no console administrativo. Após o login, copie o access_token retornado e informe-o no botão Authorize do Scalar."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OwnerLoginRequest' }
+            example: { username: owner, password: YOUR_PASSWORD }
+      responses:
+        '200':
+          description: Token temporário de sessão; ele não é armazenado em texto puro no servidor.
+          headers: { Cache-Control: { schema: { type: string }, example: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OwnerLoginResponse' }
+              example: { access_token: example-temporary-token, token_type: Bearer, expires_in: 28800, expires_at: '2026-10-02T03:00:00Z' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { description: Username ou senha inválidos, content: { application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: invalid credentials } } } }
+        '429': { description: Muitas tentativas de login; aguarde até um minuto antes de tentar novamente., headers: { Retry-After: { schema: { type: integer }, example: 60 } }, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /v1/auth/session:
+    get:
+      tags: [Authentication]
+      operationId: getOwnerSession
+      summary: Current Session
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200': { description: Sessão autenticada sem expor credenciais, content: { application/json: { schema: { $ref: '#/components/schemas/OwnerSession' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: ownerLogout
+      summary: Logout
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: Sessão interativa revogada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logged_out]
+                properties: { logged_out: { type: boolean } }
+              example: { logged_out: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/calls:
     post:
       operationId: createOutboundCall
@@ -360,6 +415,29 @@ components:
     ProviderFailure: { description: Safe provider failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     RuntimeFailure: { description: Safe telephony runtime failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
+    OwnerLoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string, example: owner }
+        password: { type: string, format: password, writeOnly: true, example: YOUR_PASSWORD }
+    OwnerLoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in, expires_at]
+      properties:
+        access_token: { type: string, description: Temporary opaque bearer token; copy to Scalar Authorize., example: example-temporary-token }
+        token_type: { type: string, enum: [Bearer], example: Bearer }
+        expires_in: { type: integer, example: 28800 }
+        expires_at: { type: string, format: date-time, example: '2026-10-02T03:00:00Z' }
+    OwnerSession:
+      type: object
+      required: [authenticated, username, session_type]
+      properties:
+        authenticated: { type: boolean, example: true }
+        username: { type: string, example: owner }
+        session_type: { type: string, enum: [interactive, legacy], example: interactive }
+        expires_at: { type: string, format: date-time }
     Error: { type: object, required: [error], properties: { error: { type: string, description: Safe summary; raw provider messages are omitted. }, provider_status_class: { type: string, description: Optional sanitized provider operation/transport category. } } }
     CallCreateRequest:
       type: object

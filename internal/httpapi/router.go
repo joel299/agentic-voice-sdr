@@ -44,11 +44,12 @@ func NewRouterWithConfigAndCalibration(cfg config.Config, calls OutboundCallServ
 	if cfg.WhatsAppConfigPath != "" {
 		store = &whatsapp.FileConfigStore{Path: cfg.WhatsAppConfigPath}
 	}
-	var authorizer OwnerAuthorizer
+	var legacy OwnerAuthorizer
 	if cfg.OwnerAPIToken != "" {
-		authorizer, _ = NewStaticBearerAuthorizer(cfg.OwnerAPIToken)
+		legacy, _ = NewStaticBearerAuthorizer(cfg.OwnerAPIToken)
 	}
-	return NewRouterWithCalibration(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, transcripts, authorizer, calibration)
+	auth := NewOwnerAuthService(cfg.OwnerLoginUsername, cfg.OwnerLoginPasswordHash, cfg.OwnerSessionTTL, legacy)
+	return newRouterWithCalibration(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), calls, transcripts, auth, calibration)
 }
 
 func configuredSIPConfigurator(_ config.Config) SIPConfigurator {
@@ -75,8 +76,14 @@ func NewRouterWithServicesCallsAndTranscript(whatsappService *whatsapp.Service, 
 }
 
 func NewRouterWithCalibration(whatsappService *whatsapp.Service, _ SIPConfigurator, calls OutboundCallService, transcripts CallTranscriptReader, authorizer OwnerAuthorizer, calibration CalibrationServices) http.Handler {
+	auth := NewOwnerAuthService("owner", "", 0, authorizer)
+	return newRouterWithCalibration(whatsappService, calls, transcripts, auth, calibration)
+}
+
+func newRouterWithCalibration(whatsappService *whatsapp.Service, calls OutboundCallService, transcripts CallTranscriptReader, auth *OwnerAuthService, calibration CalibrationServices) http.Handler {
 	a := &configAPI{whatsapp: whatsappService}
 	router := chi.NewRouter()
+	registerOwnerAuthRoutes(router, auth)
 	router.Get("/healthz", health)
 	router.Get("/readyz", ready)
 	router.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -101,8 +108,8 @@ func NewRouterWithCalibration(whatsappService *whatsapp.Service, _ SIPConfigurat
 	router.Get("/v1/config/whatsapp/instances", a.getWhatsAppInstances)
 	router.Put("/v1/config/whatsapp/instance", a.putWhatsAppInstance)
 	router.Post("/v1/config/whatsapp/test", a.testWhatsApp)
-	registerCallRoutes(router, calls, transcripts, authorizer)
-	registerCalibrationRoutes(router, authorizer, calibration)
+	registerCallRoutes(router, calls, transcripts, auth)
+	registerCalibrationRoutes(router, auth, calibration)
 	return router
 }
 func health(w http.ResponseWriter, _ *http.Request) { writeStatus(w, http.StatusOK, "ok") }

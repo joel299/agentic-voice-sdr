@@ -5,12 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
-	"github.com/joel299/agentic-voice-sdr/internal/telephony/sip"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
 
@@ -49,24 +47,11 @@ func NewRouterWithConfigCallAndTranscriptServices(cfg config.Config, calls Outbo
 	return NewRouterWithServicesCallsAndTranscript(whatsapp.NewServiceWithStore(whatsapp.NewRegistry(nil), nil, store), configuredSIPConfigurator(cfg), calls, transcripts, authorizer)
 }
 
-func configuredSIPConfigurator(cfg config.Config) SIPConfigurator {
-	if cfg.SIPConfigDir == "" {
-		return unavailableSIPConfigurator{}
-	}
-	info, err := os.Stat(cfg.SIPConfigDir)
-	if err != nil || !info.IsDir() {
-		return unavailableSIPConfigurator{}
-	}
-	reloader := sip.NewRealAsteriskReloader(cfg.SIPConfigDir, nil)
-	manager, err := sip.NewManager(newSafeSIPNetworkDialer(), reloader)
-	if err != nil {
-		return unavailableSIPConfigurator{}
-	}
-	configurator, err := newCanonicalSIPConfiguratorWithPolicy(manager, newSIPDestinationPolicy())
-	if err != nil {
-		return unavailableSIPConfigurator{}
-	}
-	return configurator
+func configuredSIPConfigurator(_ config.Config) SIPConfigurator {
+	// The local owner runtime is Baresip-only. Keep historical SIP configurator
+	// implementations available for explicitly injected legacy tests, but never
+	// mount the Asterisk-backed adapter from runtime configuration.
+	return unavailableSIPConfigurator{}
 }
 
 func NewRouterWithWhatsAppStore(store whatsapp.ConfigStore) http.Handler {

@@ -121,10 +121,11 @@ type typedDecisionAnswer struct {
 }
 
 var intentChoices = map[string]salesintent.Class{
-	"acceptance":          salesintent.Acceptance,
-	"indecision_cost":     salesintent.IndecisionCost,
-	"indecision_security": salesintent.IndecisionSecurity,
-	"indecision_timing_or_internal_alignment": salesintent.IndecisionTiming,
+	"acceptance":                           salesintent.Acceptance,
+	"indecision_cost":                      salesintent.IndecisionCost,
+	"indecision_security":                  salesintent.IndecisionSecurity,
+	"internal_alignment":                   salesintent.InternalAlignment,
+	"explicit_future_follow_up":            salesintent.FutureFollowUp,
 	"rejection":                            salesintent.Rejection,
 	"opt_out":                              salesintent.OptOut,
 	"human_request":                        salesintent.HumanRequest,
@@ -135,12 +136,13 @@ var intentChoices = map[string]salesintent.Class{
 
 var semanticIntentQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Classify the semantic intent of latest_final_lead_text using the full bounded meaning and conversation context. Return exactly one intent enum. Do not classify by literal keyword rules, do not generate spoken copy or tool instructions. Distinguish an explicit acceptance/meeting readiness from general interest. Use opt_out only when the lead clearly asks to stop contact; human_request only for an explicit request to speak with a person; capability_request only for an explicit product capability question. If meaning is unclear, use clarification_or_information_request or neutral_continue as appropriate. The opted_out context signal is a hard safety invariant.",
+	Instructions: "Classify the semantic intent of latest_final_lead_text using the full bounded meaning and conversation context. Return exactly one intent enum. Do not classify by literal keyword rules, do not generate spoken copy or tool instructions. Distinguish an explicit acceptance/meeting readiness from general interest. Use internal_alignment when the lead needs internal discussion or validation but has not explicitly asked to be contacted later. Use explicit_future_follow_up only when the lead clearly asks for future contact. Use opt_out only when the lead clearly asks to stop contact; human_request only for an explicit request to speak with a person; capability_request only for an explicit product capability question. If meaning is unclear, use clarification_or_information_request or neutral_continue as appropriate. The opted_out context signal is a hard safety invariant.",
 	Criteria: map[string]string{
-		"acceptance":          "The lead semantically agrees to a proposed next step, accepts a concrete suggested time, or explicitly asks to schedule. Mere interest is not acceptance.",
-		"indecision_cost":     "The lead raises price, budget, or cost as an objection without rejecting contact.",
-		"indecision_security": "The lead raises privacy, security, compliance, reliability, or trust concerns without rejecting contact.",
-		"indecision_timing_or_internal_alignment": "The lead needs more time, internal discussion, or alignment before advancing, including a requested future follow-up.",
+		"acceptance":                           "The lead semantically agrees to a proposed next step, accepts a concrete suggested time, or explicitly asks to schedule. Mere interest is not acceptance.",
+		"indecision_cost":                      "The lead raises price, budget, or cost as an objection without rejecting contact.",
+		"indecision_security":                  "The lead raises privacy, security, compliance, reliability, or trust concerns without rejecting contact.",
+		"internal_alignment":                   "The lead needs more time, internal discussion, or alignment before advancing and has not explicitly asked for later contact.",
+		"explicit_future_follow_up":            "The lead explicitly asks to be contacted again at a future time or after a future event, even if no exact date is given.",
 		"rejection":                            "The lead clearly declines the offer or says the product/project is not wanted, without asking to stop all contact.",
 		"opt_out":                              "The lead explicitly asks to stop, unsubscribe, or not be contacted again.",
 		"human_request":                        "The lead explicitly asks for a human, person, representative, or transfer.",
@@ -241,7 +243,7 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	} else if !optedOut && (input.Stage == conversation.StageClosing || input.Stage == conversation.StageEnded) {
 		intent = salesintent.Rejection
 	}
-	result, err := salesintent.Decide(intent, intent == salesintent.IndecisionTiming, mapped.MatchingExecutableCapability)
+	result, err := salesintent.Decide(intent, mapped.MatchingExecutableCapability)
 	if err != nil {
 		return conversation.Decision{}, ErrInvalidProviderResponse
 	}

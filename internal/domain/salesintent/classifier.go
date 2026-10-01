@@ -18,7 +18,8 @@ const (
 	Acceptance         Class = "acceptance"
 	IndecisionCost     Class = "indecision_cost"
 	IndecisionSecurity Class = "indecision_security"
-	IndecisionTiming   Class = "indecision_timing_or_internal_alignment"
+	InternalAlignment  Class = "internal_alignment"
+	FutureFollowUp     Class = "explicit_future_follow_up"
 	Rejection          Class = "rejection"
 	OptOut             Class = "opt_out"
 	HumanRequest       Class = "human_request"
@@ -82,22 +83,18 @@ func HasExplicitOptOut(text string) bool {
 	return hasAny(s, "pare", "parar", "retire meu contato", "nao me ligue", "nao ligar", "remova meu contato", "descadastrar", "opt out", "nao entre mais em contato", "nao quero receber contato")
 }
 
-// Decide deterministically maps a class to the existing decision taxonomy.
-// Future contact uses follow_up only when the text contains an explicit date
-// or period; otherwise timing objections remain in discovery.
-func Decide(class Class, explicitFutureContact bool, capabilityAvailable bool) (Result, error) {
+// Decide deterministically maps a semantic JEV class to the existing decision
+// taxonomy. Only the distinct explicit-future-follow-up class can request a
+// follow-up; internal alignment remains in discovery.
+func Decide(class Class, capabilityAvailable bool) (Result, error) {
 	var action conversation.NextAction
 	var reason conversation.ReasonCode
 	optedOut := false
 	switch class {
 	case Acceptance:
 		action, reason = conversation.ActionProposeScheduling, conversation.ReasonReadyToSchedule
-	case IndecisionTiming:
-		if explicitFutureContact {
-			action, reason = conversation.ActionFollowUp, conversation.ReasonFollowUpRequired
-		} else {
-			action, reason = conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery
-		}
+	case FutureFollowUp:
+		action, reason = conversation.ActionFollowUp, conversation.ReasonFollowUpRequired
 	case Rejection:
 		action, reason = conversation.ActionEndConversation, conversation.ReasonConversationComplete
 	case OptOut:
@@ -112,7 +109,7 @@ func Decide(class Class, explicitFutureContact bool, capabilityAvailable bool) (
 		} else {
 			action, reason = conversation.ActionAskQuestion, conversation.ReasonNeedsClarification
 		}
-	case IndecisionCost, IndecisionSecurity, NeutralContinue:
+	case IndecisionCost, IndecisionSecurity, InternalAlignment, NeutralContinue:
 		action, reason = conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery
 	default:
 		return Result{}, conversation.ErrInvalidDecisionInput

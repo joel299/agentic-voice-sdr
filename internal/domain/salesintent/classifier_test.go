@@ -7,30 +7,28 @@ import (
 	"unicode/utf8"
 )
 
-func TestClassifierFixtures(t *testing.T) {
+func TestCanonicalIntentMapping(t *testing.T) {
 	cases := []struct {
-		text     string
 		class    Class
 		action   conversation.NextAction
 		reason   conversation.ReasonCode
 		optedOut bool
 	}{
-		{"Quinta às 10h funciona", Acceptance, conversation.ActionProposeScheduling, conversation.ReasonReadyToSchedule, false},
-		{"Quero ver isso. Podemos marcar?", Acceptance, conversation.ActionProposeScheduling, conversation.ReasonReadyToSchedule, false},
-		{"Preciso alinhar com a diretoria e te retorno segunda", IndecisionTiming, conversation.ActionFollowUp, conversation.ReasonFollowUpRequired, false},
-		{"Estamos com budget congelado", IndecisionCost, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
-		{"Tenho receio de LGPD e alucinação", IndecisionSecurity, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
-		{"Não temos interesse", Rejection, conversation.ActionEndConversation, conversation.ReasonConversationComplete, false},
-		{"Parar", OptOut, conversation.ActionEndConversation, conversation.ReasonConversationComplete, true},
-		{"Retire meu contato", OptOut, conversation.ActionEndConversation, conversation.ReasonConversationComplete, true},
-		{"Quero falar com uma pessoa", HumanRequest, conversation.ActionHandoff, conversation.ReasonHandoffRequired, false},
-		{"Quais informações vocês precisam?", Clarification, conversation.ActionAskQuestion, conversation.ReasonNeedsClarification, false},
-		{"Vocês integram com meu CRM?", CapabilityRequest, conversation.ActionAskQuestion, conversation.ReasonNeedsClarification, false},
-		{"Entendi, obrigado", NeutralContinue, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
+		{Acceptance, conversation.ActionProposeScheduling, conversation.ReasonReadyToSchedule, false},
+		{InternalAlignment, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
+		{FutureFollowUp, conversation.ActionFollowUp, conversation.ReasonFollowUpRequired, false},
+		{IndecisionCost, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
+		{IndecisionSecurity, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
+		{Rejection, conversation.ActionEndConversation, conversation.ReasonConversationComplete, false},
+		{OptOut, conversation.ActionEndConversation, conversation.ReasonConversationComplete, true},
+		{HumanRequest, conversation.ActionHandoff, conversation.ReasonHandoffRequired, false},
+		{Clarification, conversation.ActionAskQuestion, conversation.ReasonNeedsClarification, false},
+		{CapabilityRequest, conversation.ActionAskQuestion, conversation.ReasonNeedsClarification, false},
+		{NeutralContinue, conversation.ActionContinueConversation, conversation.ReasonContinueDiscovery, false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.text, func(t *testing.T) {
-			result, err := Decide(tc.class, tc.class == IndecisionTiming, false)
+		t.Run(string(tc.class), func(t *testing.T) {
+			result, err := Decide(tc.class, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -52,8 +50,8 @@ func TestSanitizeLeadTextRedactsIdentifiersAndBounds(t *testing.T) {
 }
 
 func TestCapabilityRequiresAvailableContext(t *testing.T) {
-	without, _ := Decide(CapabilityRequest, false, false)
-	with, _ := Decide(CapabilityRequest, false, true)
+	without, _ := Decide(CapabilityRequest, false)
+	with, _ := Decide(CapabilityRequest, true)
 	if without.Decision.NextAction == conversation.ActionRequestCapability {
 		t.Fatal("requested unavailable capability")
 	}

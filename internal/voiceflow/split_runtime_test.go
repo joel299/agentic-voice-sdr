@@ -111,7 +111,7 @@ func (salesIntentProcessor) ProcessTurn(_ context.Context, input turnruntime.Tur
 	}
 	// This fixture stands in for a scripted semantic provider; production intent
 	// classification is performed by OpenRouter JEV, never by text keywords.
-	intent, err := salesintent.Decide(salesintent.Acceptance, false, input.Capability != nil)
+	intent, err := salesintent.Decide(salesintent.Acceptance, input.Capability != nil)
 	if err != nil {
 		return conversation.TurnDirective{}, err
 	}

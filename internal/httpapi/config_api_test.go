@@ -179,13 +179,12 @@ func TestSIPAuthMappingAndManagerFailure(t *testing.T) {
 	}
 }
 
-func TestSIPCompositionIsFailClosedOrCanonical(t *testing.T) {
+func TestSIPCompositionNeverActivatesAsteriskFromRuntimeConfig(t *testing.T) {
 	if _, ok := configuredSIPConfigurator(config.Config{}).(unavailableSIPConfigurator); !ok {
 		t.Fatal("empty SIP runtime configuration must fail closed")
 	}
-	configDir := t.TempDir()
-	if _, ok := configuredSIPConfigurator(config.Config{SIPConfigDir: configDir}).(*CanonicalSIPConfigurator); !ok {
-		t.Fatal("configured SIP directory must construct canonical configurator")
+	if _, ok := configuredSIPConfigurator(config.Config{SIPConfigDir: "/any/path"}).(unavailableSIPConfigurator); !ok {
+		t.Fatal("Asterisk SIP configuration must never be mounted by the Baresip runtime")
 	}
 	if _, ok := configuredSIPConfigurator(config.Config{SIPConfigDir: filepath.Join(t.TempDir(), "missing")}).(unavailableSIPConfigurator); !ok {
 		t.Fatal("missing SIP directory must fail closed")

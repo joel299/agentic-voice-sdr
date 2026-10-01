@@ -92,7 +92,8 @@ func TestDecideMapsJevChoiceToCanonicalDecision(t *testing.T) {
 		{"clarification_or_information_request", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
 		{"acceptance", conversation.Decision{NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule}},
 		{"capability_request", conversation.Decision{NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification}},
-		{"indecision_timing_or_internal_alignment", conversation.Decision{NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired}},
+		{"internal_alignment", conversation.Decision{NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery}},
+		{"explicit_future_follow_up", conversation.Decision{NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired}},
 		{"rejection", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
 		{"opt_out", conversation.Decision{NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete}},
 		{"human_request", conversation.Decision{NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired}},
@@ -128,9 +129,11 @@ func TestSemanticParaphraseContractUsesJEVIntentInsteadOfGoPhraseRules(t *testin
 		want         conversation.NextAction
 	}{
 		{"acceptance", "acceptance", []string{"quinta às 10 funciona", "esse horário que você sugeriu está ótimo", "pode reservar esse horário para mim"}, conversation.ActionProposeScheduling},
-		{"internal_alignment", "indecision_timing_or_internal_alignment", []string{"preciso conversar com meu sócio primeiro", "vou validar isso internamente antes de avançar", "me procura na próxima semana depois da reunião da diretoria"}, conversation.ActionFollowUp},
+		{"internal_alignment", "internal_alignment", []string{"preciso falar com meu sócio primeiro", "vou analisar isso internamente", "preciso validar com a diretoria"}, conversation.ActionContinueConversation},
+		{"explicit_future_contact", "explicit_future_follow_up", []string{"me procura semana que vem", "depois da reunião de sexta pode me chamar", "podemos falar novamente no mês que vem"}, conversation.ActionFollowUp},
 		{"rejection", "rejection", []string{"prefiro não continuar essa conversa", "não é algo que queremos implementar"}, conversation.ActionEndConversation},
 		{"human_request", "human_request", []string{"quero que alguém da equipe fale comigo", "pode transferir para uma pessoa?"}, conversation.ActionHandoff},
+		{"security_objection", "indecision_security", []string{"tenho dúvidas sobre proteção e acesso aos dados", "me preocupa o tratamento das informações confidenciais"}, conversation.ActionContinueConversation},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

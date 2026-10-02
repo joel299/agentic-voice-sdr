@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -205,6 +206,61 @@ func TestSplitBridgeNeverAcceptsResponsePCM(t *testing.T) {
 	}
 	if len(input.sent) != 0 {
 		t.Fatal("unexpected input send")
+	}
+}
+
+func TestSplitBridgeBoundsLargeGeminiPCMAndPreservesSampleAlignment(t *testing.T) {
+	input := &splitInput{events: make(chan geminilive.TranscriptEvent, 1), closed: make(chan struct{})}
+	response := &splitResponse{events: make(chan geminilive.Event, 5), closed: make(chan struct{})}
+	audio := &splitAudio{closed: make(chan struct{})}
+	lifecycle := &splitLifecycle{authorized: true}
+	lead := geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "lead"}
+	input.events <- lead
+	first := bytes.Repeat([]byte{0x41}, audiosocket.MaxPayloadSize+1)
+	second := []byte{0x42}
+	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: first, AudioMimeType: "audio/pcm;rate=24000"}
+	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: second, AudioMimeType: "audio/pcm;rate=24000"}
+	response.events <- geminilive.Event{Kind: geminilive.EventGenerationComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
+	if err := NewSplit(audio, audio, input, response, &splitTranscriptHandler{finals: make(chan string, 1)}, nil, lifecycle).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(audio.writes) != 2 {
+		t.Fatalf("SLIN24 frames=%d, want two bounded frames", len(audio.writes))
+	}
+	var got []byte
+	for i, frame := range audio.writes {
+		if frame.Type != audiosocket.TypeSlin24 || len(frame.Payload) == 0 || len(frame.Payload) > audiosocket.MaxPayloadSize || len(frame.Payload)%2 != 0 {
+			t.Fatalf("frame %d violates SLIN24 bounds/alignment: type=%s bytes=%d", i, frame.Type, len(frame.Payload))
+		}
+		got = append(got, frame.Payload...)
+	}
+	want := append(append([]byte(nil), first...), second...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("split audio payload differs: got %d bytes, want %d", len(got), len(want))
+	}
+	if lifecycle.complete != 1 || lifecycle.fail != 0 {
+		t.Fatalf("response lifecycle complete=%d fail=%d", lifecycle.complete, lifecycle.fail)
+	}
+}
+
+func TestSplitBridgeRejectsIncompletePCM16SampleAtTurnComplete(t *testing.T) {
+	input := &splitInput{events: make(chan geminilive.TranscriptEvent, 1), closed: make(chan struct{})}
+	response := &splitResponse{events: make(chan geminilive.Event, 3), closed: make(chan struct{})}
+	audio := &splitAudio{closed: make(chan struct{})}
+	lifecycle := &splitLifecycle{authorized: true}
+	input.events <- geminilive.TranscriptEvent{State: geminilive.TranscriptFinal, Text: "lead"}
+	response.events <- geminilive.Event{Kind: geminilive.EventAudio, Audio: []byte{0x01}, AudioMimeType: "audio/pcm;rate=24000"}
+	response.events <- geminilive.Event{Kind: geminilive.EventTurnComplete}
+	response.events <- geminilive.Event{Kind: geminilive.EventClosed}
+	err := NewSplit(audio, audio, input, response, &splitTranscriptHandler{finals: make(chan string, 1)}, nil, lifecycle).Run(context.Background())
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "media_egress" || !errors.Is(err, ErrFormatIncompatible) {
+		t.Fatalf("Run error=%v, want media_egress ErrFormatIncompatible", err)
+	}
+	if lifecycle.fail != 1 || lifecycle.complete != 0 {
+		t.Fatalf("response lifecycle complete=%d fail=%d", lifecycle.complete, lifecycle.fail)
 	}
 }
 

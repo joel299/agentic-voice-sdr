@@ -201,6 +201,7 @@ func (b *SplitBridge) runSplitTranscripts(ctx context.Context) error {
 func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 	disposition := providerTurnIdle
 	var lease ResponseTurnLease
+	var audioCarry []byte
 	begin := func() {
 		if disposition != providerTurnIdle {
 			return
@@ -272,7 +273,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			}
 			begin()
 			if len(event.Audio) > 0 && disposition == providerTurnOwned {
-				if err := writeFrame(ctx, b.output, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: event.Audio}); err != nil {
+				if err := writePCM24(ctx, b.output, event.Audio, &audioCarry); err != nil {
 					fail(ErrAudioOutputFailed)
 					return stageError("media_egress", err)
 				}
@@ -305,6 +306,10 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			}
 		}
 		if turnComplete {
+			if len(audioCarry) != 0 {
+				fail(ErrFormatIncompatible)
+				return stageError("media_egress", fmt.Errorf("%w: Gemini PCM ended on a partial 16-bit sample", ErrFormatIncompatible))
+			}
 			if err := complete(); err != nil {
 				return stageError("turn_complete", err)
 			}
@@ -313,6 +318,35 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// writePCM24 splits provider audio events into bounded AudioSocket frames and
+// carries a trailing byte across event boundaries so each SLIN24 payload keeps
+// its signed 16-bit sample alignment.
+func writePCM24(ctx context.Context, writer AudioWriter, pcm []byte, carry *[]byte) error {
+	if carry == nil {
+		return ErrNilDependency
+	}
+	merged := make([]byte, len(*carry)+len(pcm))
+	copy(merged, *carry)
+	copy(merged[len(*carry):], pcm)
+	*carry = (*carry)[:0]
+	if len(merged)%2 != 0 {
+		*carry = append(*carry, merged[len(merged)-1])
+		merged = merged[:len(merged)-1]
+	}
+	maxFrameBytes := audiosocket.MaxPayloadSize - audiosocket.MaxPayloadSize%2
+	for len(merged) > 0 {
+		chunkSize := len(merged)
+		if chunkSize > maxFrameBytes {
+			chunkSize = maxFrameBytes
+		}
+		if err := writeFrame(ctx, writer, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: merged[:chunkSize]}); err != nil {
+			return err
+		}
+		merged = merged[chunkSize:]
+	}
+	return nil
 }
 
 func readFrame(ctx context.Context, reader AudioReader) (audiosocket.Frame, error) {

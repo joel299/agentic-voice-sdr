@@ -67,11 +67,10 @@ func (c Config) normalized(role providerRole) Config {
 		c.Endpoint = DefaultEndpoint
 	}
 	if len(c.ResponseModalities) == 0 {
-		modality := "AUDIO"
-		if role == roleInputTranscription {
-			modality = "TEXT"
-		}
-		c.ResponseModalities = []string{modality}
+		// Gemini native-audio Live models accept AUDIO response modality for
+		// audio input transcription too. The inputTranscriber capability drops
+		// generated model audio and exposes only input transcription events.
+		c.ResponseModalities = []string{"AUDIO"}
 	}
 	return c
 }

@@ -229,7 +229,7 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 			// event or an owner Hangup reconciliation. That is an allowed owner
 			// of media teardown.
 			cancelCall()
-			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
+			recordAIRuntimeStopped(ctx, calls, call.CallID)
 			_ = session.Close()
 			metrics := session.Metrics()
 			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
@@ -250,11 +250,11 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		cancelCall()
 		metrics := session.Metrics()
 		if ctx.Err() != nil {
-			recordAIRuntimeStatus(context.Background(), calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
+			recordAIRuntimeStopped(context.Background(), calls, call.CallID)
 			_ = session.Close()
 			log.Printf("media_session_close api_call_id=%s reason=runtime_shutdown at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 		} else if terminalCall {
-			recordAIRuntimeStatus(ctx, calls, call.CallID, "stopped", "runtime_shutdown", "", nil)
+			recordAIRuntimeStopped(ctx, calls, call.CallID)
 			_ = session.Close()
 			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 		} else {
@@ -378,6 +378,26 @@ func recordAIRuntimeStatus(ctx context.Context, calls *callservice.Service, call
 	if err := calls.UpdateAIRuntimeStatus(ctx, callID, status, stage, failureClass, failureAt); err != nil {
 		log.Printf("ai_runtime_status_persisted=no api_call_id=%s requested_status=%s error_class=persistence", callID, status)
 	}
+}
+
+// recordAIRuntimeStopped changes only the runtime status at teardown while
+// preserving the last stage that actually ran. Replacing that stage with
+// runtime_shutdown hid whether a disconnected call had reached JEV or Gemini.
+func recordAIRuntimeStopped(ctx context.Context, calls *callservice.Service, callID string) {
+	stage := "runtime_shutdown"
+	if calls != nil {
+		if call, err := calls.Get(callID); err == nil {
+			stage = stoppedAIRuntimeStage(call.AIRuntimeStage)
+		}
+	}
+	recordAIRuntimeStatus(ctx, calls, callID, "stopped", stage, "", nil)
+}
+
+func stoppedAIRuntimeStage(lastStage string) string {
+	if validAIStage(lastStage) {
+		return lastStage
+	}
+	return "runtime_shutdown"
 }
 
 func aiFailureStage(err error) string {

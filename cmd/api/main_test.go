@@ -38,6 +38,26 @@ func TestAIFailureDiagnosticsPreserveSafeStageAndProviderClass(t *testing.T) {
 	}
 }
 
+func TestStoppedAIRuntimePreservesLastValidStage(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage string
+		want  string
+	}{
+		{name: "preserve Gemini response stage", stage: "gemini_response_receive", want: "gemini_response_receive"},
+		{name: "preserve JEV stage", stage: "jev_provider", want: "jev_provider"},
+		{name: "fallback when no stage was recorded", stage: "", want: "runtime_shutdown"},
+		{name: "fallback for unsafe stage token", stage: "bad-stage", want: "runtime_shutdown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stoppedAIRuntimeStage(test.stage); got != test.want {
+				t.Fatalf("stoppedAIRuntimeStage(%q) = %q, want %q", test.stage, got, test.want)
+			}
+		})
+	}
+}
+
 func TestServerConfiguresExplicitTimeouts(t *testing.T) {
 	server := newHTTPServer(":0", nil)
 	if server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {

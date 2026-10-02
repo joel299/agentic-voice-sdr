@@ -11,11 +11,11 @@ info:
 
     O mecanismo de decisão comercial seleciona um próximo passo, como continuar, perguntar, tratar uma objeção, propor uma ação, fazer follow-up, encerrar ou solicitar atendimento humano. Em seguida, o modelo de voz gera a resposta. Isso separa estratégia comercial de personalidade, estilo, voz, ritmo e tom.
 
-    Segurança: endpoints administrativos exigem autenticação Bearer. Senhas SIP e chaves de provedores nunca são retornadas. O perfil telefônico Fale Paco já vem preenchido com os valores conhecidos; o único dado que o owner informa é a senha SIP. Host, porta, transporte, usuário, realm, registrar, proxy, caller ID, domínio From e exigência de registro são controlados pelo servidor para evitar configuração incorreta. Use GET /v1/config/sip-trunk para consultar o perfil seguro, PUT /v1/config/sip-trunk para salvar a senha e POST /v1/config/sip-trunk/validate para validar o registro sem fazer chamada.
+    Segurança: endpoints administrativos exigem autenticação Bearer. Senhas SIP e chaves de provedores nunca são retornadas. O perfil telefônico Fale Paco é gerenciado localmente. A credencial Fale Paco é gerenciada localmente e não pode ser modificada pela API. Use GET /v1/config/sip-trunk para consultar o perfil seguro e POST /v1/config/sip-trunk/validate para validar o registro sem fazer chamada.
 
     Primeiro faça login. O sistema fornecerá um token temporário. Use esse token no botão Authorize para acessar as configurações e testes administrativos. Para entrar, execute POST /v1/auth/login com o usuário owner e sua senha; copie access_token, clique em Authorize no Scalar e cole o token. Ao terminar, execute POST /v1/auth/logout. Reiniciar a API invalida as sessões interativas.
 
-    Perfil Fale Paco: host e registrar 98034.falepaco.com.br, porta 5060, transporte TCP, usuário e realm 100 e 98034.falepaco.com.br, caller ID 551155200455, registro obrigatório. A senha é write-only e fica apenas no arquivo local protegido do runtime Baresip. A validação não envia INVITE nem retorna dados de autenticação SIP.
+    Perfil Fale Paco: host e registrar 98034.falepaco.com.br, porta 5060, transporte TCP, usuário e realm 100 e 98034.falepaco.com.br, caller ID 551155200455, registro obrigatório. A credencial é gerenciada localmente e não pode ser modificada pela API; ela fica apenas no arquivo local protegido do runtime Baresip. A validação não envia INVITE nem retorna dados de autenticação SIP.
 
     Telefonia usa Baresip 1.1.0, ctrl_tcp e o adaptador de mídia local; não usa Asterisk, FreeSWITCH ou AudioSocket. WhatsApp e agendamento permanecem opcionais e podem ser disponibilizados futuramente. A documentação interativa Scalar está em /docs e o contrato OpenAPI completo em /openapi.yaml.
 servers:
@@ -179,31 +179,12 @@ paths:
       operationId: getFalePacoSIPProfile
       tags: [Fale Paco telephony]
       summary: Read the effective Fale Paco Baresip profile
-      description: Returns the server-controlled canonical profile and whether a password is configured. The password and SIP authentication material are never returned.
+      description: Returns the server-controlled canonical profile and whether a password is configured. The password and SIP authentication material are never returned. The Fale Paco credential is managed locally and cannot be modified through the API.
       security: [{ BearerAuth: [] }]
       responses:
         '200': { description: Effective safe Fale Paco profile, content: { application/json: { schema: { $ref: '#/components/schemas/FalePacoSIPProfile' }, example: { provider: 'Fale Paco', host: '98034.falepaco.com.br', port: 5060, transport: tcp, registrar: '98034.falepaco.com.br', outbound_proxy: '98034.falepaco.com.br:5060', auth: { type: userpass, username: '100', realm: '98034.falepaco.com.br' }, from_user: '100', from_domain: '98034.falepaco.com.br', caller_id: '551155200455', registration_required: true, enabled: true, password_configured: true } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { description: Baresip profile unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-    put:
-      operationId: setFalePacoSIPPassword
-      tags: [Fale Paco telephony]
-      summary: Set the Fale Paco SIP password
-      description: All provider, host, port, transport, username, realm, registrar, proxy, caller ID, and registration fields are server-controlled. Store the supplied password only in the protected local Baresip runtime account file. This operation restarts Baresip to apply the profile and sends no call.
-      security: [{ BearerAuth: [] }]
-      requestBody:
-        required: true
-        description: The owner's SIP password. No other SIP fields are accepted.
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/FalePacoSIPPassword' }
-            example: { secret: YOUR_SIP_PASSWORD }
-      responses:
-        '200': { description: Safe effective profile; secret is omitted, content: { application/json: { schema: { $ref: '#/components/schemas/FalePacoSIPProfile' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { description: An active call prevents restarting Baresip, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-        '502': { $ref: '#/components/responses/RuntimeFailure' }
   /v1/config/sip-trunk/validate:
     post:
       operationId: validateFalePacoRegistration
@@ -502,13 +483,6 @@ components:
         name: { type: string }
         phone: { type: string }
         status: { type: string, enum: [CONNECTED, READY, DISCONNECTED] }
-    FalePacoSIPPassword:
-      type: object
-      additionalProperties: false
-      required: [secret]
-      properties:
-        secret: { type: string, title: Password, minLength: 1, writeOnly: true, description: Owner-supplied Fale Paco SIP password. Stored only in the protected local Baresip runtime profile. Baresip account syntax currently accepts up to 512 UTF-8 bytes and rejects semicolons, quotation marks, backslashes, and control characters to keep account parameters unambiguous. }
-      example: { secret: YOUR_SIP_PASSWORD }
     FalePacoSIPProfile:
       type: object
       additionalProperties: false

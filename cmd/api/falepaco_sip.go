@@ -8,23 +8,20 @@ import (
 
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipmedia"
-	"github.com/joel299/agentic-voice-sdr/internal/telephony/callservice"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/control"
 )
 
 type falePacoSIPService struct {
 	accountPath string
-	runtime     *baresipRuntime
 	controller  interface {
 		RegistrationStatus(context.Context) (control.RegistrationStatus, error)
 	}
-	calls *callservice.Service
 }
 
-func newFalePacoSIPService(profileDir string, runtime *baresipRuntime, controller interface {
+func newFalePacoSIPService(profileDir string, controller interface {
 	RegistrationStatus(context.Context) (control.RegistrationStatus, error)
-}, calls *callservice.Service) *falePacoSIPService {
-	return &falePacoSIPService{accountPath: filepath.Join(profileDir, "accounts"), runtime: runtime, controller: controller, calls: calls}
+}) *falePacoSIPService {
+	return &falePacoSIPService{accountPath: filepath.Join(profileDir, "accounts"), controller: controller}
 }
 
 func (s *falePacoSIPService) Get(context.Context) (httpapi.FalePacoSIPConfig, error) {
@@ -33,24 +30,6 @@ func (s *falePacoSIPService) Get(context.Context) (httpapi.FalePacoSIPConfig, er
 		return httpapi.FalePacoSIPConfig{}, err
 	}
 	return httpapi.CanonicalFalePacoSIPForRuntime(configured), nil
-}
-
-func (s *falePacoSIPService) ConfigurePassword(ctx context.Context, password string) (httpapi.FalePacoSIPConfig, error) {
-	if err := baresipmedia.ValidateFalePacoPassword(password); err != nil {
-		return httpapi.FalePacoSIPConfig{}, errors.Join(httpapi.ErrInvalidSIPSecret, err)
-	}
-	if s.calls != nil {
-		if _, active := s.calls.ActiveCall(); active {
-			return httpapi.FalePacoSIPConfig{}, httpapi.ErrSIPRuntimeBusy
-		}
-	}
-	if err := s.runtime.ApplyFalePacoPassword(ctx, password); err != nil {
-		if errors.Is(err, errBaresipCallActive) {
-			return httpapi.FalePacoSIPConfig{}, httpapi.ErrSIPRuntimeBusy
-		}
-		return httpapi.FalePacoSIPConfig{}, errors.New("Baresip account update failed")
-	}
-	return httpapi.CanonicalFalePacoSIPForRuntime(true), nil
 }
 
 func (s *falePacoSIPService) ValidateRegistration(ctx context.Context) (httpapi.FalePacoSIPValidation, error) {

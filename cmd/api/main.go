@@ -141,10 +141,6 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer calls.Close()
 	defer provider.Close()
-	baresipRuntime.SetActiveCallCheck(func() bool {
-		_, active := calls.ActiveCall()
-		return active
-	})
 	transcripts := transcriptquery.New(callRepository, callRepository)
 	go func() {
 		if err := provider.Run(signalCtx); err != nil && !errors.Is(err, context.Canceled) {
@@ -153,7 +149,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}()
 	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder, tuning, baseGemini)
 	calibration := newCalibrationServices(baseJEV, baseGemini, promptBuilder, promptService, provider, tuning)
-	calibration.FalePacoSIP = newFalePacoSIPService(cfg.BaresipProfileDir, baresipRuntime, provider, calls)
+	calibration.FalePacoSIP = newFalePacoSIPService(cfg.BaresipProfileDir, provider)
 	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCalibration(cfg, calls, transcripts, calibration))
 	server.ReadTimeout = cfg.ReadTimeout
 	server.WriteTimeout = cfg.WriteTimeout

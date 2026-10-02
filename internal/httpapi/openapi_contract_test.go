@@ -104,7 +104,7 @@ func TestOwnerTuningOpenAPIContract(t *testing.T) {
 	}
 }
 
-func TestFalePacoSIPOpenAPIIsPasswordOnlyAndCanonical(t *testing.T) {
+func TestFalePacoSIPOpenAPIIsReadValidateOnlyAndCanonical(t *testing.T) {
 	spec, err := os.ReadFile("../../openapi.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -119,15 +119,13 @@ func TestFalePacoSIPOpenAPIIsPasswordOnlyAndCanonical(t *testing.T) {
 		t.Fatal("Fale Paco SIP validation operation is missing from OpenAPI")
 	}
 	operation := text[start : start+end]
-	for _, fragment := range []string{"security: [{ BearerAuth: [] }]", "provider: 'Fale Paco'", "host: '98034.falepaco.com.br'", "port: 5060", "transport: tcp", "username: '100'", "caller_id: '551155200455'", "password_configured: true", "example: { secret: YOUR_SIP_PASSWORD }", "All provider, host, port, transport, username, realm, registrar, proxy, caller ID, and registration fields are server-controlled"} {
+	for _, fragment := range []string{"security: [{ BearerAuth: [] }]", "provider: 'Fale Paco'", "host: '98034.falepaco.com.br'", "port: 5060", "transport: tcp", "username: '100'", "caller_id: '551155200455'", "password_configured: true", "The Fale Paco credential is managed locally and cannot be modified through the API"} {
 		if !strings.Contains(operation, fragment) {
 			t.Errorf("Fale Paco SIP OpenAPI missing %q", fragment)
 		}
 	}
-	for _, fragment := range []string{"FalePacoSIPPassword:", "additionalProperties: false", "title: Password", "writeOnly: true"} {
-		if !strings.Contains(text, fragment) {
-			t.Errorf("Fale Paco write-only password schema missing %q", fragment)
-		}
+	if strings.Contains(operation, "    put:") || strings.Contains(text, "FalePacoSIPPassword:") {
+		t.Fatal("Scalar must not expose an editable Fale Paco credential")
 	}
 	for _, forbidden := range []string{"SIPConfigRequest", "SIPSafeResponse", "codecs: [\"\"]", "auth: { secret:"} {
 		if strings.Contains(text, forbidden) {

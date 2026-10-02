@@ -28,7 +28,7 @@ func TestFalePacoSIPServiceValidationUsesProtectedCanonicalAccount(t *testing.T)
 	if err := baresipmedia.WritePrivateAccount(path, account); err != nil {
 		t.Fatal("write protected account failed")
 	}
-	service := newFalePacoSIPService(filepath.Dir(path), nil, fakeFalePacoRegistration{status: control.RegistrationStatus{State: control.RegistrationRegistered}}, nil)
+	service := newFalePacoSIPService(filepath.Dir(path), fakeFalePacoRegistration{status: control.RegistrationStatus{State: control.RegistrationRegistered}})
 	got, err := service.ValidateRegistration(context.Background())
 	if err != nil {
 		t.Fatal("validate registration failed")
@@ -48,7 +48,7 @@ func TestFalePacoSIPServiceDoesNotClaimRegistrationOrAcceptNoncanonicalAccount(t
 	if err := os.WriteFile(path, []byte("<sip:100@wrong.example>;auth_pass=not-returned\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	service := newFalePacoSIPService(filepath.Dir(path), nil, fakeFalePacoRegistration{status: control.RegistrationStatus{State: control.RegistrationFailed, Detail: "private auth details"}}, nil)
+	service := newFalePacoSIPService(filepath.Dir(path), fakeFalePacoRegistration{status: control.RegistrationStatus{State: control.RegistrationFailed, Detail: "private auth details"}})
 	got, err := service.ValidateRegistration(context.Background())
 	if err != nil {
 		t.Fatal("validate registration failed")

@@ -10,7 +10,6 @@ var ErrFalePacoSIPUnavailable = errors.New("Fale Paco Baresip configuration unav
 
 type FalePacoSIPProfileService interface {
 	Get(context.Context) (FalePacoSIPConfig, error)
-	ConfigurePassword(context.Context, string) (FalePacoSIPConfig, error)
 	ValidateRegistration(context.Context) (FalePacoSIPValidation, error)
 }
 
@@ -59,31 +58,11 @@ func (a *falePacoSIPAPI) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (a *falePacoSIPAPI) put(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Secret string `json:"secret"`
-	}
-	if decodeJSON(w, r, &input) != nil {
-		return
-	}
-	if input.Secret == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "secret is required"})
-		return
-	}
-	result, err := a.service.ConfigurePassword(r.Context(), input.Secret)
-	if err != nil {
-		if errors.Is(err, ErrInvalidSIPSecret) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "secret is invalid for the Baresip account format"})
-			return
-		}
-		if errors.Is(err, ErrSIPRuntimeBusy) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "SIP settings cannot be changed while a call is active"})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Fale Paco Baresip configuration failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+func (a *falePacoSIPAPI) put(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error": "Fale Paco credential is managed locally and cannot be changed through this API",
+		"code":  "credential_managed_locally",
+	})
 }
 
 func (a *falePacoSIPAPI) validate(w http.ResponseWriter, r *http.Request) {
@@ -94,11 +73,6 @@ func (a *falePacoSIPAPI) validate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
-
-var (
-	ErrInvalidSIPSecret = errors.New("invalid SIP secret")
-	ErrSIPRuntimeBusy   = errors.New("SIP runtime has an active call")
-)
 
 func CanonicalFalePacoSIPForRuntime(passwordConfigured bool) FalePacoSIPConfig {
 	return FalePacoSIPConfig{

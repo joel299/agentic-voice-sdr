@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,22 +15,13 @@ import (
 )
 
 type fakeFalePacoSIPService struct {
-	password string
-	config   FalePacoSIPConfig
-	check    FalePacoSIPValidation
-	err      error
+	config FalePacoSIPConfig
+	check  FalePacoSIPValidation
+	err    error
 }
 
 func (f *fakeFalePacoSIPService) Get(context.Context) (FalePacoSIPConfig, error) {
 	return f.config, f.err
-}
-func (f *fakeFalePacoSIPService) ConfigurePassword(_ context.Context, password string) (FalePacoSIPConfig, error) {
-	if f.err != nil {
-		return FalePacoSIPConfig{}, f.err
-	}
-	f.password = password
-	f.config.PasswordConfigured = true
-	return f.config, nil
 }
 func (f *fakeFalePacoSIPService) ValidateRegistration(context.Context) (FalePacoSIPValidation, error) {
 	return f.check, f.err
@@ -68,16 +61,26 @@ func TestFalePacoSIPGetIsCanonicalSafeAndOwnerOnly(t *testing.T) {
 	}
 }
 
-func TestFalePacoSIPPutAcceptsOnlyWriteOnlySecret(t *testing.T) {
-	service := &fakeFalePacoSIPService{config: CanonicalFalePacoSIPForRuntime(false)}
+func TestFalePacoSIPPutCannotMutateLocalCredential(t *testing.T) {
+	service := &fakeFalePacoSIPService{config: CanonicalFalePacoSIPForRuntime(true)}
 	h := falePacoTestRouter(service, "owner-token")
-	res := sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"fixture-sip-password"}`, "owner-token")
-	if res.Code != http.StatusOK || service.password != "fixture-sip-password" || strings.Contains(res.Body.String(), "fixture-sip-password") {
-		t.Fatalf("status=%d password received=%v body=%s", res.Code, service.password != "", res.Body)
+	path := filepath.Join(t.TempDir(), "accounts")
+	fixture := []byte("<sip:100@98034.falepaco.com.br:5060;transport=tcp>;auth_user=100;auth_pass=fixture-secret;outbound=\\\"sip:98034.falepaco.com.br:5060;transport=tcp\\\";regint=600\\n")
+	if err := os.WriteFile(path, fixture, 0600); err != nil {
+		t.Fatal(err)
 	}
-	res = sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"x","host":"attacker.example"}`, "owner-token")
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("generic SIP fields must be rejected, status=%d body=%s", res.Code, res.Body)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"attacker-value"}`, "owner-token")
+	if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "credential_managed_locally") || strings.Contains(res.Body.String(), "attacker-value") {
+		t.Fatalf("mutation was not safely rejected: status=%d body=%s", res.Code, res.Body)
+	}
+	after, err := os.Stat(path)
+	contents, readErr := os.ReadFile(path)
+	if err != nil || readErr != nil || string(contents) != string(fixture) || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("PUT changed fixture account bytes or mtime")
 	}
 	res = sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"x"}`, "")
 	if res.Code != http.StatusUnauthorized {
@@ -99,15 +102,10 @@ func TestFalePacoRegistrationValidationReturnsOnlySafeFacts(t *testing.T) {
 }
 
 func TestFalePacoSIPInvalidSecretAndRuntimeErrorsAreSanitized(t *testing.T) {
-	service := &fakeFalePacoSIPService{err: ErrInvalidSIPSecret}
+	service := &fakeFalePacoSIPService{err: errors.New("fixture provider error")}
 	h := falePacoTestRouter(service, "owner-token")
-	res := sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"secret"}`, "owner-token")
-	if res.Code != http.StatusBadRequest || !errors.Is(service.err, ErrInvalidSIPSecret) || strings.Contains(res.Body.String(), "fixture-secret") {
-		t.Fatalf("invalid secret error not sanitized: status=%d body=%s", res.Code, res.Body)
-	}
-	service.err = errors.New("private process stderr secret=leak")
-	res = sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `{"secret":"secret"}`, "owner-token")
-	if res.Code != http.StatusBadGateway || strings.Contains(res.Body.String(), "private") || strings.Contains(res.Body.String(), "leak") {
-		t.Fatalf("runtime error not sanitized: status=%d body=%s", res.Code, res.Body)
+	res := sipRequest(t, h, http.MethodPut, "/v1/config/sip-trunk", `malformed body with secret=never-log`, "owner-token")
+	if res.Code != http.StatusConflict || strings.Contains(res.Body.String(), "never-log") || strings.Contains(res.Body.String(), "fixture provider error") {
+		t.Fatalf("disabled mutation response was not sanitized: status=%d body=%s", res.Code, res.Body)
 	}
 }

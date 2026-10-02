@@ -47,6 +47,20 @@ static void fragmented(size_t header_part)
 	assert(!atomic_load(&stats.protocol_errors) && !atomic_load(&stats.socket_errors));
 	close(fd[0]); close(fd[1]);
 }
+static void many_payload_fragments(void)
+{
+	int fd[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,fd));
+	struct gru151_parser p={0}; struct gru151_source_stats s={0};
+	uint8_t wire[963],pcm[960];frame(wire,7);put(fd[0],wire,3);
+	assert(gru151_read_frame(fd[1],&p,pcm,&s)==0);
+	for (size_t offset=3;offset<sizeof(wire);) {
+		size_t n=sizeof(wire)-offset; if(n>17) n=17;
+		put(fd[0],wire+offset,n);offset+=n;
+		assert(gru151_read_frame(fd[1],&p,pcm,&s)==(offset==sizeof(wire)?1:0));
+	}
+	verify(pcm,7);assert(atomic_load(&s.max_buffered_bytes)==963);
+	close(fd[0]);close(fd[1]);
+}
 static void burst(int n)
 {
 	int fd[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,fd));
@@ -84,7 +98,7 @@ static void peer_close(void)
 }
 int main(void)
 {
-	fragmented(1);fragmented(2);burst(1);burst(2);burst(18);
+	fragmented(1);fragmented(2);many_payload_fragments();burst(1);burst(2);burst(18);
 	invalid(0x12,960);invalid(0x13,959);invalid(0x13,0);invalid(0x13,65535);peer_close();
 	puts("C parser PASS: single/fragmented header 1+1+1,2+1/payload/coalesced 2,18/partial next/EINTR/EAGAIN/invalid/EOF; max_buffered=963");
 	return 0;

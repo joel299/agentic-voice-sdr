@@ -19,7 +19,11 @@ Inspected API PID 1609774, binary `/tmp/gru152-api-4d1836f`, embedded baseline r
 | Real config.Load -> NewAllowlist reconstruction authorizes destination | yes |
 | Registration / active-call no-call smoke | REGISTERED / empty |
 
-The owner reported the earlier 403 at approximately 13:00 local / 17:00 UTC. The owner subsequently confirmed the Tailnet Scalar URL, `https://joelquintana.tail212bac.ts.net:8443/docs`; the exact HTTP request and historical policy snapshot were not retained. The inspected process environment, file and real parser do **not** demonstrate any of A (restart did not load env), B (file regressed), or C (parser bug). The historical 403 source remains unconfirmed. Reconstructing the startup policy from `/proc` is not a live heap inspection of the old service. We do not claim a historical root cause from an unconfirmed hypothesis.
+The owner reported the earlier 403 at approximately 13:00 local / 17:00 UTC and confirmed the Tailnet Scalar URL, `https://joelquintana.tail212bac.ts.net:8443/docs`. During the final evidence check the owner clarified: the test used **another phone number**. With only `+5567981340687` allowed, denying another destination with HTTP 403 is expected. The original "allowlist lost at restart" hypothesis is not supported; the inspected environment and file already contained the authorized number. The owner clarification resolves the earlier attribution gap without another call. The exact original body/other number was not retained, so this conclusion relies on the owner report plus the verified policy/code/tests.
+
+`root_cause=destination_outside_configured_allowlist_owner_confirmed`.
+
+The launcher/readiness/error hardening below remains the explicitly requested permanent safeguard against an empty configuration. Do not expand the single-destination policy: other numbers remain denied. No SIP/provider/media correction was needed for this 403.
 
 ## Implemented behavior
 
@@ -55,4 +59,4 @@ Deterministic tests cover empty-policy 503/readiness false, canonical/formatted 
 
 Run Go tests and race tests, vet/build/diff/OpenAPI checks, the unchanged actual C module tests (1/2/18/250 records), Go-to-actual-C stress and exact-head CI. An initial C harness run under simultaneous Go compile/test load failed its timing assertion at an 8ms minimum gap; isolated rerun passed (18/250 frames minimum 19ms), with zero protocol/socket/source errors. The C source/test logic was not changed.
 
-Safe runtime acceptance: corrected embedded head, one API, one Baresip, owner status showing one allowed destination and readiness true, REGISTERED, empty call inventory, same source account bytes/mtime/0600, and protected Tailnet status on `https://joelquintana.tail212bac.ts.net:8443`. Preserve C media P0 and all SIP credentials. No fourth call; no merge, Done, VPS, Asterisk or FreeSWITCH. Return evidence to Anorak. `READY_FOR_OWNER_CALL_4=no`.
+Safe runtime acceptance: corrected embedded head, one API, one Baresip, owner status showing one allowed destination and readiness true, REGISTERED, empty call inventory, same source account bytes/mtime/0600, and protected Tailnet status on `https://joelquintana.tail212bac.ts.net:8443`. Preserve C media P0 and all SIP credentials. No fourth call; no merge, Done, VPS, Asterisk or FreeSWITCH. Return evidence and the owner-confirmed policy-denial cause to Anorak. `READY_FOR_OWNER_CALL_4=no`.

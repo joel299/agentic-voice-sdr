@@ -54,6 +54,36 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: handler, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 }
 func main() {
+	if len(os.Args) > 1 {
+		if len(os.Args) != 3 || (os.Args[1] != "--local-env" && os.Args[1] != "--check-local-env") {
+			log.Print("invalid local launch arguments")
+			os.Exit(2)
+		}
+		if err := config.LoadLocalEnv(os.Args[2]); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		if err := config.ValidateLocalRuntime(os.Stdout); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		if os.Args[1] == "--check-local-env" {
+			return
+		}
+		// Re-exec with the exported file environment so /proc reports the same
+		// startup configuration that Config.Load and the call policy actually use.
+		executable, err := os.Executable()
+		if err != nil {
+			log.Print("cannot resolve API binary")
+			os.Exit(1)
+		}
+		if err := syscall.Exec(executable, []string{executable}, os.Environ()); err != nil {
+			log.Print("cannot exec configured API binary")
+			os.Exit(1)
+		}
+
+	}
+
 	if err := run(context.Background(), config.Load, serve); err != nil {
 		log.Printf("API startup error: %v", err)
 		os.Exit(1)

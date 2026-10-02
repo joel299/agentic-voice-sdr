@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
@@ -81,11 +83,21 @@ func NewRouterWithCalibration(whatsappService *whatsapp.Service, _ SIPConfigurat
 }
 
 func newRouterWithCalibration(whatsappService *whatsapp.Service, calls OutboundCallService, transcripts CallTranscriptReader, auth *OwnerAuthService, calibration CalibrationServices) http.Handler {
+	calibration = withOutboundReadiness(calibration, calls)
 	a := &configAPI{whatsapp: whatsappService}
 	router := chi.NewRouter()
 	registerOwnerAuthRoutes(router, auth)
 	router.Get("/healthz", health)
-	router.Get("/readyz", ready)
+	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		status, err := calibration.RuntimeStatus(ctx)
+		if err != nil || status["outbound_call_ready"] != true {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "outbound_call_ready": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "outbound_call_ready": true})
+	})
 	router.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -113,7 +125,6 @@ func newRouterWithCalibration(whatsappService *whatsapp.Service, calls OutboundC
 	return router
 }
 func health(w http.ResponseWriter, _ *http.Request) { writeStatus(w, http.StatusOK, "ok") }
-func ready(w http.ResponseWriter, _ *http.Request)  { writeStatus(w, http.StatusOK, "ready") }
 
 func (a *configAPI) putWhatsApp(w http.ResponseWriter, r *http.Request) {
 	var input whatsapp.ConfigInput
@@ -218,4 +229,38 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// Policy readiness is taken from the same immutable policy used by Start, not
+// from an independently parsed environment variable. Destinations remain on
+// the owner-protected status route; public readyz exposes only a boolean.
+func withOutboundReadiness(deps CalibrationServices, calls OutboundCallService) CalibrationServices {
+	original := deps.RuntimeStatus
+	deps.RuntimeStatus = func(ctx context.Context) (map[string]any, error) {
+		status := make(map[string]any)
+		if original != nil {
+			v, err := original(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for k, value := range v {
+				status[k] = value
+			}
+		}
+		destinations := []string{}
+		if policy, ok := calls.(interface{ AllowedDestinations() []string }); ok {
+			destinations = policy.AllowedDestinations()
+		}
+		configured := len(destinations) > 0
+		status["outbound_call_allowlist_configured"] = configured
+		status["outbound_call_allowed_count"] = len(destinations)
+		status["outbound_call_allowed_destinations"] = destinations
+		ready := configured
+		for _, key := range []string{"api_ready", "baresip_ctrl_ready", "baresip_registered", "prompt_active", "jev_configured", "gemini_configured"} {
+			ready = ready && status[key] == true
+		}
+		status["outbound_call_ready"] = ready
+		return status, nil
+	}
+	return deps
 }

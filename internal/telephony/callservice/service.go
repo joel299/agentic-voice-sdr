@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,15 +20,16 @@ import (
 )
 
 var (
-	ErrInvalidDestination = errors.New("invalid destination")
-	ErrDestinationDenied  = errors.New("destination is not allowed")
-	ErrNotRegistered      = errors.New("telephony provider is not registered")
-	ErrCallActive         = errors.New("an active call already exists")
-	ErrCallNotFound       = errors.New("call not found")
-	ErrCallNotActive      = errors.New("call is not active")
-	ErrHangupRequested    = errors.New("hangup already requested")
-	ErrProviderFailure    = errors.New("telephony provider request failed")
-	ErrPersistenceFailure = errors.New("call persistence failed")
+	ErrInvalidDestination             = errors.New("invalid destination")
+	ErrDestinationPolicyNotConfigured = errors.New("outbound call policy is not configured")
+	ErrDestinationDenied              = errors.New("destination is not allowed")
+	ErrNotRegistered                  = errors.New("telephony provider is not registered")
+	ErrCallActive                     = errors.New("an active call already exists")
+	ErrCallNotFound                   = errors.New("call not found")
+	ErrCallNotActive                  = errors.New("call is not active")
+	ErrHangupRequested                = errors.New("hangup already requested")
+	ErrProviderFailure                = errors.New("telephony provider request failed")
+	ErrPersistenceFailure             = errors.New("call persistence failed")
 )
 
 type Status string
@@ -76,6 +78,7 @@ type Call struct {
 type DestinationPolicy interface {
 	Normalize(string) (string, error)
 	Allows(string) bool
+	Destinations() []string
 }
 
 type Allowlist struct{ destinations map[string]struct{} }
@@ -97,6 +100,17 @@ func (p *Allowlist) Allows(value string) bool {
 	_, ok := p.destinations[value]
 	return ok
 }
+
+// Destinations returns an immutable, deterministic policy snapshot.
+func (p *Allowlist) Destinations() []string {
+	values := make([]string, 0, len(p.destinations))
+	for value := range p.destinations {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+func (s *Service) AllowedDestinations() []string { return s.policy.Destinations() }
 
 func NormalizeDestination(value string) (string, error) {
 	value = strings.TrimSpace(value)
@@ -160,6 +174,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 	s.mu.RUnlock()
 	if persistenceErr != nil {
 		return Call{}, ErrPersistenceFailure
+	}
+	if len(s.policy.Destinations()) == 0 {
+		return Call{}, ErrDestinationPolicyNotConfigured
 	}
 	canonical, err := s.policy.Normalize(destination)
 	if err != nil {

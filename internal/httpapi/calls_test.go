@@ -138,6 +138,7 @@ func TestCallRouteMapsDestinationAndRegistrationErrors(t *testing.T) {
 	}{
 		{callservice.ErrInvalidDestination, http.StatusBadRequest},
 		{callservice.ErrDestinationDenied, http.StatusForbidden},
+		{callservice.ErrDestinationPolicyNotConfigured, http.StatusServiceUnavailable},
 		{callservice.ErrNotRegistered, http.StatusConflict},
 		{callservice.ErrCallActive, http.StatusConflict},
 	} {

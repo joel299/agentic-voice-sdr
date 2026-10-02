@@ -24,6 +24,13 @@ tags:
   - name: Authentication
     description: Login do owner e gerenciamento da sessão administrativa.
 paths:
+  /readyz:
+    get:
+      summary: Estado de prontidão para chamadas outbound
+      security: []
+      responses:
+        '200': { description: Política configurada e dependências do runtime prontas. }
+        '503': { description: Runtime ou política outbound não configurados; não origina chamadas. }
   /v1/auth/login:
     post:
       tags: [Authentication]
@@ -91,7 +98,7 @@ paths:
         '403': { description: Destination is not in the configured allowlist, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         '409': { description: Registration or single-active-call gate rejected the request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         '502': { $ref: '#/components/responses/RuntimeFailure' }
-        '503': { description: Call control is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '503': { description: Call control is unavailable or outbound call policy is not configured (empty allowlist), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/calls/{call_id}:
     get:
       operationId: getOutboundCall
@@ -619,8 +626,15 @@ components:
         audio_url: { type: string, description: Relative owner-authenticated URL to transient mono PCM16 WAV at 24 kHz. }
     RuntimeStatus:
       type: object
-      required: [api_ready, baresip_ctrl_ready, baresip_registered, prompt_active, jev_configured, jev_model, jev_timeout_ms, gemini_configured, gemini_model, gemini_voice_name, whatsapp_status, scheduling_status]
+      required: [api_ready, baresip_ctrl_ready, baresip_registered, outbound_call_ready, outbound_call_allowlist_configured, outbound_call_allowed_count, outbound_call_allowed_destinations, prompt_active, jev_configured, jev_model, jev_timeout_ms, gemini_configured, gemini_model, gemini_voice_name, whatsapp_status, scheduling_status]
       properties:
+        outbound_call_ready: { type: boolean, description: Política não vazia e API/ctrl/registro/prompt/JEV/Gemini prontos. }
+        outbound_call_allowlist_configured: { type: boolean }
+        outbound_call_allowed_count: { type: integer, minimum: 0 }
+        outbound_call_allowed_destinations:
+          type: array
+          description: Destinos normalizados da política efetiva; visível somente ao owner autenticado.
+          items: { type: string }
         api_ready: { type: boolean }
         baresip_ctrl_ready: { type: boolean, description: Baresip ctrl_tcp registration query responded. }
         baresip_registered: { type: boolean, description: Current Baresip SIP registration state. }

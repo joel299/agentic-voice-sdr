@@ -100,6 +100,9 @@ func writeCallError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, callservice.ErrInvalidDestination):
 		status, message = http.StatusBadRequest, "invalid destination"
+	case errors.Is(err, callservice.ErrDestinationPolicyNotConfigured):
+		status = http.StatusServiceUnavailable
+		message = "outbound call policy is not configured"
 	case errors.Is(err, callservice.ErrDestinationDenied):
 		status, message = http.StatusForbidden, "destination is not allowed"
 	case errors.Is(err, callservice.ErrCallNotFound):

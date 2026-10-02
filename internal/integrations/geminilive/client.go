@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	DefaultEndpoint  = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
-	DefaultModel     = "gemini-3.8-live"
-	InputSampleRate  = 16000
-	OutputSampleRate = 24000
+	DefaultEndpoint     = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+	DefaultModel        = "gemini-3.8-live"
+	InputSampleRate     = 16000
+	OutputSampleRate    = 24000
+	maxLiveMessageBytes = 4 << 20
 )
 
 var (
@@ -239,6 +240,9 @@ func connect(ctx context.Context, cfg Config, role providerRole) (*providerSessi
 		}
 		return nil, wrap(ErrorConnect, errors.New("WebSocket connection failed"))
 	}
+	// Gemini audio events can exceed the WebSocket library's 32 KiB default.
+	// Keep a finite ceiling while allowing normal encoded PCM chunks through.
+	conn.SetReadLimit(maxLiveMessageBytes)
 	s := &providerSession{conn: conn, cfg: cfg, role: role, done: make(chan struct{})}
 	go func() {
 		select {

@@ -202,6 +202,51 @@ func TestControlledResponderClassifiesRemoteCloseWithoutPayload(t *testing.T) {
 	}
 }
 
+func TestControlledResponderAcceptsAudioMessageAboveWebsocketDefaultLimit(t *testing.T) {
+	pcm := make([]byte, 25*1024)
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+	message, err := json.Marshal(map[string]any{"serverContent": map[string]any{"modelTurn": map[string]any{"parts": []any{map[string]any{"inlineData": map[string]string{"data": base64.StdEncoding.EncodeToString(pcm), "mimeType": "audio/pcm;rate=24000"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message) <= 32*1024 {
+		t.Fatalf("fixture message size=%d, want greater than WebSocket default", len(message))
+	}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		if _, _, err := c.Read(context.Background()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"setupComplete":{}}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, message); err != nil {
+			t.Error(err)
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	responder, err := ConnectControlledResponse(context.Background(), Config{APIKey: "test", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	event, err := responder.Receive(context.Background())
+	if err != nil || event.Kind != EventAudio || len(event.Audio) != len(pcm) {
+		t.Fatalf("large audio event kind=%s bytes=%d err=%v", event.Kind, len(event.Audio), err)
+	}
+}
+
 func TestControlledResponderSurfacesDiagnosticServerStatus(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)

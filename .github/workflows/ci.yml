@@ -18,7 +18,7 @@ jobs:
   scope-policy:
     name: Scope Policy
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,9 +29,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BASE="origin/${{ github.base_ref }}"
-          HEAD_REF="${{ github.head_ref }}"
-          git fetch origin "${{ github.base_ref }}" --depth=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_BRANCH="${{ github.base_ref }}"
+            HEAD_REF="${{ github.head_ref }}"
+          else
+            BASE_BRANCH="main"
+            HEAD_REF="${{ github.ref_name }}"
+          fi
+          BASE="origin/$BASE_BRANCH"
+          git fetch origin "$BASE_BRANCH" --depth=1
 
           mapfile -t FILES < <(git diff --name-only "${BASE}...HEAD")
           printf 'Changed files:\n'

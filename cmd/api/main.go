@@ -212,6 +212,7 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 			if !safeStageToken(stage) || !safeStageToken(outcome) {
 				return
 			}
+			calls.RecordMediaMilestone(call.CallID, stage)
 			at := time.Now().UTC()
 			category := stageCategory(stage)
 			status := "starting"

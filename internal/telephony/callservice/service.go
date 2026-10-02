@@ -62,6 +62,15 @@ type Call struct {
 	AIRuntimeStage  string     `json:"ai_runtime_stage"`
 	AIFailureClass  string     `json:"ai_failure_class,omitempty"`
 	AIFailureAt     *time.Time `json:"ai_failure_at,omitempty"`
+	// Bounded per-call diagnostic timestamps retained for this process lifetime.
+	// No arbitrary provider strings/audio are retained in these fields.
+	AudioErrorSeen     bool       `json:"audio_error_seen"`
+	AudioErrorAt       *time.Time `json:"audio_error_at,omitempty"`
+	AudioErrorClass    string     `json:"audio_error_class,omitempty"`
+	GeminiAudioFirstAt *time.Time `json:"gemini_audio_first_at,omitempty"`
+	MediaEgressFirstAt *time.Time `json:"media_egress_first_at,omitempty"`
+	CallFailedAt       *time.Time `json:"call_failed_at,omitempty"`
+	CallClosedAt       *time.Time `json:"call_closed_at,omitempty"`
 }
 
 type DestinationPolicy interface {
@@ -573,6 +582,13 @@ func (s *Service) consumeEvents() {
 }
 
 func (s *Service) applyEvent(event control.Event) {
+	if strings.EqualFold(event.Type, "AUDIO_ERROR") {
+		s.recordAudioError(event)
+		return
+	}
+	if strings.EqualFold(event.Class, "call") && (strings.EqualFold(event.Type, "CALL_FAILED") || strings.EqualFold(event.Type, "CALL_CLOSED")) {
+		s.recordTerminalDiagnostic(event)
+	}
 	if !strings.EqualFold(event.Class, "call") {
 		return
 	}
@@ -750,3 +766,90 @@ func newID() (string, error) {
 }
 
 func IsActive(status Status) bool { return !status.terminal() }
+
+// RecordMediaMilestone keeps the first audio observation on each boundary.
+// Fixed slots allow temporal comparison with AUDIO_ERROR and terminal events
+// without an unbounded event/PCM history or a database hop per audio frame.
+func (s *Service) RecordMediaMilestone(callID, stage string) {
+	if stage != "gemini_audio" && stage != "media_egress" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.calls[callID]
+	if !ok {
+		return
+	}
+	var slot **time.Time
+	name := "gemini_audio_first"
+	if stage == "gemini_audio" {
+		slot = &c.GeminiAudioFirstAt
+	} else {
+		slot = &c.MediaEgressFirstAt
+		name = "media_egress_first"
+	}
+	if *slot != nil {
+		return
+	}
+	at := time.Now().UTC()
+	*slot = &at
+	s.calls[callID] = c
+	log.Printf("call_media_timeline api_call_id=%s event=%s at=%s", callID, name, at.Format(time.RFC3339Nano))
+}
+
+func safeAudioClass(value string) string {
+	switch value {
+	case "audio_buffer_limit", "frame_protocol", "peer_closed", "socket_io":
+		return value
+	default:
+		return "audio_device"
+	}
+}
+
+func (s *Service) recordAudioError(event control.Event) {
+	class := safeAudioClass(event.Param)
+	at := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.calls[s.activeID]
+	if !ok || (event.CallID != "" && event.CallID != c.ProviderCallID) {
+		log.Printf("call_media_timeline api_call_id=none event=AUDIO_ERROR audio_error_class=%s at=%s", class, at.Format(time.RFC3339Nano))
+		return
+	}
+	if !c.AudioErrorSeen {
+		c.AudioErrorSeen = true
+		c.AudioErrorAt = &at
+		c.AudioErrorClass = class
+		s.calls[c.CallID] = c
+	}
+	// IDs printed here come only from the already-correlated lifecycle, never
+	// arbitrary non-call event data. AUDIO_ERROR does not dispatch Hangup.
+	log.Printf("call_media_timeline api_call_id=%s provider_call_id=%s event=AUDIO_ERROR audio_error_class=%s at=%s", c.CallID, c.ProviderCallID, class, at.Format(time.RFC3339Nano))
+}
+
+func (s *Service) recordTerminalDiagnostic(event control.Event) {
+	if event.CallID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, c := range s.calls {
+		if c.ProviderCallID != event.CallID {
+			continue
+		}
+		var slot **time.Time
+		if strings.EqualFold(event.Type, "CALL_FAILED") {
+			slot = &c.CallFailedAt
+		} else {
+			slot = &c.CallClosedAt
+		}
+		if *slot != nil {
+			return
+		}
+		at := time.Now().UTC()
+		*slot = &at
+		s.calls[id] = c
+		log.Printf("call_media_timeline api_call_id=%s provider_call_id=%s event=%s at=%s", id, c.ProviderCallID, safeEventType(event.Type), at.Format(time.RFC3339Nano))
+		return
+	}
+}

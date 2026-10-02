@@ -439,6 +439,13 @@ components:
         ai_runtime_stage: { type: string, enum: [not_started, runtime_starting, jev_config, jev_client_init, prompt_snapshot, gemini_input_connect, gemini_response_connect, conversation_state, turn_runtime_init, bridge_init, bridge_run, media_ingress, input_transcription_send, input_transcription_receive, input_transcription_handler, jev_provider, turn_directive, gemini_response_send, gemini_response_receive, media_egress, turn_complete, degraded_mode, runtime_shutdown, runtime_unknown], description: Last safe runtime stage or the stage that failed. }
         ai_failure_class: { type: string, enum: [timeout, canceled, receive_failed, provider_api, media_closed, runtime_error, session_ended, jev_config, jev_client_init, prompt_snapshot, gemini_input_connect, gemini_response_connect, conversation_state, turn_runtime_init, bridge_init, media_ingress, input_transcription_send, input_transcription_receive, jev_provider, turn_directive, gemini_response_send, gemini_response_receive, media_egress, provider_transport, runtime_unknown], description: Sanitized failure category only; provider payloads are never returned. }
         ai_failure_at: { type: string, format: date-time, nullable: true, description: Timestamp of the AI runtime failure. }
+        audio_error_seen: { type: boolean, description: Whether a correlated Baresip AUDIO_ERROR was observed; diagnostics are retained for the API process lifetime. }
+        audio_error_at: { type: string, format: date-time }
+        audio_error_class: { type: string, enum: [audio_buffer_limit, frame_protocol, peer_closed, socket_io, audio_device], description: Fixed safe class; no provider message or audio payload. }
+        gemini_audio_first_at: { type: string, format: date-time }
+        media_egress_first_at: { type: string, format: date-time }
+        call_failed_at: { type: string, format: date-time }
+        call_closed_at: { type: string, format: date-time }
     CallTranscriptResponse:
       type: object
       required: [call_id, status, turns]

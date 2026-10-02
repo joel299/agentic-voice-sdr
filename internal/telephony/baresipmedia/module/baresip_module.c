@@ -4,10 +4,12 @@
 /* Baresip 1.1.0's installed public header uses this enum in struct config
  * without including its declaration. The module does not inspect the field;
  * completing the enum here preserves the public struct's integer ABI layout. */
+#ifdef GRU151_DECLARE_JBUF_TYPE
 enum jbuf_type { JBUF_OFF = 0, JBUF_FIXED, JBUF_ADAPTIVE };
+#endif
 #include <baresip.h>
+#include "stream_source.h"
 #include <errno.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -36,8 +38,7 @@ struct media_io {
 	uint32_t ptime;
 	size_t sample_count;
 	size_t payload_bytes;
-	uint8_t wire[FRAME_HEADER + MAX_FRAME_BYTES];
-	size_t wire_len;
+
 	ausrc_read_h *readh;
 	ausrc_error_h *errorh;
 	auplay_write_h *writeh;
@@ -120,90 +121,53 @@ static int validate_params(uint32_t rate, uint8_t channels, uint32_t ptime,
 	uint32_t expected_rate = source ? 24000 : 16000;
 	if (rate != expected_rate || channels != 1 || fmt != AUFMT_S16LE)
 		return EINVAL;
-	if (ptime == 0 || ptime > 60 || (rate * ptime) % 1000)
+	if ((source && ptime != GRU151_PTIME_MS) || ptime == 0 || ptime > 60 || (rate * ptime) % 1000)
 		return EINVAL;
 	return 0;
 }
 
-static int read_socket(struct media_io *io)
-{
-	struct pollfd pfd = {.fd = io->fd, .events = POLLIN};
-	int pr = poll(&pfd, 1, (int)io->ptime);
-	if (pr < 0)
-		return errno == EINTR ? 0 : -errno;
-	if (!pr)
-		return 0;
-	if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
-		return -ECONNRESET;
-	for (;;) {
-		if (io->wire_len == sizeof(io->wire))
-			return -EMSGSIZE;
-		ssize_t n = recv(io->fd, io->wire + io->wire_len,
-				 sizeof(io->wire) - io->wire_len, MSG_DONTWAIT);
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			return -errno;
-		}
-		if (!n)
-			return -ECONNRESET;
-		io->wire_len += (size_t)n;
-	}
-	return 0;
-}
-
-static int take_pcm(struct media_io *io, int16_t *samples)
-{
-	uint16_t nbytes;
-	int err;
-
-	if (io->wire_len < FRAME_HEADER)
-		return 0;
-	nbytes = (uint16_t)(((uint16_t)io->wire[1] << 8) | io->wire[2]);
-	if (io->wire[0] != TX_TYPE_SLIN24 || nbytes != io->payload_bytes)
-		return -EPROTO;
-	if (io->wire_len < FRAME_HEADER + nbytes)
-		return 0;
-	memcpy(samples, io->wire + FRAME_HEADER, nbytes);
-	io->wire_len -= FRAME_HEADER + nbytes;
-	memmove(io->wire, io->wire + FRAME_HEADER + nbytes, io->wire_len);
-	err = 1;
-	return err;
-}
+static struct gru151_source_stats source_stats;
 
 static void *source_thread(void *arg)
 {
 	struct media_io *io = arg;
-	int16_t *samples = calloc(io->sample_count, sizeof(*samples));
-	if (!samples) {
+	struct gru151_parser parser = {0};
+	int16_t samples[GRU151_PCM_BYTES / sizeof(int16_t)];
+	struct timespec deadline;
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline)) {
+		atomic_store(&source_stats.last_error_class, GRU151_CLOCK);
 		atomic_store(&io->failed, true);
+		if (io->errorh) io->errorh(errno, "gru151_clock", io->arg);
 		return NULL;
 	}
 	while (atomic_load(&io->running)) {
 		struct auframe af;
-		int err = read_socket(io);
-		if (err < 0) {
-			if (atomic_load(&io->running) && io->errorh)
-				io->errorh(-err, "gru151 media IPC RX failed", io->arg);
+		int err = gru151_source_wait(&deadline);
+		if (!atomic_load(&io->running)) break;
+		if (err) {
+			atomic_store(&source_stats.last_error_class, GRU151_CLOCK);
 			atomic_store(&io->failed, true);
+			if (io->errorh) io->errorh(err, "gru151_clock", io->arg);
 			break;
 		}
-		memset(samples, 0, io->payload_bytes);
-		err = take_pcm(io, samples);
+		err = gru151_read_frame(io->fd, &parser, samples, &source_stats);
 		if (err < 0) {
-			if (io->errorh)
-				io->errorh(-err, "gru151 media IPC frame rejected", io->arg);
 			atomic_store(&io->failed, true);
+			/* The error callback may close the call and release this source.
+			 * Do not access io after invoking it. */
+			if (atomic_load(&io->running) && io->errorh)
+				io->errorh(-err, err == -EPROTO ? "gru151_frame_protocol" : "gru151_socket_io", io->arg);
 			break;
+		}
+		if (!err) {
+			memset(samples, 0, sizeof(samples));
+			atomic_fetch_add(&source_stats.silence_frames, 1);
 		}
 		auframe_init(&af, AUFMT_S16LE, samples, io->sample_count);
 		af.timestamp = tmr_jiffies() * 1000;
-		if (io->readh)
-			io->readh(&af, io->arg);
+		if (io->readh) io->readh(&af, io->arg);
+		atomic_fetch_add(&source_stats.frames_emitted, 1);
 	}
-	free(samples);
 	return NULL;
 }
 
@@ -388,6 +352,25 @@ static void *player_thread(void *arg)
 	return NULL;
 }
 
+/* Process-lifetime counters, fixed class vocabulary, no payload/paths/secrets. */
+static int source_stats_print(struct re_printf *pf, void *arg)
+{
+	(void)arg;
+	return re_hprintf(pf,
+		"source_frames_received=%llu source_frames_emitted=%llu source_silence_frames=%llu "
+		"source_protocol_errors=%llu source_socket_errors=%llu source_max_buffered_bytes=%llu source_last_error_class=%s\n",
+		(unsigned long long)atomic_load(&source_stats.frames_received),
+		(unsigned long long)atomic_load(&source_stats.frames_emitted),
+		(unsigned long long)atomic_load(&source_stats.silence_frames),
+		(unsigned long long)atomic_load(&source_stats.protocol_errors),
+		(unsigned long long)atomic_load(&source_stats.socket_errors),
+		(unsigned long long)atomic_load(&source_stats.max_buffered_bytes),
+		gru151_error_name(atomic_load(&source_stats.last_error_class)));
+}
+static const struct cmd cmdv[] = {
+	{"gru151_media_stats", 0, 0, "Safe media source counters", source_stats_print},
+};
+
 static int module_init(void)
 {
 	int err = ausrc_register(&ausrc, baresip_ausrcl(), "gru151_media", source_alloc);
@@ -398,11 +381,14 @@ static int module_init(void)
 		ausrc = mem_deref(ausrc);
 		return err;
 	}
-	return 0;
+	err = cmd_register(baresip_commands(), cmdv, 1);
+	if (err) { ausrc = mem_deref(ausrc); auplay = mem_deref(auplay); }
+	return err;
 }
 
 static int module_close(void)
 {
+	cmd_unregister(baresip_commands(), cmdv);
 	auplay = mem_deref(auplay);
 	ausrc = mem_deref(ausrc);
 	return 0;

@@ -715,6 +715,8 @@ func (c *Client) Close() error {
 func normalizeEvent(message wireMessage) control.Event {
 	event := control.Event{Class: message.Class, Type: message.Type, CallID: message.CallID, PeerURI: message.PeerURI, Direction: message.Direction, Param: message.Param}
 	switch strings.ToUpper(message.Type) {
+	case "AUDIO_ERROR":
+		event.Param = safeAudioErrorClass(message.Param)
 	case "CALL_OUTGOING", "CALL_SETUP":
 		event.State = control.CallStateOutgoing
 	case "CALL_PROGRESS", "CALL_SESSION_PROGRESS":
@@ -961,3 +963,21 @@ func growBackoff(current, maximum time.Duration) time.Duration {
 }
 
 var _ control.Provider = (*Client)(nil)
+
+// Baresip v1.1.0 sends AUDIO_ERROR as errno,message. Only fixed errno classes
+// leave the controller; arbitrary device strings (paths, provider data) do not.
+func safeAudioErrorClass(value string) string {
+	code, _, _ := strings.Cut(value, ",")
+	switch strings.TrimSpace(code) {
+	case "90":
+		return "audio_buffer_limit"
+	case "71":
+		return "frame_protocol"
+	case "104", "32":
+		return "peer_closed"
+	case "5", "9", "110":
+		return "socket_io"
+	default:
+		return "audio_device"
+	}
+}

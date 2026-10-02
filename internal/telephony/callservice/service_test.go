@@ -636,3 +636,41 @@ func waitFor(t *testing.T, condition func() bool) {
 	}
 	t.Fatal("condition did not become true")
 }
+
+func TestAudioErrorAndTerminalTimelineIsCorrelatedSafeAndBounded(t *testing.T) {
+	p := newFakeProvider()
+	s := testService(t, p)
+	c, err := s.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_OUTGOING", CallID: "media-call"})
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "media-call"})
+	s.RecordMediaMilestone(c.CallID, "gemini_audio")
+	s.RecordMediaMilestone(c.CallID, "media_egress")
+	before, _ := s.Get(c.CallID)
+	s.RecordMediaMilestone(c.CallID, "gemini_audio")
+	s.applyEvent(control.Event{Class: "other", Type: "AUDIO_ERROR", CallID: "wrong-call", Param: "frame_protocol"})
+	got, _ := s.Get(c.CallID)
+	if got.AudioErrorSeen {
+		t.Fatal("cross-call audio error leaked")
+	}
+	s.applyEvent(control.Event{Class: "other", Type: "AUDIO_ERROR", CallID: "media-call", Param: "password secret"})
+	got, _ = s.Get(c.CallID)
+	if !got.AudioErrorSeen || got.AudioErrorClass != "audio_device" || got.Status != StatusConnected {
+		t.Fatalf("audio diagnostic = %+v", got)
+	}
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_FAILED", CallID: "media-call", State: control.CallStateFailed, Param: "failed"})
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_CLOSED", CallID: "media-call", State: control.CallStateFailed, Param: "unknown"})
+	got, _ = s.Get(c.CallID)
+	if got.GeminiAudioFirstAt != before.GeminiAudioFirstAt || got.CallClosedAt == nil || got.CallFailedAt == nil {
+		t.Fatal("fixed first-event slots missing/overwritten")
+	}
+	if got.MediaEgressFirstAt.Before(*got.GeminiAudioFirstAt) || got.AudioErrorAt.Before(*got.MediaEgressFirstAt) || got.CallFailedAt.Before(*got.AudioErrorAt) || got.CallClosedAt.Before(*got.CallFailedAt) {
+		t.Fatal("audio -> error -> terminal order lost")
+	}
+	_, hangups := p.counts()
+	if hangups != 0 {
+		t.Fatal("diagnostic dispatched Hangup")
+	}
+}

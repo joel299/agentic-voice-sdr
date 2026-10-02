@@ -767,3 +767,17 @@ func writeTestMessage(conn net.Conn, payload string) error {
 }
 
 var _ io.Reader = (*strings.Reader)(nil)
+
+func TestAudioErrorDropsArbitraryDeviceParameter(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"90,gru151 media IPC RX failed", "audio_buffer_limit"},
+		{"71,gru151_frame_protocol", "frame_protocol"},
+		{"104,private/path/password", "peer_closed"},
+		{"arbitrary Authorization secret", "audio_device"},
+	} {
+		got := normalizeEvent(wireMessage{Class: "other", Type: "AUDIO_ERROR", Param: tc.raw, CallID: "provider-id"})
+		if got.Param != tc.want || got.CallID != "provider-id" {
+			t.Fatalf("safe event = %+v", got)
+		}
+	}
+}

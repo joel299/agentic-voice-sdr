@@ -22,8 +22,8 @@ import (
 
 const (
 	defaultBaseURL            = "https://openrouter.ai/api"
-	defaultTimeout            = 400 * time.Millisecond
-	CanonicalDefaultTimeoutMS = 400
+	defaultTimeout            = 1500 * time.Millisecond
+	CanonicalDefaultTimeoutMS = 1500
 	maxResponseSize           = 1 << 20
 )
 
@@ -75,7 +75,7 @@ type Client struct {
 	timeout    time.Duration
 }
 
-// New creates a client with the bounded 400ms provider timeout.
+// New creates a client with the bounded 1500ms provider timeout.
 func New(config Config) (*Client, error) { return NewWithTimeout(config, defaultTimeout) }
 
 // NewWithTimeout permits deterministic timeout tests and stricter deployments.

@@ -52,7 +52,7 @@ func TestCalibrationEndpointsAreOwnerOnlyAndKeepSecretsOut(t *testing.T) {
 		t.Fatalf("owner auth status=%d", got)
 	}
 	got := ownerRequest(h, http.MethodGet, "/v1/config/jev", "", true)
-	if got.Code != 200 || !strings.Contains(got.Body.String(), `"canonical_default_timeout_ms":400`) {
+	if got.Code != 200 || !strings.Contains(got.Body.String(), `"canonical_default_timeout_ms":1500`) {
 		t.Fatalf("JEV config response %d %s", got.Code, got.Body.String())
 	}
 	if strings.Contains(strings.ToLower(got.Body.String()), "api_key") {
@@ -65,6 +65,19 @@ func TestCalibrationEndpointsAreOwnerOnlyAndKeepSecretsOut(t *testing.T) {
 	good := ownerRequest(h, http.MethodPut, "/v1/config/jev", `{"model":"m","timeout_ms":400,"description":"x","decision_guidance":"y"}`, true)
 	if good.Code != 200 {
 		t.Fatalf("valid JEV tuning status=%d body=%s", good.Code, good.Body.String())
+	}
+}
+
+type classifiedTimeout struct{}
+
+func (classifiedTimeout) Error() string               { return "provider request timed out" }
+func (classifiedTimeout) ProviderStatusClass() string { return "jev_provider_timeout" }
+
+func TestProviderTimeoutPreservesSanitizedStageClass(t *testing.T) {
+	res := httptest.NewRecorder()
+	writeProviderError(res, classifiedTimeout{})
+	if res.Code != http.StatusGatewayTimeout || !strings.Contains(res.Body.String(), `"provider_status_class":"jev_provider_timeout"`) {
+		t.Fatalf("timeout response lost stage classification: status=%d body=%s", res.Code, res.Body)
 	}
 }
 

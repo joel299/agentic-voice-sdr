@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,7 +20,12 @@ import (
 
 type providerClassError string
 
-func (e providerClassError) Error() string               { return "provider operation failed" }
+func (e providerClassError) Error() string {
+	if strings.Contains(string(e), "timeout") {
+		return "provider request timed out"
+	}
+	return "provider operation failed"
+}
 func (e providerClassError) ProviderStatusClass() string { return string(e) }
 
 func newCalibrationServices(baseJEV openrouterjev.Config, baseGemini geminilive.Config, prompts *sessionprompt.Builder, promptService httpapi.AgentPromptManager, controller *baresipctrl.Client, tuning *httpapi.TuningStore) httpapi.CalibrationServices {
@@ -62,7 +68,10 @@ func newCalibrationServices(baseJEV openrouterjev.Config, baseGemini geminilive.
 		}
 		detailed, err := client.DecideDetailed(ctx, input)
 		if err != nil {
-			return httpapi.AgentTurnResult{}, nil, err
+			if errors.Is(err, openrouterjev.ErrTimeout) {
+				return httpapi.AgentTurnResult{}, nil, providerClassError("jev_provider_timeout")
+			}
+			return httpapi.AgentTurnResult{}, nil, providerClassError("jev_provider_failure")
 		}
 		decision := detailed.Decision
 		jevResult := httpapi.JEVTestResult{Intent: string(detailed.Intent), NextAction: string(decision.NextAction), Reason: string(decision.Reason), LatencyMS: time.Since(decisionStarted).Milliseconds(), TimeoutMS: settings.TimeoutMS, ProviderStatusClass: "ok"}
@@ -112,7 +121,7 @@ func newCalibrationServices(baseJEV openrouterjev.Config, baseGemini geminilive.
 		for {
 			event, recvErr := responder.Receive(ctx)
 			if recvErr != nil {
-				return httpapi.AgentTurnResult{}, nil, recvErr
+				return httpapi.AgentTurnResult{}, nil, providerClassError(geminiReceiveFailureClass(recvErr, metadata))
 			}
 			elapsed := time.Since(began).Milliseconds()
 			switch event.Kind {
@@ -141,9 +150,9 @@ func newCalibrationServices(baseJEV openrouterjev.Config, baseGemini geminilive.
 				if class == "" {
 					class = "unknown"
 				}
-				return httpapi.AgentTurnResult{}, nil, providerClassError("gemini_response_closed_" + class)
+				return httpapi.AgentTurnResult{}, nil, providerClassError(geminiReceiveFailureClass(providerClassError("closed_"+class), metadata))
 			case geminilive.EventAPIError:
-				return httpapi.AgentTurnResult{}, nil, providerClassError("gemini_api_error")
+				return httpapi.AgentTurnResult{}, nil, providerClassError(geminiReceiveFailureClass(providerClassError("api_error"), metadata))
 			}
 			if metadata.GenerationComplete && metadata.TurnComplete {
 				break
@@ -178,6 +187,22 @@ func newCalibrationServices(baseJEV openrouterjev.Config, baseGemini geminilive.
 		return map[string]any{"api_ready": true, "baresip_ctrl_ready": ctrlReady, "baresip_registered": regState == control.RegistrationRegistered, "prompt_active": promptActive, "prompt_name": promptName, "prompt_version": promptVersion, "jev_configured": baseJEV.APIKey != "", "jev_model": j.Model, "jev_timeout_ms": j.TimeoutMS, "gemini_configured": baseGemini.APIKey != "", "gemini_model": g.Model, "gemini_voice_name": g.VoiceName, "whatsapp_status": "deferred", "scheduling_status": "deferred"}, nil
 	}
 	return services
+}
+
+func geminiReceiveFailureClass(err error, metadata httpapi.GeminiTurnMetadata) string {
+	providerClass := "unknown"
+	var providerErr *geminilive.Error
+	if errors.As(err, &providerErr) {
+		providerClass = string(providerErr.Kind)
+		if providerErr.TransportClass != "" {
+			providerClass += "_" + string(providerErr.TransportClass)
+		} else if providerErr.CloseStatusClass != "" {
+			providerClass += "_" + string(providerErr.CloseStatusClass)
+		}
+	} else if safe, ok := err.(interface{ ProviderStatusClass() string }); ok && safe.ProviderStatusClass() != "" {
+		providerClass = safe.ProviderStatusClass()
+	}
+	return fmt.Sprintf("gemini_response_receive_%s_audio_events_%d_generation_complete_%t_turn_complete_%t", providerClass, metadata.AudioEventCount, metadata.GenerationComplete, metadata.TurnComplete)
 }
 
 func testDecisionInput(text, stage string) (conversation.DecisionInput, error) {

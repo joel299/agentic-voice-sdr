@@ -14,7 +14,7 @@ import (
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 )
 
-const CanonicalJEVTimeoutMS = 400
+const CanonicalJEVTimeoutMS = 1500
 
 type JEVSettings struct {
 	Model            string `json:"model"`
@@ -339,7 +339,9 @@ func writeProviderError(w http.ResponseWriter, e error) {
 	if errors.Is(e, context.DeadlineExceeded) || strings.Contains(strings.ToLower(e.Error()), "timed out") {
 		code = 504
 		msg = "provider request timed out"
-		class = "provider_timeout"
+		if class == "provider_failure" {
+			class = "provider_timeout"
+		}
 	}
 	writeJSON(w, code, map[string]string{"error": msg, "provider_status_class": class})
 }

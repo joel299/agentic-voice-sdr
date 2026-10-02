@@ -255,7 +255,7 @@ paths:
       tags: [Owner tuning]
       operationId: getJEVConfig
       summary: Read safe JEV tuning
-      description: Returns process-local model, behavior description, owner guidance, configured_timeout_ms and canonical_default_timeout_ms (400). Values reset to defaults on API restart. OPENROUTER_API_KEY is read only from the local environment and is never returned.
+      description: Returns process-local model, behavior description, owner guidance, configured_timeout_ms and canonical_default_timeout_ms (1500). Values reset to defaults on API restart. OPENROUTER_API_KEY is read only from the local environment and is never returned.
       security: [{ BearerAuth: [] }]
       responses:
         '200': { description: Safe JEV settings, content: { application/json: { schema: { $ref: '#/components/schemas/JEVConfig' } } } }
@@ -264,7 +264,7 @@ paths:
       tags: [Owner tuning]
       operationId: updateJEVConfig
       summary: Update bounded JEV behavior tuning
-      description: Updates the model and calibration text in process memory for future decisions; values reset to defaults on API restart. timeout_ms accepts 50–5000 ms; the canonical default remains 400 ms. Larger values can reduce false timeouts while increasing turn latency. Intent/action/reason enums, opt-out handling, tools, and hard safety rules are server controlled. JEV chooses what to do, not what to say. API keys are not accepted.
+      description: Updates the model and calibration text in process memory for future decisions; values reset to defaults on API restart. timeout_ms accepts 50–5000 ms; the canonical default is 1500 ms. Larger values can reduce false timeouts while increasing turn latency. Intent/action/reason enums, opt-out handling, tools, and hard safety rules are server controlled. JEV chooses what to do, not what to say. API keys are not accepted.
       security: [{ BearerAuth: [] }]
       requestBody:
         required: true
@@ -274,7 +274,7 @@ paths:
             schema: { $ref: '#/components/schemas/JEVConfigUpdate' }
             examples:
               Recommended:
-                value: { model: 'typesafe/jev-1.13', timeout_ms: 400, description: 'Classificador comercial SDR responsável por selecionar a próxima ação.', decision_guidance: 'Classifique semanticamente o último turno FINAL e selecione a próxima ação comercial.' }
+                value: { model: 'typesafe/jev-1.13', timeout_ms: 1500, description: 'Classificador comercial SDR responsável por selecionar a próxima ação.', decision_guidance: 'Classifique semanticamente o último turno FINAL e selecione a próxima ação comercial.' }
       responses:
         '200': { description: Applied JEV settings, content: { application/json: { schema: { $ref: '#/components/schemas/JEVConfig' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -543,7 +543,7 @@ components:
       required: [model, timeout_ms, description, decision_guidance]
       properties:
         model: { type: string, minLength: 1, maxLength: 160, description: OpenRouter JEV model identifier. }
-        timeout_ms: { type: integer, minimum: 50, maximum: 5000, default: 400, description: Provider decision deadline in milliseconds; canonical default is 400 ms. }
+        timeout_ms: { type: integer, minimum: 50, maximum: 5000, default: 1500, description: Provider decision deadline in milliseconds; canonical default is 1500 ms. }
         description: { type: string, maxLength: 2000, description: Classifier role description; it does not generate spoken copy. }
         decision_guidance: { type: string, maxLength: 4000, description: Additional owner calibration guidance. Canonical enums and safety rules remain server controlled. }
     JEVConfig:
@@ -553,7 +553,7 @@ components:
           required: [configured_timeout_ms, canonical_default_timeout_ms]
           properties:
             configured_timeout_ms: { type: integer, description: Currently configured per-decision timeout. }
-            canonical_default_timeout_ms: { type: integer, const: 400, description: Canonical JEV default; not changed by owner tuning. }
+            canonical_default_timeout_ms: { type: integer, const: 1500, description: Canonical JEV default; not changed by owner tuning. }
     GeminiConfig:
       type: object
       additionalProperties: false

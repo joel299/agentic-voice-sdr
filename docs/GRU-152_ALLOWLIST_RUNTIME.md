@@ -19,7 +19,7 @@ Inspected API PID 1609774, binary `/tmp/gru152-api-4d1836f`, embedded baseline r
 | Real config.Load -> NewAllowlist reconstruction authorizes destination | yes |
 | Registration / active-call no-call smoke | REGISTERED / empty |
 
-The owner reported the earlier 403 at approximately 13:00 local / 17:00 UTC. Its originating URL and exact request were not retained in the supplied evidence. The inspected process environment, file and real parser do **not** demonstrate any of A (restart did not load env), B (file regressed), or C (parser bug). The historical 403 source remains unconfirmed. Reconstructing the startup policy from `/proc` is not a live heap inspection of the old service. We do not claim a historical root cause from an unconfirmed hypothesis.
+The owner reported the earlier 403 at approximately 13:00 local / 17:00 UTC. The owner subsequently confirmed the Tailnet Scalar URL, `https://joelquintana.tail212bac.ts.net:8443/docs`; the exact HTTP request and historical policy snapshot were not retained. The inspected process environment, file and real parser do **not** demonstrate any of A (restart did not load env), B (file regressed), or C (parser bug). The historical 403 source remains unconfirmed. Reconstructing the startup policy from `/proc` is not a live heap inspection of the old service. We do not claim a historical root cause from an unconfirmed hypothesis.
 
 ## Implemented behavior
 

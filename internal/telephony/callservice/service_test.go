@@ -186,6 +186,13 @@ func TestCallFailedPersistsSanitizedTerminalReason(t *testing.T) {
 	if err != nil || got.TerminalReason != "sip_403" {
 		t.Fatalf("call=%+v err=%v; want sanitized sip_403", got, err)
 	}
+	// The consumer publishes in-memory state before the repository callback.
+	// Wait for that side effect, rather than racing the status publication.
+	waitFor(t, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return len(repo.updates) > 0
+	})
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
 	if len(repo.updates) == 0 || repo.updates[len(repo.updates)-1].reason != "sip_403" {

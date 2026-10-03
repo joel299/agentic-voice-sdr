@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"io"
 	"net"
 	"net/http"
@@ -17,12 +18,14 @@ import (
 	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/salesintent"
 )
 
 const (
-	defaultBaseURL  = "https://openrouter.ai/api"
-	defaultTimeout  = 400 * time.Millisecond
-	maxResponseSize = 1 << 20
+	defaultBaseURL            = "https://openrouter.ai/api"
+	defaultTimeout            = 1500 * time.Millisecond
+	CanonicalDefaultTimeoutMS = 1500
+	maxResponseSize           = 1 << 20
 )
 
 var (
@@ -34,7 +37,11 @@ var (
 )
 
 // Config contains provider settings. APIKey is never included in returned errors.
-type Config struct{ APIKey, BaseURL, Model string }
+type Config struct {
+	APIKey, BaseURL, Model, Description, DecisionGuidance string
+	CompactInstructions                                   bool
+	ObserveRequest                                        func(RequestTiming)
+}
 
 // ConfigFromEnv loads OpenRouter settings. A model is mandatory; no model ID is
 // selected implicitly. The official OpenRouter API base URL is used if omitted.
@@ -73,7 +80,7 @@ type Client struct {
 	timeout    time.Duration
 }
 
-// New creates a client with the bounded 400ms provider timeout.
+// New creates a client with the bounded 1500ms provider timeout.
 func New(config Config) (*Client, error) { return NewWithTimeout(config, defaultTimeout) }
 
 // NewWithTimeout permits deterministic timeout tests and stricter deployments.
@@ -91,9 +98,11 @@ type requestInput struct {
 		LeadResponded bool `json:"lead_responded"`
 		OptedOut      bool `json:"opted_out"`
 	} `json:"signals"`
-	TurnCount           int                          `json:"turn_count"`
-	LastTurnRole        conversation.ParticipantRole `json:"last_turn_role,omitempty"`
-	LastTranscriptState conversation.TranscriptState `json:"last_transcript_state,omitempty"`
+	TurnCount                    int                          `json:"turn_count"`
+	LastTurnRole                 conversation.ParticipantRole `json:"last_turn_role,omitempty"`
+	LastTranscriptState          conversation.TranscriptState `json:"last_transcript_state,omitempty"`
+	LatestFinalLeadText          string                       `json:"latest_final_lead_text,omitempty"`
+	MatchingExecutableCapability bool                         `json:"matching_executable_capability"`
 }
 
 type decisionsRequest struct {
@@ -117,29 +126,35 @@ type typedDecisionAnswer struct {
 	Choice string `json:"choice"`
 }
 
-var canonicalDecisionChoices = map[string]conversation.Decision{
-	"continue_conversation":                 {NextAction: conversation.ActionContinueConversation, Reason: conversation.ReasonContinueDiscovery},
-	"ask_question":                          {NextAction: conversation.ActionAskQuestion, Reason: conversation.ReasonNeedsClarification},
-	"propose_scheduling":                    {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonReadyToSchedule},
-	"propose_scheduling_interest_confirmed": {NextAction: conversation.ActionProposeScheduling, Reason: conversation.ReasonInterestConfirmed},
-	"request_capability":                    {NextAction: conversation.ActionRequestCapability, Reason: conversation.ReasonCapabilityRequired},
-	"follow_up":                             {NextAction: conversation.ActionFollowUp, Reason: conversation.ReasonFollowUpRequired},
-	"end_conversation":                      {NextAction: conversation.ActionEndConversation, Reason: conversation.ReasonConversationComplete},
-	"handoff":                               {NextAction: conversation.ActionHandoff, Reason: conversation.ReasonHandoffRequired},
+var intentChoices = map[string]salesintent.Class{
+	"acceptance":                           salesintent.Acceptance,
+	"indecision_cost":                      salesintent.IndecisionCost,
+	"indecision_security":                  salesintent.IndecisionSecurity,
+	"internal_alignment":                   salesintent.InternalAlignment,
+	"explicit_future_follow_up":            salesintent.FutureFollowUp,
+	"rejection":                            salesintent.Rejection,
+	"opt_out":                              salesintent.OptOut,
+	"human_request":                        salesintent.HumanRequest,
+	"clarification_or_information_request": salesintent.Clarification,
+	"capability_request":                   salesintent.CapabilityRequest,
+	"neutral_continue":                     salesintent.NeutralContinue,
 }
 
-var canonicalNextActionQuestion = decisionQuestion{
+var semanticIntentQuestion = decisionQuestion{
 	Type:         "choice",
-	Instructions: "Choose exactly one canonical next action using only these supplied fields: stage, signals.lead_responded, signals.opted_out, turn_count, last_turn_role, and last_transcript_state. signals.lead_responded is cumulative historical state (the lead has responded at least once), not whether the lead responded to the most recent agent turn. For stage=active, last_turn_role and last_transcript_state describe the latest turn and take precedence over that cumulative signal: an agent last turn with turn_count>0 means the agent has just spoken and we are awaiting the next lead response; a lead last turn with final transcript means the lead just responded. Never infer lead intent, interest, readiness to schedule, or a need for clarification because no transcript text or such signal is provided. opted_out=true is a hard invariant: choose end_conversation, regardless of last turn. Choose end_conversation for stage=ended or stage=closing. For stage=opening choose continue_conversation. Use another choice only when its criterion is directly supported by the supplied structured state. Do not generate text, spoken copy, messages, or tool instructions.",
+	Instructions: "Classify the latest final lead text by semantic intent in context; choose exactly one enum, not by keywords. Do not write spoken copy or select tools. Acceptance requires agreement to a concrete next step or scheduling; interest alone is insufficient. internal_alignment means internal review without a request for later contact; explicit_future_follow_up requires a request for later contact. rejection declines the offer but allows contact; opt_out asks to stop contact. human_request asks for a person; capability_request asks whether a specific function exists. Respect opted_out as a hard override. If unclear, choose clarification_or_information_request or neutral_continue.",
 	Criteria: map[string]string{
-		"continue_conversation":                 "For stage=opening, begin the conversation flow. For stage=active with last_turn_role=lead and last_transcript_state=final and signals.opted_out=false, continue the active flow because the lead just responded. Use the latest turn, not cumulative signals.lead_responded, to determine whose turn it is; do not infer clarification or scheduling.",
-		"ask_question":                          "Ask a clarifying question only when an explicit supplied canonical signal establishes that clarification is needed; do not infer this from lead_responded or absent transcript text.",
-		"propose_scheduling":                    "Propose scheduling only when an explicit supplied canonical signal establishes readiness; this DecisionInput has no scheduling-readiness field, so do not infer it.",
-		"propose_scheduling_interest_confirmed": "Propose scheduling only when an explicit supplied canonical signal establishes confirmed interest and readiness; do not infer either from lead_responded.",
-		"request_capability":                    "Request a capability only when an explicit supplied canonical signal establishes that a capability is required.",
-		"follow_up":                             "For stage=active with last_turn_role=agent and turn_count>0 and signals.opted_out=false, select follow-up because the agent just spoke and the next lead response is awaited, regardless of signals.lead_responded (which is cumulative historical state and may be true). The latest turn takes precedence over the cumulative signal.",
-		"end_conversation":                      "Select end_conversation when signals.opted_out=true (hard invariant), or when stage=closing or stage=ended. Do not end an opening or active conversation solely because transcript text, intent, or completion details are absent.",
-		"handoff":                               "Hand off only when an explicit supplied canonical signal establishes that human assistance is required.",
+		"acceptance":                           "Accepts a concrete suggested time or next step, or asks to schedule; interest alone is insufficient.",
+		"indecision_cost":                      "Raises a price, budget, or affordability concern.",
+		"indecision_security":                  "Raises a security, privacy, compliance, or trust concern.",
+		"internal_alignment":                   "Needs internal discussion or approval, without asking for later contact.",
+		"explicit_future_follow_up":            "Explicitly asks for later contact, tied to a date/event or otherwise.",
+		"rejection":                            "Declines the offer but does not ask to stop contact.",
+		"opt_out":                              "Asks to stop contact, unsubscribe, or receive no further messages.",
+		"human_request":                        "Asks for a human representative, person, or transfer.",
+		"clarification_or_information_request": "Asks for explanation or information before deciding.",
+		"capability_request":                   "Asks whether a specific feature or integration exists.",
+		"neutral_continue":                     "Neutral acknowledgment or insufficient meaning for a specific intent.",
 	},
 }
 
@@ -156,8 +171,19 @@ func decisionsEndpoint(baseURL string) string {
 // Decide sends only the typed decision snapshot and validates the provider result
 // using the domain's canonical NewDecision constructor.
 func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
+	result, err := c.DecideDetailed(ctx, input)
+	return result.Decision, err
+}
+
+// DetailedResult contains only the validated intent enum and canonical decision.
+type DetailedResult struct {
+	Intent   salesintent.Class
+	Decision conversation.Decision
+}
+
+func (c *Client) DecideDetailed(ctx context.Context, input conversation.DecisionInput) (DetailedResult, error) {
 	if ctx == nil {
-		return conversation.Decision{}, ErrConfiguration
+		return DetailedResult{}, ErrConfiguration
 	}
 	var mapped requestInput
 	mapped.Stage = input.Stage
@@ -166,20 +192,43 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	mapped.TurnCount = input.TurnCount
 	mapped.LastTurnRole = input.LastTurnRole
 	mapped.LastTranscriptState = input.LastTranscriptState
+	mapped.LatestFinalLeadText = salesintent.SanitizeLeadText(input.LatestFinalLeadText)
+	mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
+	question := decisionQuestion{Type: semanticIntentQuestion.Type, Instructions: semanticIntentQuestion.Instructions, Criteria: semanticIntentQuestion.Criteria}
+	if c.config.CompactInstructions {
+		question.Instructions = "Classify the latest final lead text semantically in context. Choose one intent using the criteria; never write spoken copy or select tools. Respect opted_out. If unclear, choose clarification_or_information_request or neutral_continue."
+	}
+	if strings.TrimSpace(c.config.Description) != "" {
+		question.Instructions += " Classifier description: " + strings.TrimSpace(c.config.Description)
+	}
+	if strings.TrimSpace(c.config.DecisionGuidance) != "" {
+		question.Instructions += " Owner decision guidance: " + strings.TrimSpace(c.config.DecisionGuidance)
+	}
 	payload := decisionsRequest{
 		Model:     c.config.Model,
 		State:     mapped,
-		Questions: map[string]decisionQuestion{"next_action": canonicalNextActionQuestion},
+		Questions: map[string]decisionQuestion{"intent": question},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
+	observeTiming := c.config.ObserveRequest
+	if tr := telemetry.TraceFromContext(ctx); tr != nil {
+		observeTiming = func(v RequestTiming) {
+			tr.SetJEVNetwork(v)
+			if c.config.ObserveRequest != nil {
+				c.config.ObserveRequest(v)
+			}
+		}
+	}
+	ctx, finishTiming := requestTiming(ctx, len(body), observeTiming)
+	defer finishTiming()
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, decisionsEndpoint(c.config.BaseURL), bytes.NewReader(body))
 	if err != nil {
-		return conversation.Decision{}, ErrConfiguration
+		return DetailedResult{}, ErrConfiguration
 	}
 	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -187,45 +236,58 @@ func (c *Client) Decide(ctx context.Context, input conversation.DecisionInput) (
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return conversation.Decision{}, ctx.Err()
+			return DetailedResult{}, ctx.Err()
 		}
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return conversation.Decision{}, ErrTimeout
+			return DetailedResult{}, ErrTimeout
 		}
-		return conversation.Decision{}, ErrTransport
+		return DetailedResult{}, ErrTransport
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return conversation.Decision{}, ErrProviderRejected
+		return DetailedResult{}, ErrProviderRejected
 	}
 	responseBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		if ctx.Err() != nil {
-			return conversation.Decision{}, ctx.Err()
+			return DetailedResult{}, ctx.Err()
 		}
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return conversation.Decision{}, ErrTimeout
+			return DetailedResult{}, ErrTimeout
 		}
-		return conversation.Decision{}, ErrTransport
+		return DetailedResult{}, ErrTransport
 	}
 	if len(responseBytes) == 0 || len(responseBytes) > maxResponseSize {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
 	var providerResponse decisionsResponse
 	if err := json.Unmarshal(responseBytes, &providerResponse); err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
-	answer, ok := providerResponse.Answers["next_action"]
+	answer, ok := providerResponse.Answers["intent"]
 	if !ok || answer.Type != "choice" {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
-	decision, ok := canonicalDecisionChoices[answer.Choice]
+	intent, ok := intentChoices[answer.Choice]
 	if !ok {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
-	validated, err := conversation.NewDecision(decision.NextAction, decision.Reason)
+	optedOut := mapped.Signals.OptedOut || input.LastTurnRole == conversation.RoleLead && input.LastTranscriptState == conversation.TranscriptFinal && salesintent.HasExplicitOptOut(mapped.LatestFinalLeadText)
+	if optedOut {
+		intent = salesintent.OptOut
+	}
+	if !optedOut && input.Stage == conversation.StageOpening {
+		intent = salesintent.NeutralContinue
+	} else if !optedOut && (input.Stage == conversation.StageClosing || input.Stage == conversation.StageEnded) {
+		intent = salesintent.Rejection
+	}
+	result, err := salesintent.Decide(intent, mapped.MatchingExecutableCapability)
 	if err != nil {
-		return conversation.Decision{}, ErrInvalidProviderResponse
+		return DetailedResult{}, ErrInvalidProviderResponse
 	}
-	return validated, nil
+	validated, err := conversation.NewDecision(result.Decision.NextAction, result.Decision.Reason)
+	if err != nil {
+		return DetailedResult{}, ErrInvalidProviderResponse
+	}
+	return DetailedResult{Intent: intent, Decision: validated}, nil
 }

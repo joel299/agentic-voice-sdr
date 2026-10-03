@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
@@ -26,12 +27,30 @@ type TurnResponder interface {
 	SendControlledTurn(context.Context, string, conversation.TurnDirective) error
 }
 
+type StageError struct {
+	Stage string
+	Cause error
+}
+
+func (e *StageError) Error() string   { return "turn loop stage failed: " + e.Stage }
+func (e *StageError) Unwrap() error   { return e.Cause }
+func (e *StageError) AIStage() string { return e.Stage }
+
 // Coordinator claims response ownership before processing a turn and keeps the
 // lifecycle state until the provider receive owner completes or fails it.
 type Coordinator struct {
 	processor TurnProcessor
 	responder TurnResponder
 	gate      *conversation.ResponseGate
+}
+
+func (c *Coordinator) reportStage(stage, outcome string) {
+	if c == nil {
+		return
+	}
+	if reporter, ok := c.processor.(interface{ ReportStage(string, string) }); ok {
+		reporter.ReportStage(stage, outcome)
+	}
 }
 
 func New(processor TurnProcessor, responder TurnResponder, gate *conversation.ResponseGate) (*Coordinator, error) {
@@ -86,10 +105,14 @@ func (c *Coordinator) Begin(ctx context.Context, state *conversation.Conversatio
 		c.failAfterReservation(reservation.Key)
 		return conversation.ResponseKey{}, ErrInvalidCoordinatorInput
 	}
+	telemetry.MarkTurn(ctx, "turn_directive_sent_at")
+	c.reportStage("gemini_response_send", "started")
 	if err := c.responder.SendControlledTurn(ctx, finalLeadText, directive); err != nil {
 		c.failAfterReservation(reservation.Key)
-		return conversation.ResponseKey{}, err
+		c.reportStage("gemini_response_send", "failed")
+		return conversation.ResponseKey{}, &StageError{Stage: "gemini_response_send", Cause: err}
 	}
+	c.reportStage("controlled_response_sent", "completed")
 	return reservation.Key, nil
 }
 

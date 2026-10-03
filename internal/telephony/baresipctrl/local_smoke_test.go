@@ -33,7 +33,15 @@ func TestLocalBaresipSmoke(t *testing.T) {
 	if status.State != control.RegistrationRegistered {
 		t.Fatalf("registration is not proven active (state=%s; response length=%d)", status.State, len(status.Detail))
 	}
-	if _, err := client.ListCalls(ctx); err != nil {
+	inventory, err := client.ListCalls(ctx)
+	if err != nil {
 		t.Fatalf("list calls query failed: %v", err)
+	}
+	calls, err := ParseActiveCalls(inventory.Data)
+	if err != nil {
+		t.Fatalf("list calls response was not recognized (response length=%d)", len(inventory.Data))
+	}
+	if len(calls) != 0 {
+		t.Fatalf("local no-call smoke requires no active calls (count=%d)", len(calls))
 	}
 }

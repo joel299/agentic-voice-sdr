@@ -3,24 +3,29 @@ package geminilive
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"nhooyr.io/websocket"
 )
 
 const (
-	DefaultEndpoint  = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-	DefaultModel     = "gemini-3.8-live"
-	InputSampleRate  = 16000
-	OutputSampleRate = 24000
+	DefaultEndpoint     = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+	DefaultModel        = "gemini-3.8-live"
+	InputSampleRate     = 16000
+	OutputSampleRate    = 24000
+	maxLiveMessageBytes = 4 << 20
 )
 
 var (
@@ -34,6 +39,10 @@ type Config struct {
 	Model              string
 	Endpoint           string
 	SystemInstruction  string
+	VoiceName          string
+	VoiceDescription   string
+	VoiceStyle         string
+	VAD                VADConfig
 	Tools              []ToolDefinition
 	ResponseModalities []string
 }
@@ -60,11 +69,10 @@ func (c Config) normalized(role providerRole) Config {
 		c.Endpoint = DefaultEndpoint
 	}
 	if len(c.ResponseModalities) == 0 {
-		modality := "AUDIO"
-		if role == roleInputTranscription {
-			modality = "TEXT"
-		}
-		c.ResponseModalities = []string{modality}
+		// Gemini native-audio Live models accept AUDIO response modality for
+		// audio input transcription too. The inputTranscriber capability drops
+		// generated model audio and exposes only input transcription events.
+		c.ResponseModalities = []string{"AUDIO"}
 	}
 	return c
 }
@@ -83,8 +91,10 @@ const (
 )
 
 type Error struct {
-	Kind ErrorKind
-	Err  error
+	Kind             ErrorKind
+	CloseStatusClass CloseStatusClass
+	TransportClass   TransportErrorClass
+	Err              error
 }
 
 func (e *Error) Error() string {
@@ -122,6 +132,12 @@ type Event struct {
 	EventID              string
 	TurnID               string
 	TurnComplete         bool
+	CloseStatusClass     CloseStatusClass
+	TransportClass       TransportErrorClass
+	GoAwayTimeLeftMS     int64
+	SessionResumable     bool
+	WaitingForInput      bool
+	InteractionStatus    string
 }
 
 type InputTranscriptState string
@@ -139,12 +155,40 @@ const (
 	EventAudio               EventKind = "audio"
 	EventInputTranscription  EventKind = "input_transcription"
 	EventOutputTranscription EventKind = "output_transcription"
+	EventGenerationComplete  EventKind = "generation_complete"
 	EventTurnComplete        EventKind = "turn_complete"
+	EventGoAway              EventKind = "go_away"
+	EventSessionResumption   EventKind = "session_resumption"
+	EventServerStatus        EventKind = "server_status"
 	EventInterrupted         EventKind = "interrupted"
 	EventToolCall            EventKind = "tool_call"
 	EventAPIError            EventKind = "api_error"
 	EventUnknown             EventKind = "unknown"
 	EventClosed              EventKind = "closed"
+)
+
+type TransportErrorClass string
+
+const (
+	TransportContextCancel   TransportErrorClass = "context_cancel"
+	TransportContextDeadline TransportErrorClass = "context_deadline"
+	TransportRemoteClose     TransportErrorClass = "websocket_remote_close"
+	TransportIOEOF           TransportErrorClass = "io_eof"
+	TransportUnexpectedEOF   TransportErrorClass = "unexpected_eof"
+	TransportNetworkTimeout  TransportErrorClass = "network_timeout"
+	TransportConnectionReset TransportErrorClass = "connection_reset"
+	TransportTLS             TransportErrorClass = "tls_transport"
+	TransportOther           TransportErrorClass = "transport_other"
+)
+
+type CloseStatusClass string
+
+const (
+	CloseStatusUnknown   CloseStatusClass = "unknown"
+	CloseStatusNormal    CloseStatusClass = "normal"
+	CloseStatusGoingAway CloseStatusClass = "going_away"
+	CloseStatusAbnormal  CloseStatusClass = "abnormal"
+	CloseStatusOther     CloseStatusClass = "other"
 )
 
 type ToolCall struct {
@@ -169,9 +213,13 @@ type providerSession struct {
 	closeOnce     sync.Once
 	done          chan struct{}
 	receiveActive atomic.Bool
+	pendingEvents []Event
 }
 
 func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
+	if err := cfg.VAD.Validate(); err != nil {
+		return nil, wrap(ErrorSetup, err)
+	}
 	if role != roleInputTranscription && role != roleControlledResponse {
 		return nil, ErrCapabilityNotAllowed
 	}
@@ -199,6 +247,9 @@ func connect(ctx context.Context, cfg Config, role providerRole) (*providerSessi
 		}
 		return nil, wrap(ErrorConnect, errors.New("WebSocket connection failed"))
 	}
+	// Gemini audio events can exceed the WebSocket library's 32 KiB default.
+	// Keep a finite ceiling while allowing normal encoded PCM chunks through.
+	conn.SetReadLimit(maxLiveMessageBytes)
 	s := &providerSession{conn: conn, cfg: cfg, role: role, done: make(chan struct{})}
 	go func() {
 		select {
@@ -260,9 +311,21 @@ func setupMessage(cfg Config, role providerRole) map[string]any {
 			"responseModalities": cfg.ResponseModalities,
 		},
 	}
+	if role == roleControlledResponse && strings.TrimSpace(cfg.VoiceName) != "" {
+		setup["generationConfig"].(map[string]any)["speechConfig"] = map[string]any{
+			"voiceConfig": map[string]any{"prebuiltVoiceConfig": map[string]string{"voiceName": cfg.VoiceName}},
+		}
+	}
 	switch role {
 	case roleInputTranscription:
 		setup["inputAudioTranscription"] = map[string]any{}
+		if cfg.VAD.SilenceDurationMS > 0 {
+			detection := map[string]any{"disabled": false, "silenceDurationMs": cfg.VAD.SilenceDurationMS, "prefixPaddingMs": cfg.VAD.PrefixPaddingMS}
+			if cfg.VAD.EndSensitivity != "" {
+				detection["endOfSpeechSensitivity"] = cfg.VAD.EndSensitivity
+			}
+			setup["realtimeInputConfig"] = map[string]any{"automaticActivityDetection": detection}
+		}
 	case roleControlledResponse:
 		setup["outputAudioTranscription"] = map[string]any{}
 	default:
@@ -361,12 +424,12 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 	typ, data, err := s.conn.Read(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, wrap(ErrorCanceled, ctx.Err())
+			return nil, &Error{Kind: ErrorCanceled, TransportClass: classifyTransportError(ctx, ctx.Err()), Err: ctx.Err()}
 		}
-		if websocket.CloseStatus(err) != -1 {
-			return nil, wrap(ErrorRemoteClose, ErrRemoteClosed)
+		if status := websocket.CloseStatus(err); status != -1 {
+			return nil, &Error{Kind: ErrorRemoteClose, CloseStatusClass: classifyCloseStatus(status), TransportClass: TransportRemoteClose, Err: ErrRemoteClosed}
 		}
-		return nil, wrap(ErrorReceive, errors.New("WebSocket read failed"))
+		return nil, &Error{Kind: ErrorReceive, TransportClass: classifyTransportError(ctx, err), Err: errors.New("WebSocket read failed")}
 	}
 	if typ != websocket.MessageText && typ != websocket.MessageBinary {
 		return nil, wrap(ErrorProtocol, errors.New("unexpected WebSocket frame type"))
@@ -377,6 +440,56 @@ func (s *providerSession) readJSON(ctx context.Context) (map[string]json.RawMess
 	}
 	return msg, nil
 }
+
+func classifyTransportError(ctx context.Context, err error) TransportErrorClass {
+	if ctx != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return TransportContextDeadline
+		}
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+			return TransportContextCancel
+		}
+	}
+	if websocket.CloseStatus(err) != -1 {
+		return TransportRemoteClose
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return TransportUnexpectedEOF
+	}
+	if errors.Is(err, io.EOF) {
+		return TransportIOEOF
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return TransportNetworkTimeout
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return TransportConnectionReset
+	}
+	var recordHeaderErr *tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return TransportTLS
+	}
+	var verificationErr *tls.CertificateVerificationError
+	if errors.As(err, &verificationErr) {
+		return TransportTLS
+	}
+	return TransportOther
+}
+
+func classifyCloseStatus(status websocket.StatusCode) CloseStatusClass {
+	switch status {
+	case websocket.StatusNormalClosure:
+		return CloseStatusNormal
+	case websocket.StatusGoingAway:
+		return CloseStatusGoingAway
+	case websocket.StatusAbnormalClosure:
+		return CloseStatusAbnormal
+	default:
+		return CloseStatusOther
+	}
+}
+
 func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if s == nil || s.conn == nil {
 		return Event{}, ErrNotReady
@@ -388,19 +501,32 @@ func (s *providerSession) Receive(ctx context.Context) (Event, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if len(s.pendingEvents) > 0 {
+		event := s.pendingEvents[0]
+		s.pendingEvents = s.pendingEvents[1:]
+		return event, nil
+	}
 	msg, err := s.readJSON(ctx)
 	if err != nil {
 		return Event{}, err
 	}
-	event := parseEvent(msg)
+	events := parseEvents(msg)
 	for _, key := range []string{"eventId", "event_id"} {
 		var id string
 		if json.Unmarshal(msg[key], &id) == nil && id != "" {
-			event.EventID = id
+			for i := range events {
+				events[i].EventID = id
+			}
 			break
 		}
 	}
-	return event, nil
+	if len(events) == 0 {
+		return Event{Kind: EventUnknown}, nil
+	}
+	if len(events) > 1 {
+		s.pendingEvents = append(s.pendingEvents[:0], events[1:]...)
+	}
+	return events[0], nil
 }
 func parseAPIError(msg map[string]json.RawMessage) string {
 	if raw, ok := msg["error"]; ok {
@@ -413,20 +539,48 @@ func parseAPIError(msg map[string]json.RawMessage) string {
 	return ""
 }
 func parseEvent(msg map[string]json.RawMessage) Event {
+	events := parseEvents(msg)
+	if len(events) == 0 {
+		return Event{Kind: EventUnknown}
+	}
+	return events[0]
+}
+
+func parseEvents(msg map[string]json.RawMessage) []Event {
 	if parseAPIError(msg) != "" {
-		return Event{Kind: EventAPIError, Error: "remote API error"}
+		return []Event{{Kind: EventAPIError, Error: "remote API error"}}
 	}
 	if _, ok := msg["setupComplete"]; ok {
-		return Event{Kind: EventSetupComplete}
+		return []Event{{Kind: EventSetupComplete}}
+	}
+	if raw, ok := msg["goAway"]; ok {
+		var g struct {
+			TimeLeft string `json:"timeLeft"`
+		}
+		_ = json.Unmarshal(raw, &g)
+		left, err := time.ParseDuration(g.TimeLeft)
+		if err != nil || left < 0 {
+			left = 0
+		}
+		return []Event{{Kind: EventGoAway, GoAwayTimeLeftMS: left.Milliseconds()}}
+	}
+	if raw, ok := msg["sessionResumptionUpdate"]; ok {
+		// Only retain the boolean in public events. Opaque handles are secrets;
+		// this runtime has not enabled reconnect/sessionResumption in setup.
+		var u struct {
+			Resumable bool `json:"resumable"`
+		}
+		_ = json.Unmarshal(raw, &u)
+		return []Event{{Kind: EventSessionResumption, SessionResumable: u.Resumable}}
 	}
 	if raw, ok := msg["toolCall"]; ok {
 		var t struct {
 			FunctionCalls []ToolCall `json:"functionCalls"`
 		}
 		if json.Unmarshal(raw, &t) == nil && len(t.FunctionCalls) > 0 {
-			return Event{Kind: EventToolCall, ToolCalls: t.FunctionCalls}
+			return []Event{{Kind: EventToolCall, ToolCalls: t.FunctionCalls}}
 		}
-		return Event{Kind: EventToolCall}
+		return []Event{{Kind: EventToolCall}}
 	}
 	if raw, ok := msg["serverContent"]; ok {
 		var c struct {
@@ -450,37 +604,70 @@ func parseEvent(msg map[string]json.RawMessage) Event {
 			OutputTranscription struct {
 				Text string `json:"text"`
 			} `json:"outputTranscription"`
-			TurnComplete bool `json:"turnComplete"`
-			Interrupted  bool `json:"interrupted"`
+			TurnComplete       bool   `json:"turnComplete"`
+			GenerationComplete bool   `json:"generationComplete"`
+			Interrupted        bool   `json:"interrupted"`
+			WaitingForInput    bool   `json:"waitingForInput"`
+			InteractionStatus  string `json:"interactionStatus"`
 		}
 		if json.Unmarshal(raw, &c) == nil {
+			status := Event{WaitingForInput: c.WaitingForInput, InteractionStatus: c.InteractionStatus}
+			addStatus := func(events []Event) []Event {
+				for i := range events {
+					events[i].WaitingForInput = status.WaitingForInput
+					events[i].InteractionStatus = status.InteractionStatus
+				}
+				if len(events) == 0 && (status.WaitingForInput || status.InteractionStatus != "") {
+					status.Kind = EventServerStatus
+					return []Event{status}
+				}
+				return events
+			}
 			if c.Interrupted {
-				return Event{Kind: EventInterrupted}
+				return addStatus([]Event{{Kind: EventInterrupted}})
 			}
 			if c.InputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.InputTranscription.Text, InputTranscriptState: TranscriptFinal}})
 			}
 			if c.FinalInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.FinalInputTranscription.Text, InputTranscriptState: TranscriptFinal}})
 			}
 			if c.InterimInputTranscription.Text != "" {
-				return Event{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}
+				return addStatus([]Event{{Kind: EventInputTranscription, Text: c.InterimInputTranscription.Text, InputTranscriptState: TranscriptInterim}})
 			}
+			events := make([]Event, 0, 2)
 			if c.OutputTranscription.Text != "" {
-				return Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text, TurnComplete: c.TurnComplete}
+				events = append(events, Event{Kind: EventOutputTranscription, Text: c.OutputTranscription.Text})
 			}
-			if len(c.ModelTurn.Parts) > 0 && c.ModelTurn.Parts[0].InlineData.Data != "" {
-				b, err := base64.StdEncoding.DecodeString(c.ModelTurn.Parts[0].InlineData.Data)
-				if err == nil {
-					return Event{Kind: EventAudio, Audio: b, AudioMimeType: c.ModelTurn.Parts[0].InlineData.MimeType, TurnComplete: c.TurnComplete}
+			audioEvents := make([]Event, 0, len(c.ModelTurn.Parts))
+			for _, part := range c.ModelTurn.Parts {
+				if part.InlineData.Data == "" {
+					continue
 				}
+				b, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
+				if err != nil {
+					continue
+				}
+				audioEvents = append(audioEvents, Event{Kind: EventAudio, Audio: b, AudioMimeType: part.InlineData.MimeType})
+			}
+			if len(audioEvents) > 0 {
+				events = append(events, audioEvents...)
+			}
+			if c.GenerationComplete {
+				events = append(events, Event{Kind: EventGenerationComplete})
 			}
 			if c.TurnComplete {
-				return Event{Kind: EventTurnComplete}
+				events = append(events, Event{Kind: EventTurnComplete})
+			}
+			if len(events) > 0 {
+				return addStatus(events)
+			}
+			if status.WaitingForInput || status.InteractionStatus != "" {
+				return addStatus(nil)
 			}
 		}
 	}
-	return Event{Kind: EventUnknown}
+	return []Event{{Kind: EventUnknown}}
 }
 func (s *providerSession) Close() error {
 	if s == nil {

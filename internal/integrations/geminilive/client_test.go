@@ -2,18 +2,29 @@ package geminilive
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"nhooyr.io/websocket"
 )
+
+func TestDefaultEndpointUsesGemini38LiveProtocol(t *testing.T) {
+	const want = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+	if DefaultEndpoint != want {
+		t.Fatalf("default endpoint = %q, want %q", DefaultEndpoint, want)
+	}
+}
 
 func TestSessionContractAndEvents(t *testing.T) {
 	type observed struct {
@@ -80,6 +91,7 @@ func TestSessionContractAndEvents(t *testing.T) {
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}}]}}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"serverContent":{"interrupted":true}}`))
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"toolCall":{"functionCalls":[{"id":"1","name":"schedule","args":{"x":1}}]}}`))
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"eventId":"combined-1","serverContent":{"outputTranscription":{"text":"combined text"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"BAUG"}}]},"turnComplete":true}}`))
 	})
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -117,6 +129,18 @@ func TestSessionContractAndEvents(t *testing.T) {
 	if err != nil || e.Kind != EventToolCall || len(e.ToolCalls) != 1 || e.ToolCalls[0].Name != "schedule" {
 		t.Fatalf("tool event: %+v %v", e, err)
 	}
+	e, err = s.Receive(context.Background())
+	if err != nil || e.Kind != EventOutputTranscription || e.Text != "combined text" || e.TurnComplete || e.EventID != "combined-1" {
+		t.Fatalf("combined transcription event: %+v %v", e, err)
+	}
+	e, err = s.Receive(context.Background())
+	if err != nil || e.Kind != EventAudio || len(e.Audio) != 3 || e.TurnComplete || e.EventID != "combined-1" {
+		t.Fatalf("combined audio event: %+v %v", e, err)
+	}
+	e, err = s.Receive(context.Background())
+	if err != nil || e.Kind != EventTurnComplete || e.EventID != "combined-1" {
+		t.Fatalf("combined turn complete event: %+v %v", e, err)
+	}
 }
 
 func TestSessionErrorsCancellationAndSecretRedaction(t *testing.T) {
@@ -150,6 +174,114 @@ func TestSessionErrorsCancellationAndSecretRedaction(t *testing.T) {
 	_ = base64.StdEncoding
 }
 
+func TestControlledResponderClassifiesRemoteCloseWithoutPayload(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close(websocket.StatusGoingAway, "provider private close detail")
+		if _, _, err := c.Read(context.Background()); err != nil {
+			t.Error(err)
+			return
+		}
+		_ = c.Write(context.Background(), websocket.MessageText, []byte(`{"setupComplete":{}}`))
+		time.Sleep(10 * time.Millisecond)
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	responder, err := ConnectControlledResponse(context.Background(), Config{APIKey: "test", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	event, err := responder.Receive(context.Background())
+	if err != nil || event.Kind != EventClosed || event.CloseStatusClass != CloseStatusGoingAway || event.TransportClass != TransportRemoteClose || event.Error != "" || event.Text != "" {
+		t.Fatalf("remote close event=%+v err=%v", event, err)
+	}
+}
+
+func TestControlledResponderAcceptsAudioMessageAboveWebsocketDefaultLimit(t *testing.T) {
+	pcm := make([]byte, 25*1024)
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+	message, err := json.Marshal(map[string]any{"serverContent": map[string]any{"modelTurn": map[string]any{"parts": []any{map[string]any{"inlineData": map[string]string{"data": base64.StdEncoding.EncodeToString(pcm), "mimeType": "audio/pcm;rate=24000"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(message) <= 32*1024 {
+		t.Fatalf("fixture message size=%d, want greater than WebSocket default", len(message))
+	}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		if _, _, err := c.Read(context.Background()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"setupComplete":{}}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, message); err != nil {
+			t.Error(err)
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	responder, err := ConnectControlledResponse(context.Background(), Config{APIKey: "test", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	event, err := responder.Receive(context.Background())
+	if err != nil || event.Kind != EventAudio || len(event.Audio) != len(pcm) {
+		t.Fatalf("large audio event kind=%s bytes=%d err=%v", event.Kind, len(event.Audio), err)
+	}
+}
+
+func TestControlledResponderSurfacesDiagnosticServerStatus(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		if _, _, err := c.Read(context.Background()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"setupComplete":{}}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"serverContent":{"waitingForInput":true,"interactionStatus":"IDLE"}}`)); err != nil {
+			t.Error(err)
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	responder, err := ConnectControlledResponse(ctx, Config{APIKey: "test", Endpoint: "ws" + strings.TrimPrefix(ts.URL, "http")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	event, err := responder.Receive(ctx)
+	if err != nil || event.Kind != EventServerStatus || !event.WaitingForInput || event.InteractionStatus != "IDLE" {
+		t.Fatalf("server status event=%+v err=%v", event, err)
+	}
+}
+
 func TestParseUnknownAndMalformedServerMessages(t *testing.T) {
 	if got := parseEvent(map[string]json.RawMessage{"futureField": json.RawMessage(`{}`)}); got.Kind != EventUnknown {
 		t.Fatalf("unknown event: %+v", got)
@@ -162,8 +294,70 @@ func TestParseUnknownAndMalformedServerMessages(t *testing.T) {
 	}
 }
 
+func TestParseGenerationCompleteTurnCompleteAndGoAwaySeparately(t *testing.T) {
+	got := parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"generationComplete":true}`)})
+	if len(got) != 1 || got[0].Kind != EventGenerationComplete || got[0].TurnComplete {
+		t.Fatalf("generation complete: %+v", got)
+	}
+	got = parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"turnComplete":true}`)})
+	if len(got) != 1 || got[0].Kind != EventTurnComplete {
+		t.Fatalf("turn complete: %+v", got)
+	}
+	got = parseEvents(map[string]json.RawMessage{"goAway": json.RawMessage(`{"timeLeft":"30s","private":"must-not-escape"}`)})
+	if len(got) != 1 || got[0].Kind != EventGoAway || got[0].Text != "" || got[0].Error != "" {
+		t.Fatalf("GoAway was not safely classified: %+v", got)
+	}
+}
+
+func TestParseWaitingForInputAndInteractionStatus(t *testing.T) {
+	events := parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"waitingForInput":true,"interactionStatus":"IN_PROGRESS"}`)})
+	if len(events) != 1 || events[0].Kind != EventServerStatus || !events[0].WaitingForInput || events[0].InteractionStatus != "IN_PROGRESS" {
+		t.Fatalf("server status event=%+v", events)
+	}
+	events = parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"outputTranscription":{"text":"short"},"interactionStatus":"IDLE"}`)})
+	if len(events) != 1 || events[0].Kind != EventOutputTranscription || events[0].InteractionStatus != "IDLE" {
+		t.Fatalf("status metadata not attached to output: %+v", events)
+	}
+}
+
+type diagnosticTimeoutError struct{}
+
+func (diagnosticTimeoutError) Error() string   { return "opaque timeout detail" }
+func (diagnosticTimeoutError) Timeout() bool   { return true }
+func (diagnosticTimeoutError) Temporary() bool { return true }
+
+func TestClassifyTransportErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadlineCtx, deadlineCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer deadlineCancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want TransportErrorClass
+	}{
+		{name: "context cancel", ctx: ctx, err: context.Canceled, want: TransportContextCancel},
+		{name: "context deadline", ctx: deadlineCtx, err: context.DeadlineExceeded, want: TransportContextDeadline},
+		{name: "normal websocket close", err: websocket.CloseError{Code: websocket.StatusNormalClosure, Reason: "private"}, want: TransportRemoteClose},
+		{name: "going away websocket close", err: websocket.CloseError{Code: websocket.StatusGoingAway}, want: TransportRemoteClose},
+		{name: "eof", err: fmt.Errorf("read wrapper: %w", io.EOF), want: TransportIOEOF},
+		{name: "unexpected eof", err: fmt.Errorf("read wrapper: %w", io.ErrUnexpectedEOF), want: TransportUnexpectedEOF},
+		{name: "network timeout", err: diagnosticTimeoutError{}, want: TransportNetworkTimeout},
+		{name: "connection reset", err: fmt.Errorf("read wrapper: %w", syscall.ECONNRESET), want: TransportConnectionReset},
+		{name: "tls", err: &tls.RecordHeaderError{Msg: "opaque TLS detail"}, want: TransportTLS},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyTransportError(tt.ctx, tt.err); got != tt.want {
+				t.Fatalf("class=%q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
-	msg := setupMessage(Config{Model: "test-model", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}}, roleControlledResponse)
+	msg := setupMessage(Config{Model: "test-model", VoiceName: "Kore", Tools: []ToolDefinition{{FunctionDeclarations: []FunctionDeclaration{{Name: "schedule"}}}}}, roleControlledResponse)
 	setup, ok := msg["setup"].(map[string]any)
 	if !ok {
 		t.Fatal("setup envelope missing")
@@ -177,6 +371,14 @@ func TestSetupMessageUsesLiveAPIEnvelope(t *testing.T) {
 	}
 	if _, ok := setup["responseModalities"]; ok {
 		t.Fatal("response modalities must be nested in generationConfig")
+	}
+	speech := generation["speechConfig"].(map[string]any)
+	voice := speech["voiceConfig"].(map[string]any)["prebuiltVoiceConfig"].(map[string]string)
+	if voice["voiceName"] != "Kore" {
+		t.Fatalf("voice mapping = %#v", voice)
+	}
+	if _, ok := generation["speech_metadata"]; ok {
+		t.Fatal("Live setup must not send standalone TTS speech_metadata")
 	}
 }
 
@@ -265,15 +467,37 @@ func TestOutputTurnCompleteAndOtherEventsDoNotSetInputTranscriptState(t *testing
 	}
 }
 
-func TestOutputTranscriptionCarriesCompletionAndNoSyntheticReceiveIdentity(t *testing.T) {
-	got := parseEvent(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"outputTranscription":{"text":"final chunk"},"turnComplete":true}`)})
-	if got.Kind != EventOutputTranscription || got.Text != "final chunk" || !got.TurnComplete {
-		t.Fatalf("combined final output event=%+v", got)
-	}
-	if got.EventID != "" {
-		t.Fatalf("provider did not send an event ID but parser synthesized %q", got.EventID)
+func TestOutputTranscriptionAndCompletionAreSeparateEvents(t *testing.T) {
+	got := parseEvents(map[string]json.RawMessage{"serverContent": json.RawMessage(`{"outputTranscription":{"text":"final chunk"},"turnComplete":true}`)})
+	if len(got) != 2 || got[0].Kind != EventOutputTranscription || got[0].Text != "final chunk" || got[0].TurnComplete || got[1].Kind != EventTurnComplete {
+		t.Fatalf("combined final output events=%+v", got)
 	}
 
+}
+
+func TestCombinedOutputTranscriptionAndAudioAreBothDelivered(t *testing.T) {
+	serverContent := json.RawMessage(`{"outputTranscription":{"text":"resposta final"},"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AQID"}},{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"BAUG"}}]},"generationComplete":true,"turnComplete":true}`)
+	events := parseEvents(map[string]json.RawMessage{
+		"serverContent": serverContent,
+	})
+	if len(events) != 5 {
+		t.Fatalf("events = %+v, want transcription and both audio parts", events)
+	}
+	if events[0].Kind != EventOutputTranscription || events[0].Text != "resposta final" || events[0].TurnComplete {
+		t.Fatalf("transcription event = %+v", events[0])
+	}
+	if events[1].Kind != EventAudio || len(events[1].Audio) != 3 || events[1].AudioMimeType != "audio/pcm;rate=24000" || events[1].TurnComplete {
+		t.Fatalf("first audio event = %+v", events[1])
+	}
+	if events[2].Kind != EventAudio || len(events[2].Audio) != 3 || events[2].AudioMimeType != "audio/pcm;rate=24000" || events[2].TurnComplete {
+		t.Fatalf("last audio event = %+v", events[2])
+	}
+	if events[3].Kind != EventGenerationComplete || events[3].TurnComplete {
+		t.Fatalf("generation completion event = %+v", events[3])
+	}
+	if events[4].Kind != EventTurnComplete {
+		t.Fatalf("turn completion event = %+v", events[4])
+	}
 }
 
 func TestParsePreservesAllToolCalls(t *testing.T) {
@@ -286,5 +510,23 @@ func TestParsePreservesAllToolCalls(t *testing.T) {
 	}
 	if !strings.Contains(string(got.ToolCalls[0].Args), "tomorrow") || !strings.Contains(string(got.ToolCalls[1].Args), "hello") {
 		t.Fatalf("tool call args: %+v", got.ToolCalls)
+	}
+}
+
+func TestSessionManagementEventsRetainOnlySafeMetadata(t *testing.T) {
+	var msg map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"goAway":{"timeLeft":"2.5s"}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if e := parseEvent(msg); e.Kind != EventGoAway || e.GoAwayTimeLeftMS != 2500 {
+		t.Fatalf("event=%+v", e)
+	}
+	if err := json.Unmarshal([]byte(`{"sessionResumptionUpdate":{"newHandle":"SECRET_DO_NOT_RETAIN","resumable":true}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	delete(msg, "goAway")
+	e := parseEvent(msg)
+	if e.Kind != EventSessionResumption || !e.SessionResumable || strings.Contains(fmt.Sprintf("%+v", e), "SECRET") {
+		t.Fatalf("unsafe metadata: %+v", e)
 	}
 }

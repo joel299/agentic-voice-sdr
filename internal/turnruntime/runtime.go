@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
+	"github.com/joel299/agentic-voice-sdr/internal/domain/salesintent"
 	"github.com/joel299/agentic-voice-sdr/internal/toolruntime"
 )
 
@@ -51,6 +53,36 @@ type Dispatcher interface {
 type TurnRuntime struct {
 	provider   conversation.DecisionProvider
 	dispatcher Dispatcher
+	observe    func(stage, outcome string)
+}
+
+// StageError identifies the provider-neutral turn-processing boundary that
+// failed. Its message intentionally omits provider response text.
+type StageError struct {
+	Stage string
+	Cause error
+}
+
+func (e *StageError) Error() string   { return "turn runtime stage failed: " + e.Stage }
+func (e *StageError) Unwrap() error   { return e.Cause }
+func (e *StageError) AIStage() string { return e.Stage }
+
+func (runtime *TurnRuntime) SetStageObserver(observer func(stage, outcome string)) {
+	if runtime != nil {
+		runtime.observe = observer
+	}
+}
+
+// ReportStage lets adjacent orchestration owners report fixed milestones
+// through the same call-scoped observer without exposing the observer itself.
+func (runtime *TurnRuntime) ReportStage(stage, outcome string) {
+	runtime.stage(stage, outcome)
+}
+
+func (runtime *TurnRuntime) stage(stage, outcome string) {
+	if runtime.observe != nil {
+		runtime.observe(stage, outcome)
+	}
 }
 
 func New(provider conversation.DecisionProvider, dispatcher Dispatcher) (*TurnRuntime, error) {
@@ -70,27 +102,47 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 	if err := ctx.Err(); err != nil {
 		return conversation.TurnDirective{}, err
 	}
+	turns := input.State.Turns()
+	if len(turns) > 0 {
+		last := turns[len(turns)-1]
+		if last.Role == conversation.RoleLead && last.Transcript == conversation.TranscriptFinal && salesintent.HasExplicitOptOut(last.Text) {
+			if err := input.State.RecordSignal(conversation.SignalOptedOut); err != nil {
+				return conversation.TurnDirective{}, err
+			}
+		}
+	}
 
 	decisionInput, err := conversation.NewDecisionInput(input.State)
 	if err != nil {
 		return conversation.TurnDirective{}, fmt.Errorf("%w: decision input: %v", ErrInvalidTurnRuntime, err)
 	}
+	decisionInput.HasMatchingExecutableCapability = input.Capability != nil && input.Capability.Validate() == nil
+	telemetry.MarkTurn(ctx, "jev_started_at")
+	runtime.stage("jev_provider", "started")
 	decision, err := runtime.provider.Decide(ctx, decisionInput)
+	telemetry.MarkTurn(ctx, "jev_completed_at")
 	if err != nil {
-		return conversation.TurnDirective{}, err
+		runtime.stage("jev_provider", "failed")
+		return conversation.TurnDirective{}, &StageError{Stage: "jev_provider", Cause: err}
 	}
+	runtime.stage("jev_provider", "completed")
 	if err := decision.Validate(); err != nil {
-		return conversation.TurnDirective{}, fmt.Errorf("%w: decision: %v", ErrInvalidTurnRuntime, err)
+		return conversation.TurnDirective{}, &StageError{Stage: "turn_directive", Cause: fmt.Errorf("%w: decision: %v", ErrInvalidTurnRuntime, err)}
 	}
 
 	if decision.NextAction != conversation.ActionRequestCapability {
 		if input.Capability != nil {
 			return conversation.TurnDirective{}, ErrUnexpectedCapabilityContext
 		}
-		return conversation.BuildTurnDirective(conversation.OrchestratorInput{
+		directive, err := conversation.BuildTurnDirective(conversation.OrchestratorInput{
 			DecisionInput: decisionInput,
 			Decision:      decision,
 		})
+		if err != nil {
+			return conversation.TurnDirective{}, &StageError{Stage: "turn_directive", Cause: err}
+		}
+		runtime.stage("turn_directive", "created")
+		return directive, nil
 	}
 	if err := input.Capability.Validate(); err != nil {
 		return conversation.TurnDirective{}, err
@@ -132,11 +184,16 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 		}
 		return conversation.TurnDirective{}, fmt.Errorf("%w: %v", ErrToolDispatchFailed, err)
 	}
-	return conversation.BuildTurnDirective(conversation.OrchestratorInput{
+	directive, err := conversation.BuildTurnDirective(conversation.OrchestratorInput{
 		DecisionInput: decisionInput,
 		Decision:      decision,
 		RequestedTool: input.Capability.RequestedTool,
 		Policy:        &policy,
 		ToolResult:    &result,
 	})
+	if err != nil {
+		return conversation.TurnDirective{}, &StageError{Stage: "turn_directive", Cause: err}
+	}
+	runtime.stage("turn_directive", "created")
+	return directive, nil
 }

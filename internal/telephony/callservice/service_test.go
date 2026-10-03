@@ -27,10 +27,11 @@ type fakeProvider struct {
 }
 
 type callRepositoryFake struct {
-	mu      sync.Mutex
-	created []voicecalldomain.Call
-	updates []struct{ id, status, providerID, reason string }
-	err     error
+	mu        sync.Mutex
+	created   []voicecalldomain.Call
+	updates   []struct{ id, status, providerID, reason string }
+	aiUpdates []struct{ id, status, stage, failureClass string }
+	err       error
 }
 
 func (r *callRepositoryFake) CreateCall(_ context.Context, c voicecalldomain.Call) error {
@@ -43,6 +44,12 @@ func (r *callRepositoryFake) UpdateLifecycle(_ context.Context, id, status, prov
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updates = append(r.updates, struct{ id, status, providerID, reason string }{id, status, providerID, reason})
+	return r.err
+}
+func (r *callRepositoryFake) UpdateAIRuntimeStatus(_ context.Context, id, status, stage, failureClass string, _ *time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.aiUpdates = append(r.aiUpdates, struct{ id, status, stage, failureClass string }{id, status, stage, failureClass})
 	return r.err
 }
 func (*callRepositoryFake) GetCall(context.Context, string) (voicecalldomain.Call, error) {
@@ -130,6 +137,106 @@ func TestStartNormalizesAllowedDestinationAndCorrelatesProviderCallID(t *testing
 	dials, _ := provider.counts()
 	if dials != 1 {
 		t.Fatalf("Dial calls=%d, want exactly one", dials)
+	}
+}
+
+func TestWaitCallEndNotifiesMediaSupervisorOnceOnTerminalEvent(t *testing.T) {
+	provider := newFakeProvider()
+	service := testService(t, provider)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- service.WaitCallEnd(context.Background(), call.CallID) }()
+	provider.events <- control.Event{Class: "call", Type: "CALL_OUTGOING", CallID: "baresip-terminal", PeerURI: "sip:+5567981340687@example.test"}
+	provider.events <- control.Event{Class: "call", Type: "CALL_CLOSED", CallID: "baresip-terminal", State: control.CallStateCompleted}
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatalf("wait for terminal call: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("media supervisor was not notified of CALL_CLOSED")
+	}
+	if err := service.WaitCallEnd(context.Background(), call.CallID); err != nil {
+		t.Fatalf("terminal call should remain observable: %v", err)
+	}
+}
+
+func TestCallFailedPersistsSanitizedTerminalReason(t *testing.T) {
+	provider := newFakeProvider()
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.events <- control.Event{Class: "call", Type: "CALL_FAILED", State: control.CallStateFailed, CallID: "baresip-failed", PeerURI: "sip:+5567981340687@example.test", Param: "sip_403"}
+	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusFailed })
+	got, err := service.Get(call.CallID)
+	if err != nil || got.TerminalReason != "sip_403" {
+		t.Fatalf("call=%+v err=%v; want sanitized sip_403", got, err)
+	}
+	// The consumer publishes in-memory state before the repository callback.
+	// Wait for that side effect, rather than racing the status publication.
+	waitFor(t, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return len(repo.updates) > 0
+	})
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.updates) == 0 || repo.updates[len(repo.updates)-1].reason != "sip_403" {
+		t.Fatalf("persisted updates=%+v; want terminal reason sip_403", repo.updates)
+	}
+}
+
+func TestAIFailureStatusPersistsWithoutEndingOrHangingUpCall(t *testing.T) {
+	provider := newFakeProvider()
+	repo := &callRepositoryFake{}
+	policy, err := NewAllowlist([]string{"+5567981340687"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithRepository(provider, policy, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	call, err := service.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.events <- control.Event{Class: "call", Type: "CALL_ESTABLISHED", State: control.CallStateConnected, CallID: "baresip-ai-failure", PeerURI: "sip:+5567981340687@example.test"}
+	waitFor(t, func() bool { got, _ := service.Get(call.CallID); return got.Status == StatusConnected })
+	failedAt := time.Now().UTC()
+	if err := service.UpdateAIRuntimeStatus(context.Background(), call.CallID, "failed", "input_transcription_receive", "provider_transport", &failedAt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Get(call.CallID)
+	if err != nil || got.Status != StatusConnected || got.AIRuntimeStatus != "failed" || got.AIRuntimeStage != "input_transcription_receive" || got.AIFailureClass != "provider_transport" || got.AIFailureAt == nil || !got.AIFailureAt.Equal(failedAt) {
+		t.Fatalf("call after isolated AI failure=%+v err=%v", got, err)
+	}
+	if _, active := service.ActiveCall(); !active {
+		t.Fatal("AI failure terminalized the active SIP call")
+	}
+	_, hangups := provider.counts()
+	if hangups != 0 {
+		t.Fatalf("AI failure dispatched %d Hangup commands", hangups)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.aiUpdates) != 1 || repo.aiUpdates[0].status != "failed" || repo.aiUpdates[0].stage != "input_transcription_receive" || repo.aiUpdates[0].failureClass != "provider_transport" {
+		t.Fatalf("persisted AI status=%+v", repo.aiUpdates)
 	}
 }
 
@@ -535,4 +642,42 @@ func waitFor(t *testing.T, condition func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition did not become true")
+}
+
+func TestAudioErrorAndTerminalTimelineIsCorrelatedSafeAndBounded(t *testing.T) {
+	p := newFakeProvider()
+	s := testService(t, p)
+	c, err := s.Start(context.Background(), "+5567981340687")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_OUTGOING", CallID: "media-call"})
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_ESTABLISHED", CallID: "media-call"})
+	s.RecordMediaMilestone(c.CallID, "gemini_audio")
+	s.RecordMediaMilestone(c.CallID, "media_egress")
+	before, _ := s.Get(c.CallID)
+	s.RecordMediaMilestone(c.CallID, "gemini_audio")
+	s.applyEvent(control.Event{Class: "other", Type: "AUDIO_ERROR", CallID: "wrong-call", Param: "frame_protocol"})
+	got, _ := s.Get(c.CallID)
+	if got.AudioErrorSeen {
+		t.Fatal("cross-call audio error leaked")
+	}
+	s.applyEvent(control.Event{Class: "other", Type: "AUDIO_ERROR", CallID: "media-call", Param: "password secret"})
+	got, _ = s.Get(c.CallID)
+	if !got.AudioErrorSeen || got.AudioErrorClass != "audio_device" || got.Status != StatusConnected {
+		t.Fatalf("audio diagnostic = %+v", got)
+	}
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_FAILED", CallID: "media-call", State: control.CallStateFailed, Param: "failed"})
+	s.applyEvent(control.Event{Class: "call", Type: "CALL_CLOSED", CallID: "media-call", State: control.CallStateFailed, Param: "unknown"})
+	got, _ = s.Get(c.CallID)
+	if got.GeminiAudioFirstAt != before.GeminiAudioFirstAt || got.CallClosedAt == nil || got.CallFailedAt == nil {
+		t.Fatal("fixed first-event slots missing/overwritten")
+	}
+	if got.MediaEgressFirstAt.Before(*got.GeminiAudioFirstAt) || got.AudioErrorAt.Before(*got.MediaEgressFirstAt) || got.CallFailedAt.Before(*got.AudioErrorAt) || got.CallClosedAt.Before(*got.CallFailedAt) {
+		t.Fatal("audio -> error -> terminal order lost")
+	}
+	_, hangups := p.counts()
+	if hangups != 0 {
+		t.Fatal("diagnostic dispatched Hangup")
+	}
 }

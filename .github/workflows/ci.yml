@@ -18,7 +18,7 @@ jobs:
   scope-policy:
     name: Scope Policy
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,9 +29,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BASE="origin/${{ github.base_ref }}"
-          HEAD_REF="${{ github.head_ref }}"
-          git fetch origin "${{ github.base_ref }}" --depth=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_BRANCH="${{ github.base_ref }}"
+            HEAD_REF="${{ github.head_ref }}"
+          else
+            BASE_BRANCH="main"
+            HEAD_REF="${{ github.ref_name }}"
+          fi
+          BASE="origin/$BASE_BRANCH"
+          git fetch origin "$BASE_BRANCH" --depth=1
 
           mapfile -t FILES < <(git diff --name-only "${BASE}...HEAD")
           printf 'Changed files:\n'
@@ -151,6 +157,39 @@ jobs:
       - name: Build
         if: steps.go.outputs.present == 'true'
         run: go build ./...
+
+  c-media-quality:
+    name: C Media Module
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Build and test production Baresip source boundary (no SIP)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libre-dev librem-dev
+          DEPS="$(mktemp -d)"
+          curl -fsSL https://codeload.github.com/baresip/baresip/tar.gz/refs/tags/v1.1.0 -o "$DEPS/baresip.tar.gz"
+          printf '%s  %s\n' f9230b27c4a62f31223847bc485c51f3d960f8a09f36998dedb73358e1784b4e "$DEPS/baresip.tar.gz" | sha256sum -c -
+          tar -xzf "$DEPS/baresip.tar.gz" -C "$DEPS"
+          export BARESIP_SOURCE="$DEPS/baresip-1.1.0"
+          export RE_INCLUDE_ROOT=/usr/include
+          export C_TEST_OUTPUT_DIR="$DEPS/gate"
+          sh internal/telephony/baresipmedia/test-module.sh
+          sh internal/telephony/baresipmedia/test-legacy-parser.sh
+          export BARESIP_C_TEST_BIN="$C_TEST_OUTPUT_DIR/module-source-test"
+          export BARESIP_C_TEST_MODULE="$C_TEST_OUTPUT_DIR/gru151_media.so"
+          go test -count=1 -v -run TestActualCModuleGeminiBurst ./internal/telephony/baresipmedia
+          go test -race -count=1 -run TestActualCModuleGeminiBurst ./internal/telephony/baresipmedia
+          C_TEST_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' sh internal/telephony/baresipmedia/module/test-parser.sh
 
   infra-quality:
     name: Redis RabbitMQ Infra

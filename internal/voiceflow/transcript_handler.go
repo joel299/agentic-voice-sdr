@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
 	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
@@ -34,6 +36,8 @@ type FinalTranscriptHandler struct {
 	lifecycle   *ResponseLifecycleAdapter
 	transcripts voicecalldomain.TranscriptRepository
 	callID      string
+	observe     bridge.StageObserver
+	timings     *telemetry.TurnCollector
 }
 
 // NewFinalTranscriptHandler creates a handler with a fixed capability context.
@@ -135,6 +139,9 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, t
 	if turnID == "" {
 		return ErrMissingLeadTurnID
 	}
+	if h.timings != nil {
+		ctx, _ = h.timings.Begin(ctx, turnID, time.Now())
+	}
 	if h.transcripts != nil {
 		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+h.callID+":"+turnID)
 		if err != nil {
@@ -145,6 +152,15 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, t
 		}
 	}
 
+	// A second FINAL is normal while the previous voice response is playing.
+	// Persist it once, then wait before changing ConversationState or running
+	// JEV. The response receive owner remains free to finish the active lease.
+	if h.lifecycle.CaptureActive() != nil && h.observe != nil {
+		h.observe("input_transcription_handler", "waiting_response")
+	}
+	if err := h.lifecycle.WaitInactive(ctx); err != nil {
+		return err
+	}
 	turn, err := conversation.NewTurn(turnID, conversation.RoleLead, text, conversation.TranscriptFinal)
 	if err != nil {
 		return err
@@ -166,3 +182,7 @@ func (h *FinalTranscriptHandler) forward(ctx context.Context, event geminilive.E
 	}
 	return h.downstream(ctx, event)
 }
+
+func (h *FinalTranscriptHandler) SetStageObserver(o bridge.StageObserver) { h.observe = o }
+
+func (h *FinalTranscriptHandler) SetTurnCollector(c *telemetry.TurnCollector) { h.timings = c }

@@ -3,6 +3,7 @@ package turnruntime
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -28,6 +29,16 @@ func (p *countingProvider) Calls() int { p.mu.Lock(); defer p.mu.Unlock(); retur
 type cancelingProvider struct {
 	provider conversation.DecisionProvider
 	cancel   context.CancelFunc
+}
+
+type inputCaptureProvider struct {
+	input    conversation.DecisionInput
+	decision conversation.Decision
+}
+
+func (p *inputCaptureProvider) Decide(_ context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
+	p.input = input
+	return p.decision, nil
 }
 
 func (p *cancelingProvider) Decide(ctx context.Context, input conversation.DecisionInput) (conversation.Decision, error) {
@@ -117,6 +128,73 @@ func TestRuntimeReturnsNonCapabilityDirectiveWithoutDispatch(t *testing.T) {
 	}
 	if provider.Calls() != 1 || dispatcher.Calls() != 0 || directive.Kind != conversation.ActionAskQuestion || directive.Capability != "" {
 		t.Fatalf("provider=%d dispatcher=%d directive=%+v", provider.Calls(), dispatcher.Calls(), directive)
+	}
+}
+
+func TestRuntimeReportsDecisionAndDirectiveStagesWithoutProviderDetails(t *testing.T) {
+	provider := scriptedProvider(t, conversation.ActionAskQuestion, conversation.ReasonNeedsClarification)
+	dispatcher := &fakeDispatcher{}
+	runtime, err := New(provider, dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	runtime.SetStageObserver(func(stage, outcome string) { got = append(got, stage+":"+outcome) })
+	if _, err := runtime.ProcessTurn(context.Background(), TurnInput{State: runtimeState(t, conversation.StageActive, false)}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"jev_provider:started", "jev_provider:completed", "turn_directive:created"}
+	if len(got) != len(want) {
+		t.Fatalf("stage events=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stage events=%v, want %v", got, want)
+		}
+	}
+}
+
+type failingDecisionProvider struct{}
+
+func (failingDecisionProvider) Decide(context.Context, conversation.DecisionInput) (conversation.Decision, error) {
+	return conversation.Decision{}, errors.New("provider payload must not leak")
+}
+
+func TestRuntimeTagsJEVFailureWithSafeStage(t *testing.T) {
+	runtime, err := New(failingDecisionProvider{}, &fakeDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.ProcessTurn(context.Background(), TurnInput{State: runtimeState(t, conversation.StageActive, false)})
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "jev_provider" {
+		t.Fatalf("decision failure=%v, want safe JEV stage", err)
+	}
+	if strings.Contains(err.Error(), "provider payload") {
+		t.Fatalf("provider detail leaked: %v", err)
+	}
+}
+
+func TestRuntimeClassifiesLatestFinalLeadAndRecordsOptOutBeforeJEV(t *testing.T) {
+	state := runtimeState(t, conversation.StageActive, false)
+	turn, err := conversation.NewTurn("turn-2", conversation.RoleLead, "Retire meu contato", conversation.TranscriptFinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecordTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+	decision, _ := conversation.NewDecision(conversation.ActionEndConversation, conversation.ReasonConversationComplete)
+	provider := &inputCaptureProvider{decision: decision}
+	runtime, err := New(provider, &fakeDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProcessTurn(context.Background(), TurnInput{State: state}); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Signals().OptedOut || !provider.input.Signals.OptedOut || provider.input.LatestFinalLeadText != "Retire meu contato" {
+		t.Fatalf("opt-out was not canonicalized before provider decision: state=%+v input=%+v", state.Signals(), provider.input)
 	}
 }
 

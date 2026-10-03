@@ -319,6 +319,34 @@ func TestCallClosedTerminalStatesByCallID(t *testing.T) {
 	}
 }
 
+func TestCallFailedPreservesOnlySanitizedProviderClass(t *testing.T) {
+	tests := []struct {
+		name      string
+		param     string
+		wantState control.CallState
+		wantParam string
+	}{
+		{name: "SIP forbidden", param: "403 Forbidden", wantState: control.CallStateFailed, wantParam: "sip_403"},
+		{name: "server error", param: "503 Service Unavailable", wantState: control.CallStateFailed, wantParam: "sip_503"},
+		{name: "busy", param: "486 Busy Here", wantState: control.CallStateBusy, wantParam: "busy"},
+		{name: "temporarily unavailable", param: "480 Temporarily Unavailable", wantState: control.CallStateFailed, wantParam: "sip_480"},
+		{name: "transport reset", param: "connection reset by peer", wantState: control.CallStateFailed, wantParam: "transport_error"},
+		{name: "no reason", param: "", wantState: control.CallStateFailed, wantParam: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newCallLifecycleClient(8)
+			event := client.normalizeLifecycleEvent(normalizeEvent(wireMessage{Class: "call", Type: "CALL_FAILED", CallID: "provider-call", Param: test.param}))
+			if event.State != test.wantState || event.Param != test.wantParam {
+				t.Fatalf("state/param=%q/%q, want %q/%q", event.State, event.Param, test.wantState, test.wantParam)
+			}
+			if strings.Contains(event.Param, test.param) && test.param != "" {
+				t.Fatalf("provider detail leaked into normalized parameter: %q", event.Param)
+			}
+		})
+	}
+}
+
 func TestInterleavedCallLifecycleStateIsIsolated(t *testing.T) {
 	client := newCallLifecycleClient(4)
 	feed := func(id, eventType, param string) control.Event {
@@ -739,3 +767,17 @@ func writeTestMessage(conn net.Conn, payload string) error {
 }
 
 var _ io.Reader = (*strings.Reader)(nil)
+
+func TestAudioErrorDropsArbitraryDeviceParameter(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"90,gru151 media IPC RX failed", "audio_buffer_limit"},
+		{"71,gru151_frame_protocol", "frame_protocol"},
+		{"104,private/path/password", "peer_closed"},
+		{"arbitrary Authorization secret", "audio_device"},
+	} {
+		got := normalizeEvent(wireMessage{Class: "other", Type: "AUDIO_ERROR", Param: tc.raw, CallID: "provider-id"})
+		if got.Param != tc.want || got.CallID != "provider-id" {
+			t.Fatalf("safe event = %+v", got)
+		}
+	}
+}

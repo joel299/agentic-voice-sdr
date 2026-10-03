@@ -79,7 +79,11 @@ func ConnectInputTranscriberWithTurnSequencer(ctx context.Context, cfg Config, s
 	if err != nil {
 		return nil, err
 	}
-	return &inputTranscriber{provider: provider, sequencer: sequencer}, nil
+	var session InputTranscriberSession = &inputTranscriber{provider: provider, sequencer: sequencer}
+	if cfg.VAD.Hybrid {
+		session = WithHybridVAD(session, cfg.VAD.SilenceDurationMS)
+	}
+	return session, nil
 }
 
 // ConnectControlledResponse opens a separate Gemini Live session for controlled
@@ -159,12 +163,19 @@ func (s *controlledResponder) Receive(ctx context.Context) (Event, error) {
 		event, err := s.provider.Receive(ctx)
 		if err != nil {
 			if errors.Is(err, ErrRemoteClosed) {
-				return Event{Kind: EventClosed}, nil
+				var providerErr *Error
+				closeClass := CloseStatusUnknown
+				transportClass := TransportRemoteClose
+				if errors.As(err, &providerErr) {
+					closeClass = providerErr.CloseStatusClass
+					transportClass = providerErr.TransportClass
+				}
+				return Event{Kind: EventClosed, CloseStatusClass: closeClass, TransportClass: transportClass}, nil
 			}
 			return Event{}, err
 		}
 		switch event.Kind {
-		case EventAudio, EventOutputTranscription, EventTurnComplete, EventInterrupted, EventAPIError, EventClosed:
+		case EventAudio, EventOutputTranscription, EventGenerationComplete, EventTurnComplete, EventGoAway, EventSessionResumption, EventServerStatus, EventInterrupted, EventAPIError, EventClosed:
 			return event, nil
 		}
 	}

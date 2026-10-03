@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
@@ -131,5 +132,6 @@ func (s *providerSession) SendControlledTurn(ctx context.Context, finalLeadText 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	telemetry.MarkTurn(ctx, "gemini_response_request_at")
 	return s.sendClientContent(ctx, instruction, true)
 }

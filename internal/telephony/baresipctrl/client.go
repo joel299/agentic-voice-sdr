@@ -30,6 +30,7 @@ var (
 	ErrInvalidMessage     = errors.New("baresip ctrl_tcp: invalid JSON message")
 	ErrCommandRejected    = errors.New("baresip ctrl_tcp: command rejected")
 	ErrUnsupportedCommand = errors.New("baresip ctrl_tcp: command outside outbound control allowlist")
+	sipStatusCode         = regexp.MustCompile(`\b([1-6][0-9]{2})\b`)
 )
 
 type ContextDialer interface {
@@ -396,7 +397,7 @@ func (c *Client) Do(ctx context.Context, command, params string) (control.Comman
 		return control.CommandResult{}, commandError(ErrInvalidMessage, control.DispatchNotDispatched)
 	}
 	switch command {
-	case "reginfo", "dial", "hangup", "listcalls":
+	case "reginfo", "dial", "hangup", "listcalls", "gru151_media_stats":
 	default:
 		return control.CommandResult{}, commandError(ErrUnsupportedCommand, control.DispatchNotDispatched)
 	}
@@ -714,6 +715,8 @@ func (c *Client) Close() error {
 func normalizeEvent(message wireMessage) control.Event {
 	event := control.Event{Class: message.Class, Type: message.Type, CallID: message.CallID, PeerURI: message.PeerURI, Direction: message.Direction, Param: message.Param}
 	switch strings.ToUpper(message.Type) {
+	case "AUDIO_ERROR":
+		event.Param = safeAudioErrorClass(message.Param)
 	case "CALL_OUTGOING", "CALL_SETUP":
 		event.State = control.CallStateOutgoing
 	case "CALL_PROGRESS", "CALL_SESSION_PROGRESS":
@@ -764,7 +767,7 @@ func (c *Client) normalizeLifecycleEvent(event control.Event) control.Event {
 		event.State, event.Param = classifyCallClose(event.Param, connected)
 		delete(c.callStates, event.CallID)
 	case "CALL_FAILED":
-		event.Param = "failed"
+		event.State, event.Param = classifyCallFailure(event.Param)
 		delete(c.callStates, event.CallID)
 	default:
 		stage := callStageForEvent(event.Type)
@@ -779,6 +782,37 @@ func (c *Client) normalizeLifecycleEvent(event control.Event) control.Event {
 		c.callStates[event.CallID] = callLifecycle{stages: previous.stages | stage, sequence: c.callSequence}
 	}
 	return event
+}
+
+func classifyCallFailure(param string) (control.CallState, string) {
+	state, reason := classifyCallClose(param, false)
+	switch state {
+	case control.CallStateBusy, control.CallStateNoAnswer, control.CallStateCanceled:
+		return state, reason
+	}
+	for _, match := range sipStatusCode.FindAllStringSubmatch(param, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		code, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		switch {
+		case code >= 400 && code < 500:
+			return control.CallStateFailed, "sip_" + strconv.Itoa(code)
+		case code >= 500 && code < 600:
+			return control.CallStateFailed, "sip_" + strconv.Itoa(code)
+		}
+	}
+	value := strings.ToLower(strings.TrimSpace(param))
+	if containsAny(value, "connection reset", "connection refused", "transport error", "network unreachable", "dns") {
+		return control.CallStateFailed, "transport_error"
+	}
+	if value == "" || reason == "unknown" {
+		return control.CallStateFailed, "unknown"
+	}
+	return control.CallStateFailed, "failed"
 }
 
 func callStageForEvent(eventType string) callStages {
@@ -929,3 +963,21 @@ func growBackoff(current, maximum time.Duration) time.Duration {
 }
 
 var _ control.Provider = (*Client)(nil)
+
+// Baresip v1.1.0 sends AUDIO_ERROR as errno,message. Only fixed errno classes
+// leave the controller; arbitrary device strings (paths, provider data) do not.
+func safeAudioErrorClass(value string) string {
+	code, _, _ := strings.Cut(value, ",")
+	switch strings.TrimSpace(code) {
+	case "90":
+		return "audio_buffer_limit"
+	case "71":
+		return "frame_protocol"
+	case "104", "32":
+		return "peer_closed"
+	case "5", "9", "110":
+		return "socket_io"
+	default:
+		return "audio_device"
+	}
+}

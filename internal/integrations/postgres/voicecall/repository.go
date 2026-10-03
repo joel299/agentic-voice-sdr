@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -56,11 +57,49 @@ func (r *Repository) UpdateLifecycle(ctx context.Context, id, status, providerCa
 	return nil
 }
 
+func (r *Repository) UpdateAIRuntimeStatus(ctx context.Context, id, status, stage, failureClass string, failureAt *time.Time) error {
+	if ctx == nil || id == "" || (status != "starting" && status != "running" && status != "failed" && status != "degraded" && status != "stopped") || stage == "" {
+		return ErrInvalidRecord
+	}
+	if !validAIRuntimeStage(stage) || !validAIFailureClass(failureClass) {
+		return ErrInvalidRecord
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE voice_calls SET ai_runtime_status=$2, ai_runtime_stage=$3, ai_failure_class=NULLIF($4,''), ai_failure_at=$5, updated_at=now() WHERE call_id=$1`, id, status, stage, failureClass, failureAt)
+	if err != nil {
+		return ErrDatabaseOperation
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCallNotFound
+	}
+	return nil
+}
+
+func validAIRuntimeStage(value string) bool {
+	switch value {
+	case "not_started", "runtime_starting", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "bridge_run", "media_ingress", "input_transcription_send", "input_transcription_receive", "input_transcription_handler", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "turn_complete", "degraded_mode", "runtime_shutdown", "runtime_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAIFailureClass(value string) bool {
+	if value == "" {
+		return true
+	}
+	switch value {
+	case "timeout", "canceled", "receive_failed", "provider_api", "media_closed", "runtime_error", "session_ended", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "media_ingress", "input_transcription_send", "input_transcription_receive", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "provider_transport", "runtime_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *Repository) GetCall(ctx context.Context, id string) (domain.Call, error) {
 	var c domain.Call
-	var providerCallID, terminalReason pgtype.Text
-	var connectedAt, endedAt pgtype.Timestamptz
-	err := r.pool.QueryRow(ctx, `SELECT call_id,destination,status,provider,provider_call_id,started_at,connected_at,ended_at,terminal_reason,created_at,updated_at FROM voice_calls WHERE call_id=$1`, id).Scan(&c.ID, &c.Destination, &c.Status, &c.Provider, &providerCallID, &c.StartedAt, &connectedAt, &endedAt, &terminalReason, &c.CreatedAt, &c.UpdatedAt)
+	var providerCallID, terminalReason, aiRuntimeStatus, aiRuntimeStage, aiFailureClass pgtype.Text
+	var connectedAt, endedAt, aiFailureAt pgtype.Timestamptz
+	err := r.pool.QueryRow(ctx, `SELECT call_id,destination,status,provider,provider_call_id,started_at,connected_at,ended_at,terminal_reason,ai_runtime_status,ai_runtime_stage,ai_failure_class,ai_failure_at,created_at,updated_at FROM voice_calls WHERE call_id=$1`, id).Scan(&c.ID, &c.Destination, &c.Status, &c.Provider, &providerCallID, &c.StartedAt, &connectedAt, &endedAt, &terminalReason, &aiRuntimeStatus, &aiRuntimeStage, &aiFailureClass, &aiFailureAt, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Call{}, ErrCallNotFound
 	}
@@ -80,6 +119,19 @@ func (r *Repository) GetCall(ctx context.Context, id string) (domain.Call, error
 	}
 	if terminalReason.Valid {
 		c.TerminalReason = terminalReason.String
+	}
+	if aiRuntimeStatus.Valid {
+		c.AIRuntimeStatus = aiRuntimeStatus.String
+	}
+	if aiRuntimeStage.Valid {
+		c.AIRuntimeStage = aiRuntimeStage.String
+	}
+	if aiFailureClass.Valid {
+		c.AIFailureClass = aiFailureClass.String
+	}
+	if aiFailureAt.Valid {
+		t := aiFailureAt.Time
+		c.AIFailureAt = &t
 	}
 	return c, nil
 }

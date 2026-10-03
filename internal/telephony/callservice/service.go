@@ -8,24 +8,28 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/control"
 )
 
 var (
-	ErrInvalidDestination = errors.New("invalid destination")
-	ErrDestinationDenied  = errors.New("destination is not allowed")
-	ErrNotRegistered      = errors.New("telephony provider is not registered")
-	ErrCallActive         = errors.New("an active call already exists")
-	ErrCallNotFound       = errors.New("call not found")
-	ErrCallNotActive      = errors.New("call is not active")
-	ErrHangupRequested    = errors.New("hangup already requested")
-	ErrProviderFailure    = errors.New("telephony provider request failed")
-	ErrPersistenceFailure = errors.New("call persistence failed")
+	ErrInvalidDestination             = errors.New("invalid destination")
+	ErrDestinationPolicyNotConfigured = errors.New("outbound call policy is not configured")
+	ErrDestinationDenied              = errors.New("destination is not allowed")
+	ErrNotRegistered                  = errors.New("telephony provider is not registered")
+	ErrCallActive                     = errors.New("an active call already exists")
+	ErrCallNotFound                   = errors.New("call not found")
+	ErrCallNotActive                  = errors.New("call is not active")
+	ErrHangupRequested                = errors.New("hangup already requested")
+	ErrProviderFailure                = errors.New("telephony provider request failed")
+	ErrPersistenceFailure             = errors.New("call persistence failed")
 )
 
 type Status string
@@ -51,15 +55,30 @@ func (s Status) terminal() bool {
 }
 
 type Call struct {
-	CallID         string `json:"call_id"`
-	ProviderCallID string `json:"provider_call_id,omitempty"`
-	To             string `json:"to"`
-	Status         Status `json:"status"`
+	CallID          string     `json:"call_id"`
+	ProviderCallID  string     `json:"provider_call_id,omitempty"`
+	To              string     `json:"to"`
+	Status          Status     `json:"status"`
+	TerminalReason  string     `json:"terminal_reason,omitempty"`
+	AIRuntimeStatus string     `json:"ai_runtime_status"`
+	AIRuntimeStage  string     `json:"ai_runtime_stage"`
+	AIFailureClass  string     `json:"ai_failure_class,omitempty"`
+	AIFailureAt     *time.Time `json:"ai_failure_at,omitempty"`
+	// Bounded per-call diagnostic timestamps retained for this process lifetime.
+	// No arbitrary provider strings/audio are retained in these fields.
+	AudioErrorSeen     bool       `json:"audio_error_seen"`
+	AudioErrorAt       *time.Time `json:"audio_error_at,omitempty"`
+	AudioErrorClass    string     `json:"audio_error_class,omitempty"`
+	GeminiAudioFirstAt *time.Time `json:"gemini_audio_first_at,omitempty"`
+	MediaEgressFirstAt *time.Time `json:"media_egress_first_at,omitempty"`
+	CallFailedAt       *time.Time `json:"call_failed_at,omitempty"`
+	CallClosedAt       *time.Time `json:"call_closed_at,omitempty"`
 }
 
 type DestinationPolicy interface {
 	Normalize(string) (string, error)
 	Allows(string) bool
+	Destinations() []string
 }
 
 type Allowlist struct{ destinations map[string]struct{} }
@@ -81,6 +100,17 @@ func (p *Allowlist) Allows(value string) bool {
 	_, ok := p.destinations[value]
 	return ok
 }
+
+// Destinations returns an immutable, deterministic policy snapshot.
+func (p *Allowlist) Destinations() []string {
+	values := make([]string, 0, len(p.destinations))
+	for value := range p.destinations {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+func (s *Service) AllowedDestinations() []string { return s.policy.Destinations() }
 
 func NormalizeDestination(value string) (string, error) {
 	value = strings.TrimSpace(value)
@@ -114,6 +144,7 @@ type Service struct {
 
 	mu              sync.RWMutex
 	calls           map[string]Call
+	callDone        map[string]chan struct{}
 	activeID        string
 	starting        bool
 	requested       map[string]bool
@@ -132,7 +163,7 @@ func NewWithRepository(provider control.Provider, policy DestinationPolicy, repo
 		return nil, errors.New("call service dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), requested: make(map[string]bool), uncertain: make(map[string]bool), hangupUncertain: make(map[string]bool), repository: repository}
+	s := &Service{provider: provider, policy: policy, ctx: ctx, cancel: cancel, calls: make(map[string]Call), callDone: make(map[string]chan struct{}), requested: make(map[string]bool), uncertain: make(map[string]bool), hangupUncertain: make(map[string]bool), repository: repository}
 	go s.consumeEvents()
 	return s, nil
 }
@@ -143,6 +174,9 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 	s.mu.RUnlock()
 	if persistenceErr != nil {
 		return Call{}, ErrPersistenceFailure
+	}
+	if len(s.policy.Destinations()) == 0 {
+		return Call{}, ErrDestinationPolicyNotConfigured
 	}
 	canonical, err := s.policy.Normalize(destination)
 	if err != nil {
@@ -227,7 +261,7 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		s.mu.Unlock()
 		return Call{}, ErrProviderFailure
 	}
-	call := Call{CallID: callID, To: canonical, Status: StatusDialing}
+	call := Call{CallID: callID, To: canonical, Status: StatusDialing, AIRuntimeStatus: "not_started", AIRuntimeStage: "not_started"}
 	if s.repository != nil {
 		if err := s.repository.CreateCall(ctx, voicecalldomain.Call{ID: callID, Destination: canonical, Status: string(StatusDialing), Provider: "baresip"}); err != nil {
 			s.mu.Lock()
@@ -239,6 +273,7 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 	s.mu.Lock()
 	s.starting = false
 	s.calls[callID] = call
+	s.callDone[callID] = make(chan struct{})
 	s.activeID = callID
 	s.mu.Unlock()
 
@@ -251,6 +286,7 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		} else {
 			call.Status = StatusFailed
 			s.calls[callID] = call
+			s.closeCallDoneLocked(callID)
 			if s.activeID == callID {
 				s.activeID = ""
 			}
@@ -269,6 +305,7 @@ func (s *Service) Start(ctx context.Context, destination string) (Call, error) {
 		}
 		return Call{}, ErrProviderFailure
 	}
+	log.Printf("call_timeline api_call_id=%s provider_call_id=none event=dial_accepted at=%s dropped_ctrl_events=%d", callID, time.Now().UTC().Format(time.RFC3339Nano), droppedEvents(s.provider))
 	return s.Get(callID)
 }
 
@@ -283,6 +320,106 @@ func (s *Service) Get(callID string) (Call, error) {
 		return Call{}, ErrCallNotFound
 	}
 	return call, nil
+}
+
+// UpdateAIRuntimeStatus records AI state independently of the SIP call state.
+// It never dispatches Hangup or otherwise changes telephony lifecycle.
+func (s *Service) UpdateAIRuntimeStatus(ctx context.Context, callID, status, stage, failureClass string, failureAt *time.Time) error {
+	if ctx == nil || callID == "" || !validAIRuntimeStatus(status) || !validAIRuntimeStage(stage) || !validAIFailureClass(failureClass) {
+		return ErrProviderFailure
+	}
+	s.mu.Lock()
+	call, ok := s.calls[callID]
+	if !ok {
+		s.mu.Unlock()
+		return ErrCallNotFound
+	}
+	call.AIRuntimeStatus = status
+	call.AIRuntimeStage = stage
+	call.AIFailureClass = failureClass
+	call.AIFailureAt = failureAt
+	s.calls[callID] = call
+	s.mu.Unlock()
+	if s.repository != nil {
+		if err := s.repository.UpdateAIRuntimeStatus(ctx, callID, status, stage, failureClass, failureAt); err != nil {
+			s.setPersistenceError(err)
+			return ErrPersistenceFailure
+		}
+	}
+	return nil
+}
+
+func validAIRuntimeStage(value string) bool {
+	switch value {
+	case "not_started", "runtime_starting", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "bridge_run", "media_ingress", "input_transcription_send", "input_transcription_receive", "input_transcription_handler", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "turn_complete", "degraded_mode", "runtime_shutdown", "runtime_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAIRuntimeStatus(value string) bool {
+	switch value {
+	case "starting", "running", "failed", "degraded", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+func validAIFailureClass(value string) bool {
+	if value == "" {
+		return true
+	}
+	switch value {
+	case "timeout", "canceled", "receive_failed", "provider_api", "media_closed", "runtime_error", "session_ended", "jev_config", "jev_client_init", "prompt_snapshot", "gemini_input_connect", "gemini_response_connect", "conversation_state", "turn_runtime_init", "bridge_init", "media_ingress", "input_transcription_send", "input_transcription_receive", "jev_provider", "turn_directive", "gemini_response_send", "gemini_response_receive", "media_egress", "provider_transport", "runtime_unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+// ActiveCall returns the current canonical API call identity for media-session
+// correlation. The provider's Baresip Call-ID remains a separate field.
+func (s *Service) ActiveCall() (Call, bool) {
+	if s == nil {
+		return Call{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.activeID == "" {
+		return Call{}, false
+	}
+	call, ok := s.calls[s.activeID]
+	return call, ok
+}
+
+// WaitCallEnd waits until a provider terminal event or owner Hangup ends callID.
+// A call already known to be terminal returns immediately. The notification is
+// call-scoped so media supervisors can cancel AI processing without polling.
+func (s *Service) WaitCallEnd(ctx context.Context, callID string) error {
+	if ctx == nil || callID == "" {
+		return ErrCallNotFound
+	}
+	s.mu.RLock()
+	call, exists := s.calls[callID]
+	done := s.callDone[callID]
+	s.mu.RUnlock()
+	if !exists {
+		return ErrCallNotFound
+	}
+	if call.Status.terminal() {
+		return nil
+	}
+	if done == nil {
+		return ErrCallNotFound
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) Hangup(ctx context.Context, callID string) (Call, error) {
@@ -354,6 +491,7 @@ func (s *Service) Reconcile(ctx context.Context, callID string) error {
 	if len(inventory) == 0 {
 		call.Status = StatusFailed
 		s.calls[callID] = call
+		s.closeCallDoneLocked(callID)
 		s.activeID = ""
 		delete(s.uncertain, callID)
 		s.mu.Unlock()
@@ -413,6 +551,7 @@ func (s *Service) reconcileHangup(ctx context.Context, callID string) error {
 	}
 	s.calls[callID] = call
 	s.activeID = ""
+	s.closeCallDoneLocked(callID)
 	delete(s.hangupUncertain, callID)
 	s.mu.Unlock()
 	return s.persistLifecycle(ctx, call, string(call.Status))
@@ -460,6 +599,13 @@ func (s *Service) consumeEvents() {
 }
 
 func (s *Service) applyEvent(event control.Event) {
+	if strings.EqualFold(event.Type, "AUDIO_ERROR") {
+		s.recordAudioError(event)
+		return
+	}
+	if strings.EqualFold(event.Class, "call") && (strings.EqualFold(event.Type, "CALL_FAILED") || strings.EqualFold(event.Type, "CALL_CLOSED")) {
+		s.recordTerminalDiagnostic(event)
+	}
 	if !strings.EqualFold(event.Class, "call") {
 		return
 	}
@@ -480,6 +626,16 @@ func (s *Service) applyEvent(event control.Event) {
 		s.mu.Unlock()
 		return
 	}
+	// Record only normalized event metadata; never log peer URIs, SIP payloads,
+	// credentials, or arbitrary provider parameters.
+	callID, providerCallID := call.CallID, call.ProviderCallID
+	terminalReason := ""
+	if strings.HasPrefix(strings.ToUpper(event.Type), "CALL_") {
+		if strings.EqualFold(event.Type, "CALL_CLOSED") || strings.EqualFold(event.Type, "CALL_TERMINATED") || strings.EqualFold(event.Type, "CALL_FAILED") {
+			terminalReason = safeTerminalReason(event.Param)
+		}
+		log.Printf("call_timeline api_call_id=%s provider_call_id=%s event=%s at=%s dropped_ctrl_events=%d terminal_reason=%s", callID, providerCallID, safeEventType(event.Type), time.Now().UTC().Format(time.RFC3339Nano), droppedEvents(s.provider), terminalReason)
+	}
 	switch strings.ToUpper(event.Type) {
 	case "CALL_OUTGOING", "CALL_SETUP":
 		call.Status = StatusDialing
@@ -490,7 +646,12 @@ func (s *Service) applyEvent(event control.Event) {
 	case "CALL_CLOSED", "CALL_TERMINATED", "CALL_FAILED":
 		call.Status = statusFromEvent(event)
 		if call.Status.terminal() {
+			call.TerminalReason = event.Param
+			if call.TerminalReason == "" {
+				call.TerminalReason = string(call.Status)
+			}
 			s.activeID = ""
+			s.closeCallDoneLocked(call.CallID)
 			delete(s.uncertain, call.CallID)
 			delete(s.hangupUncertain, call.CallID)
 		}
@@ -503,11 +664,56 @@ func (s *Service) applyEvent(event control.Event) {
 	if s.repository != nil {
 		reason := ""
 		if call.Status.terminal() {
-			reason = string(call.Status)
+			reason = call.TerminalReason
+			if reason == "" {
+				reason = string(call.Status)
+			}
 		}
 		if err := s.repository.UpdateLifecycle(s.ctx, call.CallID, string(call.Status), call.ProviderCallID, reason); err != nil {
 			s.setPersistenceError(err)
 		}
+	}
+}
+
+// closeCallDoneLocked publishes one terminal transition to call-scoped waiters.
+// Callers must hold s.mu.
+func (s *Service) closeCallDoneLocked(callID string) {
+	if done := s.callDone[callID]; done != nil {
+		close(done)
+		delete(s.callDone, callID)
+	}
+}
+
+func droppedEvents(provider control.Provider) uint64 {
+	if reporter, ok := provider.(interface{ DroppedEventCount() uint64 }); ok {
+		return reporter.DroppedEventCount()
+	}
+	return 0
+}
+
+func safeEventType(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if len(value) > 48 {
+		return "UNKNOWN"
+	}
+	for _, r := range value {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return "UNKNOWN"
+		}
+	}
+	return value
+}
+
+func safeTerminalReason(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) == 7 && strings.HasPrefix(value, "sip_") && value[4] >= '4' && value[4] <= '5' && value[5] >= '0' && value[5] <= '9' && value[6] >= '0' && value[6] <= '9' {
+		return value
+	}
+	switch value {
+	case "busy", "no_answer", "canceled", "local_hangup", "normal", "transport_error", "unknown", "failed":
+		return value
+	default:
+		return "failed"
 	}
 }
 
@@ -543,7 +749,16 @@ func eventMatchesDestination(event control.Event, destination string) bool {
 
 func statusFromEvent(event control.Event) Status {
 	if strings.EqualFold(event.Type, "CALL_FAILED") {
-		return StatusFailed
+		switch event.State {
+		case control.CallStateBusy:
+			return StatusBusy
+		case control.CallStateNoAnswer:
+			return StatusNoAnswer
+		case control.CallStateCanceled:
+			return StatusCanceled
+		default:
+			return StatusFailed
+		}
 	}
 	switch event.State {
 	case control.CallStateCompleted:
@@ -568,3 +783,90 @@ func newID() (string, error) {
 }
 
 func IsActive(status Status) bool { return !status.terminal() }
+
+// RecordMediaMilestone keeps the first audio observation on each boundary.
+// Fixed slots allow temporal comparison with AUDIO_ERROR and terminal events
+// without an unbounded event/PCM history or a database hop per audio frame.
+func (s *Service) RecordMediaMilestone(callID, stage string) {
+	if stage != "gemini_audio" && stage != "media_egress" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.calls[callID]
+	if !ok {
+		return
+	}
+	var slot **time.Time
+	name := "gemini_audio_first"
+	if stage == "gemini_audio" {
+		slot = &c.GeminiAudioFirstAt
+	} else {
+		slot = &c.MediaEgressFirstAt
+		name = "media_egress_first"
+	}
+	if *slot != nil {
+		return
+	}
+	at := time.Now().UTC()
+	*slot = &at
+	s.calls[callID] = c
+	log.Printf("call_media_timeline api_call_id=%s event=%s at=%s", callID, name, at.Format(time.RFC3339Nano))
+}
+
+func safeAudioClass(value string) string {
+	switch value {
+	case "audio_buffer_limit", "frame_protocol", "peer_closed", "socket_io":
+		return value
+	default:
+		return "audio_device"
+	}
+}
+
+func (s *Service) recordAudioError(event control.Event) {
+	class := safeAudioClass(event.Param)
+	at := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.calls[s.activeID]
+	if !ok || (event.CallID != "" && event.CallID != c.ProviderCallID) {
+		log.Printf("call_media_timeline api_call_id=none event=AUDIO_ERROR audio_error_class=%s at=%s", class, at.Format(time.RFC3339Nano))
+		return
+	}
+	if !c.AudioErrorSeen {
+		c.AudioErrorSeen = true
+		c.AudioErrorAt = &at
+		c.AudioErrorClass = class
+		s.calls[c.CallID] = c
+	}
+	// IDs printed here come only from the already-correlated lifecycle, never
+	// arbitrary non-call event data. AUDIO_ERROR does not dispatch Hangup.
+	log.Printf("call_media_timeline api_call_id=%s provider_call_id=%s event=AUDIO_ERROR audio_error_class=%s at=%s", c.CallID, c.ProviderCallID, class, at.Format(time.RFC3339Nano))
+}
+
+func (s *Service) recordTerminalDiagnostic(event control.Event) {
+	if event.CallID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, c := range s.calls {
+		if c.ProviderCallID != event.CallID {
+			continue
+		}
+		var slot **time.Time
+		if strings.EqualFold(event.Type, "CALL_FAILED") {
+			slot = &c.CallFailedAt
+		} else {
+			slot = &c.CallClosedAt
+		}
+		if *slot != nil {
+			return
+		}
+		at := time.Now().UTC()
+		*slot = &at
+		s.calls[id] = c
+		log.Printf("call_media_timeline api_call_id=%s provider_call_id=%s event=%s at=%s", id, c.ProviderCallID, safeEventType(event.Type), at.Format(time.RFC3339Nano))
+		return
+	}
+}

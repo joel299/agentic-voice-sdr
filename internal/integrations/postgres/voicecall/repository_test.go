@@ -74,6 +74,27 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if _, err = pool.Exec(ctx, string(migration)); err != nil {
 		t.Fatal("apply real migration")
 	}
+	aiMigration, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../db/migrations/0006_call_ai_runtime_status.sql"))
+	if err != nil {
+		t.Fatal("read AI runtime migration")
+	}
+	if _, err = pool.Exec(ctx, string(aiMigration)); err != nil {
+		t.Fatal("apply AI runtime migration")
+	}
+	stageMigration, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../db/migrations/0007_call_ai_runtime_stage.sql"))
+	if err != nil {
+		t.Fatal("read AI stage migration")
+	}
+	if _, err = pool.Exec(ctx, string(stageMigration)); err != nil {
+		t.Fatal("apply AI stage migration")
+	}
+	unknownMigration, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../../db/migrations/0008_unknown_ai_runtime_stage.sql"))
+	if err != nil {
+		t.Fatal("read unknown stage migration")
+	}
+	if _, err = pool.Exec(ctx, string(unknownMigration)); err != nil {
+		t.Fatal("apply unknown stage migration")
+	}
 	repo, err := repository.NewRepository(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +108,21 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	}
 	if err := repo.UpdateLifecycle(ctx, call.ID, "connected", "provider-1", ""); err != nil {
 		t.Fatalf("connected update: %v", err)
+	}
+	failureAt := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "input_transcription_receive", "provider_transport", &failureAt); err != nil {
+		t.Fatalf("AI runtime update: %v", err)
+	}
+	// Call #4 used input_transcription_handler as a failure class, which the
+	// schema rejects. The corrected runtime uses runtime_error plus that stage.
+	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "input_transcription_handler", "runtime_error", &failureAt); err != nil {
+		t.Fatalf("handler failure persistence: %v", err)
+	}
+	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "runtime_unknown", "runtime_unknown", &failureAt); err != nil {
+		t.Fatalf("unknown failure persistence: %v", err)
+	}
+	if err := repo.UpdateAIRuntimeStatus(ctx, call.ID, "failed", "input_transcription_receive", "provider_transport", &failureAt); err != nil {
+		t.Fatal(err)
 	}
 	lead, created, err := repo.AppendFinalTurn(ctx, call.ID, "lead", " Olá, quero informações. ", "gemini_input", "lead:"+call.ID+":lead-000001")
 	if err != nil || !created {
@@ -159,7 +195,7 @@ func TestPostgresVoiceCallRepositoryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal("get call")
 	}
-	if stored.Status != "completed" || stored.ProviderCallID != "provider-1" || stored.ConnectedAt == nil || stored.EndedAt == nil || stored.TerminalReason != "completed" {
+	if stored.Status != "completed" || stored.ProviderCallID != "provider-1" || stored.ConnectedAt == nil || stored.EndedAt == nil || stored.TerminalReason != "completed" || stored.AIRuntimeStatus != "failed" || stored.AIRuntimeStage != "input_transcription_receive" || stored.AIFailureClass != "provider_transport" || stored.AIFailureAt == nil || !stored.AIFailureAt.Equal(failureAt) {
 		t.Fatalf("stored lifecycle incomplete: %#v", stored)
 	}
 	retained, err := repo.ListFinalTurns(ctx, call.ID, 100)

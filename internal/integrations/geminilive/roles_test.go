@@ -202,12 +202,8 @@ func TestRawAudioAndDirectiveRouteToSeparateProviderSessions(t *testing.T) {
 		if err := json.Unmarshal(fields["generationConfig"], &generation); err != nil {
 			t.Fatalf("decode modalities for connection %d: %v", peer.id, err)
 		}
-		want := "AUDIO"
-		if peer.id == inputPeer.id {
-			want = "TEXT"
-		}
-		if len(generation.ResponseModalities) != 1 || generation.ResponseModalities[0] != want {
-			t.Fatalf("connection %d modalities = %v, want [%s]", peer.id, generation.ResponseModalities, want)
+		if len(generation.ResponseModalities) != 1 || generation.ResponseModalities[0] != "AUDIO" {
+			t.Fatalf("connection %d modalities = %v, want [AUDIO]", peer.id, generation.ResponseModalities)
 		}
 	}
 
@@ -276,7 +272,7 @@ func TestRawAudioAndDirectiveRouteToSeparateProviderSessions(t *testing.T) {
 func TestRoleDefaultsAndExplicitModalities(t *testing.T) {
 	input := Config{}.normalized(roleInputTranscription)
 	response := Config{}.normalized(roleControlledResponse)
-	if len(input.ResponseModalities) != 1 || input.ResponseModalities[0] != "TEXT" {
+	if len(input.ResponseModalities) != 1 || input.ResponseModalities[0] != "AUDIO" {
 		t.Fatalf("input transcriber default modalities = %v", input.ResponseModalities)
 	}
 	if len(response.ResponseModalities) != 1 || response.ResponseModalities[0] != "AUDIO" {

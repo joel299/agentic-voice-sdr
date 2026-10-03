@@ -15,13 +15,14 @@ import (
 )
 
 var (
-	ErrNilDependency       = errors.New("bridge: nil dependency")
-	ErrFormatIncompatible  = errors.New("bridge: incompatible audio format")
-	ErrResponseInterrupted = errors.New("bridge: Gemini response interrupted")
-	ErrProviderAPI         = errors.New("bridge: Gemini API error")
-	ErrReceiveFailed       = errors.New("bridge: Gemini receive failed")
-	ErrSessionClosed       = errors.New("bridge: Gemini session closed")
-	ErrAudioOutputFailed   = errors.New("bridge: Gemini audio output failed")
+	ErrNilDependency          = errors.New("bridge: nil dependency")
+	ErrFormatIncompatible     = errors.New("bridge: incompatible audio format")
+	ErrResponseInterrupted    = errors.New("bridge: Gemini response interrupted")
+	ErrProviderAPI            = errors.New("bridge: Gemini API error")
+	ErrReceiveFailed          = errors.New("bridge: Gemini receive failed")
+	ErrSessionClosed          = errors.New("bridge: Gemini session closed")
+	ErrResponseTurnIncomplete = errors.New("bridge: response closed before turn completion")
+	ErrAudioOutputFailed      = errors.New("bridge: Gemini audio output failed")
 )
 
 type AudioReader interface {

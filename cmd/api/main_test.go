@@ -14,14 +14,71 @@ import (
 	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/httpapi"
+	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
+	telephonybridge "github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
 	"github.com/joel299/agentic-voice-sdr/internal/whatsapp"
 )
+
+func TestAIFailureDiagnosticsPreserveSafeStageAndProviderClass(t *testing.T) {
+	err := &telephonybridge.StageError{Stage: "input_transcription_receive", Cause: &geminilive.Error{Kind: geminilive.ErrorReceive, TransportClass: geminilive.TransportOther}}
+	stage := aiFailureStage(err)
+	if stage != "input_transcription_receive" {
+		t.Fatalf("failure stage=%q", stage)
+	}
+	if class := aiFailureClass(err, stage); class != "provider_transport" {
+		t.Fatalf("failure class=%q", class)
+	}
+	if strings.Contains(err.Error(), "TransportOther") || strings.Contains(err.Error(), "receive_transport_other") {
+		t.Fatalf("diagnostic error leaked provider detail: %v", err)
+	}
+	var staged interface{ AIStage() string }
+	if !errors.As(err, &staged) || staged.AIStage() != stage {
+		t.Fatalf("stage error does not support safe unwrapping: %v", err)
+	}
+}
+
+func TestStoppedAIRuntimePreservesLastValidStage(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage string
+		want  string
+	}{
+		{name: "preserve Gemini response stage", stage: "gemini_response_receive", want: "gemini_response_receive"},
+		{name: "preserve JEV stage", stage: "jev_provider", want: "jev_provider"},
+		{name: "fallback when no stage was recorded", stage: "", want: "runtime_unknown"},
+		{name: "fallback for unsafe stage token", stage: "bad-stage", want: "runtime_unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stoppedAIRuntimeStage(test.stage); got != test.want {
+				t.Fatalf("stoppedAIRuntimeStage(%q) = %q, want %q", test.stage, got, test.want)
+			}
+		})
+	}
+}
 
 func TestServerConfiguresExplicitTimeouts(t *testing.T) {
 	server := newHTTPServer(":0", nil)
 	if server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
 		t.Fatal("HTTP server timeouts must be positive")
+	}
+}
+
+func TestWaitForBaresipControlRequiresListeningEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForBaresipControl(ctx, listener.Addr().String(), time.Second); err != nil {
+		t.Fatalf("ready local control listener rejected: %v", err)
+	}
+
+	if err := waitForBaresipControl(ctx, "127.0.0.1:1", 150*time.Millisecond); !errors.Is(err, errBaresipControlUnavailable) {
+		t.Fatalf("missing control listener error = %v", err)
 	}
 }
 
@@ -171,5 +228,12 @@ func TestRunServersStartsAndShutsDownHTTPAndAudioSocket(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("runServers() error = %v", err)
+	}
+}
+
+func TestCall4HandlerFailureUsesPersistableClass(t *testing.T) {
+	err := &telephonybridge.StageError{Stage: "input_transcription_handler", Cause: errors.New("safe unknown cause")}
+	if got := aiFailureClass(err, aiFailureStage(err)); got != "runtime_error" {
+		t.Fatalf("class=%s rejected by DB constraint; want runtime_error", got)
 	}
 }

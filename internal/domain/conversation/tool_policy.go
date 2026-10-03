@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	domainTools "github.com/joel299/agentic-voice-sdr/internal/domain/tools"
 )
@@ -72,6 +73,9 @@ func (input ToolPolicyInput) Validate() error {
 
 func (input DecisionInput) validate() error {
 	if !validDecisionStage(input.Stage) || input.TurnCount < 0 {
+		return ErrInvalidDecisionInput
+	}
+	if utf8.RuneCountInString(input.LatestFinalLeadText) > maxFinalLeadTextRunes || (input.LatestFinalLeadText != "" && (input.LastTurnRole != RoleLead || input.LastTranscriptState != TranscriptFinal)) {
 		return ErrInvalidDecisionInput
 	}
 	if input.TurnCount == 0 {

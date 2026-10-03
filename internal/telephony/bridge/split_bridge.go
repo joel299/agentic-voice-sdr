@@ -63,6 +63,7 @@ type SplitBridge struct {
 	events      EventHandler
 	lifecycle   ResponseLifecycle
 	observe     StageObserver
+	diagnostics responseDiagnostics
 }
 
 func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.InputTranscriberSession, responder geminilive.ControlledResponseSession, transcript TranscriptHandler, events EventHandler, lifecycle ...ResponseLifecycle) *SplitBridge {
@@ -78,10 +79,18 @@ func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.Inpu
 func (b *SplitBridge) SetStageObserver(observer StageObserver) {
 	if b != nil {
 		b.observe = observer
+		if h, ok := b.transcript.(interface{ SetStageObserver(StageObserver) }); ok {
+			h.SetStageObserver(observer)
+		}
 	}
 }
 
 func (b *SplitBridge) observeStage(stage, outcome string) {
+	b.diagnostics.mu.Lock()
+	if stage != "media_ingress" && stage != "input_transcription_send" && stage != "gemini_closed" {
+		b.diagnostics.snapshot.LastSuccessfulStage = stage
+	}
+	b.diagnostics.mu.Unlock()
 	if b.observe != nil {
 		b.observe(stage, outcome)
 	}
@@ -120,6 +129,12 @@ func (b *SplitBridge) Run(ctx context.Context) error {
 		err := res.err
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && first == nil {
 			first = err
+			var staged interface{ AIStage() string }
+			stage := "runtime_unknown"
+			if errors.As(err, &staged) {
+				stage = staged.AIStage()
+			}
+			b.recordFailure(stage, err)
 			cancel()
 			closeAll()
 		}
@@ -252,6 +267,16 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			failSession(ErrReceiveFailed)
 			return stageError("gemini_response_receive", err)
 		}
+		b.recordEvent(event)
+		if event.Kind == geminilive.EventGoAway {
+			b.observeStage("gemini_go_away", "received")
+		}
+		if event.Kind == geminilive.EventSessionResumption {
+			b.observeStage("gemini_session_resumption", "received")
+		}
+		if event.Kind == geminilive.EventClosed {
+			b.observeStage("gemini_closed", "received")
+		}
 		if event.Kind == geminilive.EventOutputTranscription {
 			b.observeStage("gemini_output_transcription", "received")
 		}
@@ -295,7 +320,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 					}
 				}
 				fail(ErrResponseTurnIncomplete)
-				return fmt.Errorf("%w (close status: %s)", ErrResponseTurnIncomplete, safeCloseStatus(event.CloseStatusClass))
+				return stageError("gemini_response_receive", fmt.Errorf("%w (close status: %s)", ErrResponseTurnIncomplete, safeCloseStatus(event.CloseStatusClass)))
 			}
 			failSession(ErrSessionClosed)
 		}

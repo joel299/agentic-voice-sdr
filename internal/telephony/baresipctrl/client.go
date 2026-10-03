@@ -397,7 +397,7 @@ func (c *Client) Do(ctx context.Context, command, params string) (control.Comman
 		return control.CommandResult{}, commandError(ErrInvalidMessage, control.DispatchNotDispatched)
 	}
 	switch command {
-	case "reginfo", "dial", "hangup", "listcalls":
+	case "reginfo", "dial", "hangup", "listcalls", "gru151_media_stats":
 	default:
 		return control.CommandResult{}, commandError(ErrUnsupportedCommand, control.DispatchNotDispatched)
 	}

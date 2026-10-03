@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -177,7 +179,8 @@ func serve(ctx context.Context, cfg config.Config) error {
 			log.Printf("Baresip ctrl_tcp runtime unavailable; outbound call control is disabled")
 		}
 	}()
-	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder, tuning, baseGemini)
+	sourceBaseline, sourceBaselineOK := readMediaSourceStats(signalCtx, provider)
+	go runBaresipMediaSessions(signalCtx, mediaAdapter, calls, callRepository, promptBuilder, tuning, baseGemini, provider, sourceBaseline, sourceBaselineOK)
 	calibration := newCalibrationServices(baseJEV, baseGemini, promptBuilder, promptService, provider, tuning)
 	calibration.FalePacoSIP = newFalePacoSIPService(cfg.BaresipProfileDir, provider)
 	server := newHTTPServer(cfg.HTTPAddr, httpapi.NewRouterWithConfigAndCalibration(cfg, calls, transcripts, calibration))
@@ -213,7 +216,9 @@ func waitForBaresipControl(ctx context.Context, address string, timeout time.Dur
 	}
 }
 
-func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter, calls *callservice.Service, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config) {
+func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter, calls *callservice.Service, repository voicecallTranscriptRepository, prompts *sessionprompt.Builder, tuning *httpapi.TuningStore, baseGemini geminilive.Config, sourceStats *baresipctrl.Client, baseline baresipctrl.MediaSourceStats, baselineOK bool) {
+	// Snapshot once before calls can allocate audio, then after each complete
+	// single-call interval. A failed baseline remains unavailable, not zero.
 	for {
 		session, err := adapter.WaitSession(ctx)
 		if err != nil {
@@ -238,10 +243,27 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 			}
 		}()
 		var runtimeReady atomic.Bool
+		var milestoneMu sync.Mutex
+		var frameMu sync.Mutex
+		seenFrames := make(map[string]bool)
 		observe := func(stage, outcome string) {
 			if !safeStageToken(stage) || !safeStageToken(outcome) {
 				return
 			}
+			// Frame observations never wait behind a PostgreSQL stage update.
+			if frameMilestone(stage) {
+				frameMu.Lock()
+				seen := seenFrames[stage]
+				seenFrames[stage] = true
+				frameMu.Unlock()
+				if !seen {
+					calls.RecordMediaMilestone(call.CallID, stage)
+					log.Printf("ai_runtime_milestone api_call_id=%s stage=%s outcome=%s at=%s", call.CallID, stage, outcome, time.Now().UTC().Format(time.RFC3339Nano))
+				}
+				return
+			}
+			milestoneMu.Lock()
+			defer milestoneMu.Unlock()
 			calls.RecordMediaMilestone(call.CallID, stage)
 			at := time.Now().UTC()
 			category := stageCategory(stage)
@@ -263,6 +285,8 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 			recordAIRuntimeStopped(ctx, calls, call.CallID)
 			_ = session.Close()
 			metrics := session.Metrics()
+			logSafeMediaMetrics(call.CallID, metrics)
+			baseline, baselineOK = finishSourceStats(ctx, sourceStats, calls, call.CallID, baseline, baselineOK)
 			log.Printf("media_session_close api_call_id=%s reason=provider_terminal at=%s rx_frames_dropped=%d rx_queue_high_water=%d tx_queue_high_water=%d tx_wait_count=%d tx_wait_duration_ms=%d", call.CallID, time.Now().UTC().Format(time.RFC3339Nano), metrics.RXFramesDropped, metrics.RXQueueHighWater, metrics.TXQueueHighWater, metrics.TXWaitCount, metrics.TXWaitDurationMS)
 			continue
 		}
@@ -272,7 +296,8 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		if ctx.Err() == nil {
 			failedAt := time.Now().UTC()
 			recordAIRuntimeStatus(ctx, calls, call.CallID, "failed", failureStage, failureClass, &failedAt)
-			log.Printf("ai_runtime_status=failed api_call_id=%s ai_runtime_stage=%s ai_failure_class=%s ai_failure_at=%s media_mode=degraded", call.CallID, failureStage, failureClass, failedAt.Format(time.RFC3339Nano))
+			logSafeMediaMetrics(call.CallID, session.Metrics())
+			log.Printf("ai_runtime_status=failed api_call_id=%s ai_runtime_stage=%s ai_failure_class=%s ai_failure_at=%s media_mode=degraded degraded_reason=%s", call.CallID, failureStage, failureClass, failedAt.Format(time.RFC3339Nano), failureClass)
 			log.Printf("ai_runtime_milestone api_call_id=%s stage=degraded_mode outcome=started at=%s", call.CallID, failedAt.Format(time.RFC3339Nano))
 			mediaErr = session.ServeDegraded(callCtx)
 		}
@@ -280,6 +305,8 @@ func runBaresipMediaSessions(ctx context.Context, adapter *baresipmedia.Adapter,
 		terminalCall := !stillActive || currentCall.CallID != call.CallID
 		cancelCall()
 		metrics := session.Metrics()
+		logSafeMediaMetrics(call.CallID, metrics)
+		baseline, baselineOK = finishSourceStats(ctx, sourceStats, calls, call.CallID, baseline, baselineOK)
 		if ctx.Err() != nil {
 			recordAIRuntimeStopped(context.Background(), calls, call.CallID)
 			_ = session.Close()
@@ -396,6 +423,9 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 	log.Printf("ai_runtime_status=running api_call_id=%s ai_runtime_stage=bridge_run at=%s", callID, time.Now().UTC().Format(time.RFC3339Nano))
 	recordAIRuntimeStatus(ctx, calls, callID, "running", "bridge_run", "", nil)
 	err = bridge.Run(ctx)
+	if data, e := json.Marshal(bridge.Diagnostics()); e == nil {
+		log.Printf("ai_response_diagnostics api_call_id=%s data=%s", callID, data)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -415,9 +445,13 @@ func recordAIRuntimeStatus(ctx context.Context, calls *callservice.Service, call
 // preserving the last stage that actually ran. Replacing that stage with
 // runtime_shutdown hid whether a disconnected call had reached JEV or Gemini.
 func recordAIRuntimeStopped(ctx context.Context, calls *callservice.Service, callID string) {
-	stage := "runtime_shutdown"
+	stage := "runtime_unknown"
 	if calls != nil {
 		if call, err := calls.Get(callID); err == nil {
+			if call.AIFailureAt != nil || call.AIFailureClass != "" || call.AIRuntimeStatus == "failed" || call.AIRuntimeStatus == "degraded" {
+				recordAIRuntimeStatus(ctx, calls, callID, "failed", call.AIRuntimeStage, call.AIFailureClass, call.AIFailureAt)
+				return
+			}
 			stage = stoppedAIRuntimeStage(call.AIRuntimeStage)
 		}
 	}
@@ -428,7 +462,7 @@ func stoppedAIRuntimeStage(lastStage string) string {
 	if validAIStage(lastStage) {
 		return lastStage
 	}
-	return "runtime_shutdown"
+	return "runtime_unknown"
 }
 
 func aiFailureStage(err error) string {
@@ -456,7 +490,7 @@ func aiFailureClass(err error, stage string) string {
 		return "provider_api"
 	case errors.Is(err, geminilive.ErrTranscriptionAPI):
 		return "provider_api"
-	case errors.Is(err, geminilive.ErrTranscriptionClosed):
+	case errors.Is(err, geminilive.ErrTranscriptionClosed), errors.Is(err, telephonybridge.ErrResponseTurnIncomplete), errors.Is(err, telephonybridge.ErrSessionClosed):
 		return "provider_transport"
 	case errors.Is(err, baresipmedia.ErrSessionClosed):
 		return "media_closed"
@@ -468,7 +502,7 @@ func aiFailureClass(err error, stage string) string {
 		if stage == "runtime_unknown" {
 			return "runtime_unknown"
 		}
-		return stage
+		return "runtime_error"
 	}
 }
 
@@ -478,7 +512,7 @@ func stageCategory(stage string) string {
 		return "input_transcription_receive"
 	case "input_transcription_handler":
 		return "input_transcription_handler"
-	case "gemini_output_transcription", "gemini_audio", "generation_complete", "gemini_response_receive":
+	case "gemini_output_transcription", "gemini_audio", "generation_complete", "gemini_response_receive", "gemini_go_away", "gemini_session_resumption", "gemini_closed":
 		return "gemini_response_receive"
 	case "media_egress":
 		return "media_egress"
@@ -600,4 +634,52 @@ func normalizeServeError(err error) error {
 		return nil
 	}
 	return err
+}
+
+func frameMilestone(stage string) bool {
+	switch stage {
+	case "media_ingress", "input_transcription_send", "gemini_audio", "media_egress":
+		return true
+	}
+	return false
+}
+func logSafeMediaMetrics(callID string, metrics baresipmedia.SessionMetrics) {
+	if data, err := json.Marshal(metrics); err == nil {
+		log.Printf("call_media_metrics api_call_id=%s scope=call data=%s", callID, data)
+	}
+}
+
+func readMediaSourceStats(ctx context.Context, client *baresipctrl.Client) (baresipctrl.MediaSourceStats, bool) {
+	if client == nil {
+		return baresipctrl.MediaSourceStats{}, false
+	}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stats, err := client.MediaSourceStats(bounded)
+	return stats, err == nil
+}
+func logSourceStats(callID, phase string, stats baresipctrl.MediaSourceStats) {
+	if data, err := json.Marshal(stats); err == nil {
+		log.Printf("call_c_source_metrics api_call_id=%s phase=%s data=%s", callID, phase, data)
+	}
+}
+func finishSourceStats(ctx context.Context, client *baresipctrl.Client, calls *callservice.Service, callID string, before baresipctrl.MediaSourceStats, baselineOK bool) (baresipctrl.MediaSourceStats, bool) {
+	beforeCall, beforeActive := calls.ActiveCall()
+	after, ok := readMediaSourceStats(ctx, client)
+	afterCall, afterActive := calls.ActiveCall()
+	if (beforeActive && beforeCall.CallID != callID) || (afterActive && afterCall.CallID != callID) {
+		log.Printf("call_c_source_metrics api_call_id=%s delta_available=no reason=next_call_started", callID)
+		return after, false
+	}
+	if !ok {
+		log.Printf("call_c_source_metrics api_call_id=%s available=no", callID)
+		return after, false
+	}
+	logSourceStats(callID, "final", after)
+	if delta, valid := after.Delta(before); baselineOK && valid {
+		logSourceStats(callID, "single_call_delta", delta)
+	} else {
+		log.Printf("call_c_source_metrics api_call_id=%s delta_available=no", callID)
+	}
+	return after, true
 }

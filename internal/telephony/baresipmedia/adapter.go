@@ -82,12 +82,17 @@ type Session struct {
 	state   *mediaSession
 }
 
+type txFrame struct {
+	audiosocket.Frame
+	degraded bool
+}
+
 type mediaSession struct {
 	adapter *Adapter
 	rxConn  *net.UnixConn
 	txConn  *net.UnixConn
 	rxQueue chan audiosocket.Frame
-	txQueue chan audiosocket.Frame
+	txQueue chan txFrame
 	done    chan struct{}
 	endOnce sync.Once
 	rxOnce  sync.Once
@@ -103,20 +108,28 @@ type mediaSession struct {
 }
 
 type sessionMetrics struct {
-	rxFramesDropped  atomic.Uint64
-	rxQueueHighWater atomic.Uint64
-	txQueueHighWater atomic.Uint64
-	txWaitCount      atomic.Uint64
-	txWaitDurationNS atomic.Uint64
+	rxFramesDropped       atomic.Uint64
+	rxQueueHighWater      atomic.Uint64
+	txQueueHighWater      atomic.Uint64
+	txWaitCount           atomic.Uint64
+	txWaitDurationNS      atomic.Uint64
+	realAgentAudioFrames  atomic.Uint64
+	degradedSilenceFrames atomic.Uint64
+	lastRealAudioNS       atomic.Int64
+	degradedStartedNS     atomic.Int64
 }
 
 // SessionMetrics contains counters for one call-scoped media session.
 type SessionMetrics struct {
-	RXFramesDropped  uint64
-	RXQueueHighWater uint64
-	TXQueueHighWater uint64
-	TXWaitCount      uint64
-	TXWaitDurationMS uint64
+	RXFramesDropped       uint64     `json:"rx_frames_dropped"`
+	RXQueueHighWater      uint64     `json:"rx_queue_high_water"`
+	TXQueueHighWater      uint64     `json:"tx_queue_high_water"`
+	TXWaitCount           uint64     `json:"tx_wait_count"`
+	TXWaitDurationMS      uint64     `json:"tx_wait_duration_ms"`
+	RealAgentAudioFrames  uint64     `json:"real_agent_audio_frames"`
+	DegradedSilenceFrames uint64     `json:"degraded_silence_frames"`
+	LastRealAgentAudioAt  *time.Time `json:"last_real_agent_audio_at"`
+	DegradedModeStartedAt *time.Time `json:"degraded_mode_started_at"`
 }
 
 var (
@@ -267,7 +280,7 @@ func (a *Adapter) activatePendingLocked() *mediaSession {
 		rxConn:  a.rxPending,
 		txConn:  a.txPending,
 		rxQueue: make(chan audiosocket.Frame, a.rxFrames),
-		txQueue: make(chan audiosocket.Frame, a.txFrames),
+		txQueue: make(chan txFrame, a.txFrames),
 		done:    make(chan struct{}),
 	}
 	a.rxPending, a.txPending, a.active = nil, nil, s
@@ -461,7 +474,7 @@ func validateVariableFrame(frame audiosocket.Frame, want audiosocket.FrameType) 
 	return validateFrame(frame, want)
 }
 
-func (s *mediaSession) enqueuePCM(ctx context.Context, payload []byte) error {
+func (s *mediaSession) enqueuePCM(ctx context.Context, payload []byte, degraded ...bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -478,7 +491,7 @@ func (s *mediaSession) enqueuePCM(ctx context.Context, payload []byte) error {
 	copy(combined, s.txPartial[:s.txUsed])
 	copy(combined[s.txUsed:], payload)
 	for offset := 0; offset < frameCount*txFrameBytes; offset += txFrameBytes {
-		frame := audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: append([]byte(nil), combined[offset:offset+txFrameBytes]...)}
+		frame := txFrame{Frame: audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: append([]byte(nil), combined[offset:offset+txFrameBytes]...)}, degraded: len(degraded) > 0 && degraded[0]}
 		if len(s.txQueue) == cap(s.txQueue) {
 			started := time.Now()
 			s.metrics.txWaitCount.Add(1)
@@ -570,11 +583,15 @@ func (s *Session) Metrics() SessionMetrics {
 	}
 	m := &s.state.metrics
 	return SessionMetrics{
-		RXFramesDropped:  m.rxFramesDropped.Load(),
-		RXQueueHighWater: m.rxQueueHighWater.Load(),
-		TXQueueHighWater: m.txQueueHighWater.Load(),
-		TXWaitCount:      m.txWaitCount.Load(),
-		TXWaitDurationMS: m.txWaitDurationNS.Load() / uint64(time.Millisecond),
+		RXFramesDropped:       m.rxFramesDropped.Load(),
+		RXQueueHighWater:      m.rxQueueHighWater.Load(),
+		TXQueueHighWater:      m.txQueueHighWater.Load(),
+		TXWaitCount:           m.txWaitCount.Load(),
+		TXWaitDurationMS:      m.txWaitDurationNS.Load() / uint64(time.Millisecond),
+		RealAgentAudioFrames:  m.realAgentAudioFrames.Load(),
+		DegradedSilenceFrames: m.degradedSilenceFrames.Load(),
+		LastRealAgentAudioAt:  timestampNS(m.lastRealAudioNS.Load()),
+		DegradedModeStartedAt: timestampNS(m.degradedStartedNS.Load()),
 	}
 }
 
@@ -617,6 +634,13 @@ func (s *Session) ServeDegraded(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.state.metrics.degradedStartedNS.CompareAndSwap(0, time.Now().UTC().UnixNano())
+	s.state.txMu.Lock()
+	clear(s.state.txPartial[:])
+	s.state.txUsed = 0
+	s.state.txMu.Unlock()
 	drainDone := make(chan struct{})
 	go func() {
 		defer close(drainDone)
@@ -628,6 +652,7 @@ func (s *Session) ServeDegraded(ctx context.Context) error {
 			clear(frame.Payload)
 		}
 	}()
+	defer func() { cancel(); <-drainDone }()
 	ticker := time.NewTicker(ptimeMillis * time.Millisecond)
 	defer ticker.Stop()
 	silence := make([]byte, txFrameBytes)
@@ -640,7 +665,7 @@ func (s *Session) ServeDegraded(ctx context.Context) error {
 			<-drainDone
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.WriteFrameContext(ctx, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: silence}); err != nil {
+			if err := s.state.enqueuePCM(ctx, silence, true); err != nil {
 				if errors.Is(err, ErrSessionClosed) {
 					<-drainDone
 					return s.state.sessionError()
@@ -662,13 +687,19 @@ func (a *Adapter) writeTX(s *mediaSession) {
 		case <-s.done:
 			return
 		case frame := <-s.txQueue:
-			wire, err := audiosocket.Encode(frame)
+			wire, err := audiosocket.Encode(frame.Frame)
 			if err == nil {
 				err = writeFull(s.txConn, wire)
 			}
 			if err != nil {
 				a.endSession(s, err)
 				return
+			}
+			if frame.degraded {
+				s.metrics.degradedSilenceFrames.Add(1)
+			} else {
+				s.metrics.realAgentAudioFrames.Add(1)
+				s.metrics.lastRealAudioNS.Store(time.Now().UTC().UnixNano())
 			}
 		}
 	}
@@ -711,7 +742,10 @@ func (a *Adapter) endSession(s *mediaSession, err error) {
 			s.txUsed = 0
 			s.txMu.Unlock()
 			drainFrames(s.rxQueue)
-			drainFrames(s.txQueue)
+			for len(s.txQueue) > 0 {
+				frame := <-s.txQueue
+				clear(frame.Payload)
+			}
 			a.mu.Lock()
 			if a.active == s {
 				a.active = nil
@@ -807,4 +841,12 @@ func (a *Adapter) Close() error {
 	a.wg.Wait()
 	_ = os.RemoveAll(a.dir)
 	return nil
+}
+
+func timestampNS(ns int64) *time.Time {
+	if ns == 0 {
+		return nil
+	}
+	t := time.Unix(0, ns).UTC()
+	return &t
 }

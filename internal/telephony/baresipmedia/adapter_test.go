@@ -113,7 +113,7 @@ func TestTXRechunkerPreservesSamplesAcrossChunkShapes(t *testing.T) {
 }
 
 func TestTXQueueAppliesBoundedBackpressureWithoutEndingSession(t *testing.T) {
-	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
+	state := &mediaSession{txQueue: make(chan txFrame, 1), done: make(chan struct{})}
 	pcm := pcmSamples(txFrameBytes)
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- state.enqueuePCM(context.Background(), pcm) }()
@@ -150,8 +150,8 @@ func TestTXQueueAppliesBoundedBackpressureWithoutEndingSession(t *testing.T) {
 }
 
 func TestTXQueueBackpressureStopsOnSessionCancellation(t *testing.T) {
-	state := &mediaSession{txQueue: make(chan audiosocket.Frame, 1), done: make(chan struct{})}
-	state.txQueue <- audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes)}
+	state := &mediaSession{txQueue: make(chan txFrame, 1), done: make(chan struct{})}
+	state.txQueue <- txFrame{Frame: audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes)}}
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- state.enqueuePCM(context.Background(), pcmSamples(2*txFrameBytes)) }()
 
@@ -581,4 +581,59 @@ func shortTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+func TestCall4MetricsSeparateRealAudioAndDegradedSilence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	a, err := New(context.Background(), Config{ParentDir: shortTempDir(t), BufferFrames: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	rx, tx := a.SocketPaths()
+	peerRX, peerTX, session := connectPair(t, a, rx, tx)
+	defer peerRX.Close()
+	defer peerTX.Close()
+	defer session.Close()
+	if err := session.WriteFrame(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: pcmSamples(txFrameBytes / 2)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := audiosocket.DecodeReader(peerTX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.ServeDegraded(ctx) }()
+	frame, err := audiosocket.DecodeReader(peerTX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(frame.Payload, make([]byte, txFrameBytes)) {
+		t.Fatal("degraded output was not silence")
+	}
+	deadline := time.Now().Add(time.Second)
+	for session.Metrics().DegradedSilenceFrames == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	m := session.Metrics()
+	if m.RealAgentAudioFrames != 1 || m.DegradedSilenceFrames == 0 || m.LastRealAgentAudioAt == nil || m.DegradedModeStartedAt == nil {
+		t.Fatalf("metrics=%+v", m)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("degraded drain leaked on cancellation")
+	}
+	// A fresh call must not inherit counters or timestamps.
+	session.Close()
+	peerRX.Close()
+	peerTX.Close()
+	nextRX, nextTX, next := connectPair(t, a, rx, tx)
+	defer nextRX.Close()
+	defer nextTX.Close()
+	defer next.Close()
+	if m = next.Metrics(); m.RealAgentAudioFrames != 0 || m.DegradedSilenceFrames != 0 || m.LastRealAgentAudioAt != nil {
+		t.Fatalf("cross-call metrics: %+v", m)
+	}
 }

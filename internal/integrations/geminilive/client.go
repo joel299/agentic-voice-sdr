@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"nhooyr.io/websocket"
 )
@@ -132,6 +133,8 @@ type Event struct {
 	TurnComplete         bool
 	CloseStatusClass     CloseStatusClass
 	TransportClass       TransportErrorClass
+	GoAwayTimeLeftMS     int64
+	SessionResumable     bool
 	WaitingForInput      bool
 	InteractionStatus    string
 }
@@ -154,6 +157,7 @@ const (
 	EventGenerationComplete  EventKind = "generation_complete"
 	EventTurnComplete        EventKind = "turn_complete"
 	EventGoAway              EventKind = "go_away"
+	EventSessionResumption   EventKind = "session_resumption"
 	EventServerStatus        EventKind = "server_status"
 	EventInterrupted         EventKind = "interrupted"
 	EventToolCall            EventKind = "tool_call"
@@ -538,8 +542,25 @@ func parseEvents(msg map[string]json.RawMessage) []Event {
 	if _, ok := msg["setupComplete"]; ok {
 		return []Event{{Kind: EventSetupComplete}}
 	}
-	if _, ok := msg["goAway"]; ok {
-		return []Event{{Kind: EventGoAway}}
+	if raw, ok := msg["goAway"]; ok {
+		var g struct {
+			TimeLeft string `json:"timeLeft"`
+		}
+		_ = json.Unmarshal(raw, &g)
+		left, err := time.ParseDuration(g.TimeLeft)
+		if err != nil || left < 0 {
+			left = 0
+		}
+		return []Event{{Kind: EventGoAway, GoAwayTimeLeftMS: left.Milliseconds()}}
+	}
+	if raw, ok := msg["sessionResumptionUpdate"]; ok {
+		// Only retain the boolean in public events. Opaque handles are secrets;
+		// this runtime has not enabled reconnect/sessionResumption in setup.
+		var u struct {
+			Resumable bool `json:"resumable"`
+		}
+		_ = json.Unmarshal(raw, &u)
+		return []Event{{Kind: EventSessionResumption, SessionResumable: u.Resumable}}
 	}
 	if raw, ok := msg["toolCall"]; ok {
 		var t struct {

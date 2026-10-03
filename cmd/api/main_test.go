@@ -46,8 +46,8 @@ func TestStoppedAIRuntimePreservesLastValidStage(t *testing.T) {
 	}{
 		{name: "preserve Gemini response stage", stage: "gemini_response_receive", want: "gemini_response_receive"},
 		{name: "preserve JEV stage", stage: "jev_provider", want: "jev_provider"},
-		{name: "fallback when no stage was recorded", stage: "", want: "runtime_shutdown"},
-		{name: "fallback for unsafe stage token", stage: "bad-stage", want: "runtime_shutdown"},
+		{name: "fallback when no stage was recorded", stage: "", want: "runtime_unknown"},
+		{name: "fallback for unsafe stage token", stage: "bad-stage", want: "runtime_unknown"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -228,5 +228,12 @@ func TestRunServersStartsAndShutsDownHTTPAndAudioSocket(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("runServers() error = %v", err)
+	}
+}
+
+func TestCall4HandlerFailureUsesPersistableClass(t *testing.T) {
+	err := &telephonybridge.StageError{Stage: "input_transcription_handler", Cause: errors.New("safe unknown cause")}
+	if got := aiFailureClass(err, aiFailureStage(err)); got != "runtime_error" {
+		t.Fatalf("class=%s rejected by DB constraint; want runtime_error", got)
 	}
 }

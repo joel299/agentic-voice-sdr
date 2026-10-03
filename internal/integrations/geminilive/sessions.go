@@ -171,7 +171,7 @@ func (s *controlledResponder) Receive(ctx context.Context) (Event, error) {
 			return Event{}, err
 		}
 		switch event.Kind {
-		case EventAudio, EventOutputTranscription, EventGenerationComplete, EventTurnComplete, EventGoAway, EventServerStatus, EventInterrupted, EventAPIError, EventClosed:
+		case EventAudio, EventOutputTranscription, EventGenerationComplete, EventTurnComplete, EventGoAway, EventSessionResumption, EventServerStatus, EventInterrupted, EventAPIError, EventClosed:
 			return event, nil
 		}
 	}

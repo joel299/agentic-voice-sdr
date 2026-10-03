@@ -512,3 +512,21 @@ func TestParsePreservesAllToolCalls(t *testing.T) {
 		t.Fatalf("tool call args: %+v", got.ToolCalls)
 	}
 }
+
+func TestSessionManagementEventsRetainOnlySafeMetadata(t *testing.T) {
+	var msg map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"goAway":{"timeLeft":"2.5s"}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if e := parseEvent(msg); e.Kind != EventGoAway || e.GoAwayTimeLeftMS != 2500 {
+		t.Fatalf("event=%+v", e)
+	}
+	if err := json.Unmarshal([]byte(`{"sessionResumptionUpdate":{"newHandle":"SECRET_DO_NOT_RETAIN","resumable":true}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	delete(msg, "goAway")
+	e := parseEvent(msg)
+	if e.Kind != EventSessionResumption || !e.SessionResumable || strings.Contains(fmt.Sprintf("%+v", e), "SECRET") {
+		t.Fatalf("unsafe metadata: %+v", e)
+	}
+}

@@ -24,6 +24,7 @@ type ResponseLifecycleAdapter struct {
 	active      conversation.ResponseKey
 	generation  uint64
 	inFlight    bool
+	changed     chan struct{}
 }
 
 var _ bridge.ResponseLifecycle = (*ResponseLifecycleAdapter)(nil)
@@ -31,6 +32,7 @@ var _ bridge.ResponseLifecycle = (*ResponseLifecycleAdapter)(nil)
 func NewResponseLifecycleAdapter(coordinator responseCoordinator) *ResponseLifecycleAdapter {
 	a := &ResponseLifecycleAdapter{coordinator: coordinator}
 	a.cond = sync.NewCond(&a.mu)
+	a.changed = make(chan struct{})
 	return a
 }
 
@@ -46,6 +48,7 @@ func (a *ResponseLifecycleAdapter) Bind(key conversation.ResponseKey) {
 	}
 	a.generation++
 	a.active = key
+	a.notifyLocked()
 	a.mu.Unlock()
 }
 
@@ -106,6 +109,7 @@ func (a *ResponseLifecycleAdapter) finishOperation(key conversation.ResponseKey,
 	}
 	a.inFlight = false
 	a.cond.Broadcast()
+	a.notifyLocked()
 	a.mu.Unlock()
 }
 
@@ -146,4 +150,38 @@ func (l *responseTurnLease) Fail(_ context.Context, _ error) error {
 	err := l.owner.coordinator.Fail(l.key)
 	l.owner.finishOperation(l.key, l.generation)
 	return err
+}
+
+// WaitInactive blocks only the single transcript receive owner. It holds no
+// media lock, creates no worker or queue, and leaves the current lease intact.
+func (a *ResponseLifecycleAdapter) WaitInactive(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if a.active == (conversation.ResponseKey{}) && !a.inFlight {
+			a.mu.Unlock()
+			return nil
+		}
+		if a.changed == nil {
+			a.changed = make(chan struct{})
+		}
+		changed := a.changed
+		a.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+func (a *ResponseLifecycleAdapter) notifyLocked() {
+	if a.changed != nil {
+		close(a.changed)
+	}
+	a.changed = make(chan struct{})
 }

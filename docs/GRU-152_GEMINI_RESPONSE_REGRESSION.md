@@ -188,4 +188,3 @@ source/generated account bytes; verify binary revision and registration.
 Record final HEAD/CI/runtime in the tracking handoff. Keep issue In Progress,
 PR open, no merge. **READY_FOR_OWNER_RETEST=no**, return to Anorak; do not
 resume latency tuning or execute a telephone call automatically.
-

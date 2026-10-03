@@ -367,7 +367,9 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 					trace = b.timings.Find(id.ResponseTurnID())
 				}
 			}
-			trace.Mark("barge_in_started_at", time.Unix(0, receiver.interruptAt.Load()))
+			if trace != nil {
+				trace.Mark("barge_in_started_at", time.Unix(0, receiver.interruptAt.Load()))
+			}
 			clear(audioCarry)
 			audioCarry = nil
 			if flusher, ok := b.output.(interface{ DiscardPendingAudio(context.Context) error }); ok {
@@ -376,7 +378,9 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 					return stageError("media_egress", err)
 				}
 			}
-			trace.Mark("barge_in_cleared_at", time.Now())
+			if trace != nil {
+				trace.Mark("barge_in_cleared_at", time.Now())
+			}
 			fail(ErrResponseInterrupted)
 			receiver.interrupted.Store(false)
 		case geminilive.EventAPIError:

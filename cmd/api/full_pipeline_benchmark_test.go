@@ -80,8 +80,8 @@ func TestRealNoCallFullPipelineFirstAudio(t *testing.T) {
 	}
 	defer persist()
 	variants := []string{"before", "after"}
-	if os.Getenv("GRU152_FULL_PIPELINE_VARIANT") == "after" {
-		variants = []string{"after"}
+	if v := os.Getenv("GRU152_FULL_PIPELINE_VARIANT"); v == "after" || v == "before" || v == "production" {
+		variants = []string{v}
 	}
 	for _, variant := range variants {
 		fixtures := []string{"short", "normal", "natural_pause", "yes", "one_second_internal_pause"}
@@ -102,6 +102,10 @@ func TestRealNoCallFullPipelineFirstAudio(t *testing.T) {
 					mediaCfg.BufferFrames = 2
 					mediaCfg.RXBufferFrames = 4
 					mediaCfg.TXSocketBufferBytes = 1024
+				}
+				if variant == "production" {
+					mediaCfg = localBaresipMediaConfig()
+					mediaCfg.ParentDir = "/tmp"
 				}
 				adapter, e := baresipmedia.New(c, mediaCfg)
 				if e != nil {
@@ -132,7 +136,7 @@ func TestRealNoCallFullPipelineFirstAudio(t *testing.T) {
 				gc.VoiceName = "Kore"
 				gc.VoiceDescription = "Voz comercial brasileira, humana e consultiva. Deve transmitir clareza, proximidade e confiança sem parecer locução publicitária."
 				gc.VoiceStyle = "Calmo e confiante. Ritmo moderado. Frases curtas. Tom acolhedor e profissional."
-				if variant == "after" {
+				if variant == "after" || variant == "production" {
 					gc.VoiceName = "Fola"
 					gc.VoiceStyle = "PT-BR natural e consultivo. Responda em uma ou duas frases curtas, com uma pergunta por vez. <breath> indica uma respiração discreta numa pausa natural; não pronuncie a marcação nem acrescente pausas longas."
 				}

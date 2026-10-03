@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -429,6 +430,62 @@ func TestRXQueueOverflowDropsStaleFrameWithoutEndingSession(t *testing.T) {
 	}
 	if metrics.TXQueueHighWater > 1 {
 		t.Fatalf("TX queue high-water=%d, want bounded capacity 1", metrics.TXQueueHighWater)
+	}
+}
+
+// Reproduce the startup loss with TX fixed at 32: only RX capacity changes.
+// Provider setup can delay the consumer. Four RX frames retain only the
+// trailing silence; the baseline capacity retains the whole short utterance.
+func TestRXStartupBudgetPreservesSpeechBeforeConsumer(t *testing.T) {
+	for _, capacity := range []int{4, 32} {
+		t.Run(fmt.Sprintf("RX_%d", capacity), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			a, err := New(ctx, Config{ParentDir: shortTempDir(t), BufferFrames: 32, RXBufferFrames: capacity})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			rxPath, txPath := a.SocketPaths()
+			rx, tx, session := connectPair(t, a, rxPath, txPath)
+			defer rx.Close()
+			defer tx.Close()
+			for i := 0; i < 27; i++ {
+				pcm := make([]byte, 640)
+				if i < 20 {
+					for j := 0; j < len(pcm); j += 2 {
+						binary.LittleEndian.PutUint16(pcm[j:], 1000)
+					}
+				}
+				if err := writeSocketFrame(rx, audiosocket.Frame{Type: audiosocket.TypeSlin16, Payload: pcm}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for session.Metrics().RXFramesDropped+session.Metrics().RXQueueHighWater < 27 {
+				select {
+				case <-ctx.Done():
+					t.Fatal("RX reader stalled")
+				case <-time.After(time.Millisecond):
+				}
+			}
+			kept := min(27, capacity)
+			voiced := 0
+			for i := 0; i < kept; i++ {
+				frame, err := session.ReadFrameContext(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if binary.LittleEndian.Uint16(frame.Payload) != 0 {
+					voiced++
+				}
+			}
+			if capacity == 4 && (voiced != 0 || session.Metrics().RXFramesDropped != 23) {
+				t.Fatal("four-frame startup regression was not reproduced")
+			}
+			if capacity == 32 && (voiced != 20 || session.Metrics().RXFramesDropped != 0) {
+				t.Fatal("baseline budget lost early speech")
+			}
+		})
 	}
 }
 

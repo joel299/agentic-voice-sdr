@@ -143,7 +143,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("configure owner tuning: %w", err)
 	}
-	mediaAdapter, err := baresipmedia.New(signalCtx, baresipmedia.Config{BufferFrames: 2, RXBufferFrames: 4, TXSocketBufferBytes: 1024})
+	mediaAdapter, err := baresipmedia.New(signalCtx, localBaresipMediaConfig())
 	if err != nil {
 		return fmt.Errorf("configure Baresip media adapter: %w", err)
 	}

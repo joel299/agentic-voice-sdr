@@ -27,7 +27,7 @@ func StartProcess(ctx context.Context, executable, profileDir string) (*Process,
 		return nil, ErrProcessUnavailable
 	}
 	cmd := exec.Command(executable, "-f", profileDir)
-	cmd.Env = baresipEnvironment(os.Environ())
+	cmd.Env = append(baresipEnvironment(os.Environ()), "GRU151_MEDIA_TIMING_ACK=1", "GRU151_MEDIA_FLUSH=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, ErrProcessUnavailable
@@ -60,7 +60,7 @@ func baresipEnvironment(source []string) []string {
 	env := make([]string, 0, len(source))
 	for _, item := range source {
 		key, _, ok := strings.Cut(item, "=")
-		if !ok || key == "OWNER_API_TOKEN" || key == "REDIS_PASSWORD" || key == "RABBITMQ_DEFAULT_PASS" || strings.HasPrefix(key, geminiPrefix) || strings.HasPrefix(key, openrouterPrefix) || strings.HasPrefix(key, postgresPrefix) || strings.HasPrefix(key, postgresFull) || strings.HasPrefix(key, supabasePrefix) {
+		if !ok || key == "GRU151_MEDIA_TIMING_ACK" || key == "GRU151_MEDIA_FLUSH" || key == "OWNER_TEST_RECORDING" || key == "OWNER_TEST_RECORDING_DESTINATION" || key == "OWNER_API_TOKEN" || key == "REDIS_PASSWORD" || key == "RABBITMQ_DEFAULT_PASS" || strings.HasPrefix(key, geminiPrefix) || strings.HasPrefix(key, openrouterPrefix) || strings.HasPrefix(key, postgresPrefix) || strings.HasPrefix(key, postgresFull) || strings.HasPrefix(key, supabasePrefix) {
 			continue
 		}
 		env = append(env, item)

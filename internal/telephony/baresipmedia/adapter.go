@@ -4,8 +4,10 @@ package baresipmedia
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"io"
 	"net"
 	"os"
@@ -43,6 +45,10 @@ type Config struct {
 	ParentDir string
 	// BufferFrames bounds complete 20 ms frames in each direction per call.
 	BufferFrames int
+	// RXBufferFrames can separately bound stale input; zero uses BufferFrames.
+	RXBufferFrames int
+	// TXSocketBufferBytes bounds kernel send buffering; zero preserves OS defaults.
+	TXSocketBufferBytes int
 }
 
 // Adapter owns stable listeners and admits one Baresip RX/TX pair at a time.
@@ -50,16 +56,17 @@ type Config struct {
 // media session; Adapter.Close is reserved for shutting down the long-running
 // media service.
 type Adapter struct {
-	dir      string
-	rxPath   string
-	txPath   string
-	rxListen *net.UnixListener
-	txListen *net.UnixListener
-	rxFrames int
-	txFrames int
-	done     chan struct{}
-	ctx      context.Context
-	cancel   context.CancelFunc
+	dir            string
+	rxPath         string
+	txPath         string
+	rxListen       *net.UnixListener
+	txListen       *net.UnixListener
+	rxFrames       int
+	txFrames       int
+	txSocketBuffer int
+	done           chan struct{}
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	mu        sync.Mutex
 	closed    bool
@@ -85,6 +92,8 @@ type Session struct {
 type txFrame struct {
 	audiosocket.Frame
 	degraded bool
+	trace    *telemetry.TurnTrace
+	epoch    uint32
 }
 
 type mediaSession struct {
@@ -102,9 +111,16 @@ type mediaSession struct {
 	err     error
 	metrics sessionMetrics
 
-	txMu      sync.Mutex
-	txPartial [txFrameBytes]byte
-	txUsed    int
+	timingMu      sync.Mutex
+	timingPending map[uint64]*telemetry.TurnTrace
+	timingSeen    map[*telemetry.TurnTrace]bool
+	wireSequence  uint64
+	wireMu        sync.Mutex
+	timingEpoch   uint32
+	flushDone     chan uint64
+	txMu          sync.Mutex
+	txPartial     [txFrameBytes]byte
+	txUsed        int
 }
 
 type sessionMetrics struct {
@@ -150,6 +166,16 @@ func New(ctx context.Context, cfg Config) (*Adapter, error) {
 	if cfg.BufferFrames < 1 || cfg.BufferFrames > maxBufferFrames {
 		return nil, fmt.Errorf("buffer frames must be between 1 and %d", maxBufferFrames)
 	}
+	rxFrames := cfg.RXBufferFrames
+	if rxFrames == 0 {
+		rxFrames = cfg.BufferFrames
+	}
+	if rxFrames < 1 || rxFrames > maxBufferFrames {
+		return nil, errors.New("invalid RX buffer capacity")
+	}
+	if cfg.TXSocketBufferBytes != 0 && (cfg.TXSocketBufferBytes < 1024 || cfg.TXSocketBufferBytes > 16384) {
+		return nil, errors.New("invalid TX socket buffer bound")
+	}
 	dir, err := os.MkdirTemp(cfg.ParentDir, "baresip-media-")
 	if err != nil {
 		return nil, fmt.Errorf("create private media directory: %w", err)
@@ -161,7 +187,7 @@ func New(ctx context.Context, cfg Config) (*Adapter, error) {
 	aCtx, cancel := context.WithCancel(ctx)
 	a := &Adapter{
 		dir: dir, rxPath: filepath.Join(dir, RXSocket), txPath: filepath.Join(dir, TXSocket),
-		rxFrames: cfg.BufferFrames, txFrames: cfg.BufferFrames,
+		rxFrames: rxFrames, txFrames: cfg.BufferFrames, txSocketBuffer: cfg.TXSocketBufferBytes,
 		done: make(chan struct{}), ctx: aCtx, cancel: cancel,
 		changed: make(chan struct{}),
 	}
@@ -209,6 +235,13 @@ func (a *Adapter) acceptLoop(l *net.UnixListener, rx bool) {
 				a.stop(fmt.Errorf("accept Baresip media connection: %w", err))
 			}
 			return
+		}
+		if !rx && a.txSocketBuffer > 0 {
+			if err := conn.SetWriteBuffer(a.txSocketBuffer); err != nil {
+				_ = conn.Close()
+				a.stop(errors.New("media send buffer unavailable"))
+				return
+			}
 		}
 		a.admit(conn, rx)
 	}
@@ -276,15 +309,16 @@ func (a *Adapter) expirePending(epoch uint64) {
 
 func (a *Adapter) activatePendingLocked() *mediaSession {
 	s := &mediaSession{
-		adapter: a,
-		rxConn:  a.rxPending,
-		txConn:  a.txPending,
-		rxQueue: make(chan audiosocket.Frame, a.rxFrames),
-		txQueue: make(chan txFrame, a.txFrames),
-		done:    make(chan struct{}),
+		adapter:   a,
+		rxConn:    a.rxPending,
+		txConn:    a.txPending,
+		rxQueue:   make(chan audiosocket.Frame, a.rxFrames),
+		txQueue:   make(chan txFrame, a.txFrames),
+		done:      make(chan struct{}),
+		flushDone: make(chan uint64, 1),
 	}
 	a.rxPending, a.txPending, a.active = nil, nil, s
-	s.wg.Add(2)
+	s.wg.Add(3)
 	a.notifyLocked()
 	return s
 }
@@ -292,6 +326,7 @@ func (a *Adapter) activatePendingLocked() *mediaSession {
 func (a *Adapter) startSession(s *mediaSession) {
 	go a.readRX(s)
 	go a.writeTX(s)
+	go a.readTiming(s)
 }
 
 func (a *Adapter) notifyLocked() {
@@ -491,7 +526,7 @@ func (s *mediaSession) enqueuePCM(ctx context.Context, payload []byte, degraded 
 	copy(combined, s.txPartial[:s.txUsed])
 	copy(combined[s.txUsed:], payload)
 	for offset := 0; offset < frameCount*txFrameBytes; offset += txFrameBytes {
-		frame := txFrame{Frame: audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: append([]byte(nil), combined[offset:offset+txFrameBytes]...)}, degraded: len(degraded) > 0 && degraded[0]}
+		frame := txFrame{Frame: audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: append([]byte(nil), combined[offset:offset+txFrameBytes]...)}, degraded: len(degraded) > 0 && degraded[0], trace: telemetry.TraceFromContext(ctx), epoch: s.timingEpoch}
 		if len(s.txQueue) == cap(s.txQueue) {
 			started := time.Now()
 			s.metrics.txWaitCount.Add(1)
@@ -687,10 +722,31 @@ func (a *Adapter) writeTX(s *mediaSession) {
 		case <-s.done:
 			return
 		case frame := <-s.txQueue:
+			s.wireMu.Lock()
+			if frame.epoch != s.timingEpoch {
+				s.wireMu.Unlock()
+				clear(frame.Payload)
+				continue
+			}
+			s.wireSequence++
+			if frame.trace != nil {
+				s.timingMu.Lock()
+				if s.timingSeen == nil {
+					s.timingSeen = make(map[*telemetry.TurnTrace]bool)
+					s.timingPending = make(map[uint64]*telemetry.TurnTrace)
+				}
+				if !s.timingSeen[frame.trace] && len(s.timingSeen) < 256 {
+					s.timingSeen[frame.trace] = true
+					s.timingPending[s.wireSequence] = frame.trace
+				}
+				s.timingMu.Unlock()
+			}
+			writtenAt := time.Now()
 			wire, err := audiosocket.Encode(frame.Frame)
 			if err == nil {
 				err = writeFull(s.txConn, wire)
 			}
+			s.wireMu.Unlock()
 			if err != nil {
 				a.endSession(s, err)
 				return
@@ -698,6 +754,7 @@ func (a *Adapter) writeTX(s *mediaSession) {
 			if frame.degraded {
 				s.metrics.degradedSilenceFrames.Add(1)
 			} else {
+				frame.trace.Mark("go_first_pcm_write_at", writtenAt)
 				s.metrics.realAgentAudioFrames.Add(1)
 				s.metrics.lastRealAudioNS.Store(time.Now().UTC().UnixNano())
 			}
@@ -849,4 +906,46 @@ func timestampNS(ns int64) *time.Time {
 	}
 	t := time.Unix(0, ns).UTC()
 	return &t
+}
+
+// ReportsActualPCMWrite distinguishes Unix writes from queue admission.
+func (*Session) ReportsActualPCMWrite() {}
+
+// readTiming is a separate bounded metadata receive owner. Old modules send no
+// ACKs; socket closure cancels this owner and leaves C clocks unavailable.
+func (a *Adapter) readTiming(s *mediaSession) {
+	defer s.wg.Done()
+	var b [32]byte
+	for {
+		if _, e := io.ReadFull(s.txConn, b[:]); e != nil {
+			return
+		}
+		if string(b[:4]) == "GFLU" {
+			select {
+			case s.flushDone <- binary.BigEndian.Uint64(b[4:12]):
+			default:
+			}
+			continue
+		}
+		if string(b[:4]) != "GTIM" {
+			return
+		}
+		seq := binary.BigEndian.Uint64(b[4:12])
+		received := binary.BigEndian.Uint64(b[12:20])
+		emitted := binary.BigEndian.Uint64(b[20:28])
+		if received == 0 || emitted < received || emitted > uint64(time.Now().Add(time.Second).UnixNano()) {
+			continue
+		}
+		s.timingMu.Lock()
+		var tr *telemetry.TurnTrace
+		if binary.BigEndian.Uint32(b[28:32]) == s.timingEpoch {
+			tr = s.timingPending[seq]
+			delete(s.timingPending, seq)
+		}
+		s.timingMu.Unlock()
+		if tr != nil {
+			tr.Mark("c_source_first_real_frame_at", time.Unix(0, int64(emitted)))
+			tr.Mark("c_first_real_frame_received_at", time.Unix(0, int64(received)))
+		}
+	}
 }

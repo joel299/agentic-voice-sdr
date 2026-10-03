@@ -30,6 +30,7 @@ import (
 	voicecallpostgres "github.com/joel299/agentic-voice-sdr/internal/integrations/postgres/voicecall"
 	"github.com/joel299/agentic-voice-sdr/internal/platform/config"
 	"github.com/joel299/agentic-voice-sdr/internal/sessionprompt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipctrl"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/baresipmedia"
 	telephonybridge "github.com/joel299/agentic-voice-sdr/internal/telephony/bridge"
@@ -138,11 +139,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if strings.TrimSpace(geminiModel) == "" {
 		geminiModel = geminilive.DefaultModel
 	}
-	tuning, err := httpapi.NewTuningStore(httpapi.JEVSettings{Model: baseJEV.Model, TimeoutMS: openrouterjev.CanonicalDefaultTimeoutMS, Description: "Classificador comercial SDR responsável por selecionar a próxima ação.", DecisionGuidance: "Classifique semanticamente o último turno FINAL e selecione a próxima ação comercial."}, httpapi.GeminiSettings{Model: geminiModel, VoiceName: "Kore", Description: "Voz comercial brasileira, humana e consultiva. Deve transmitir clareza, proximidade e confiança sem parecer locução publicitária.", Style: "Calmo e confiante. Ritmo moderado. Frases curtas. Tom acolhedor e profissional."})
+	tuning, err := httpapi.NewTuningStore(httpapi.JEVSettings{Model: baseJEV.Model, TimeoutMS: openrouterjev.CanonicalDefaultTimeoutMS, Description: "Classificador comercial SDR responsável por selecionar a próxima ação.", DecisionGuidance: "Classifique semanticamente o último turno FINAL e selecione a próxima ação comercial."}, httpapi.GeminiSettings{Model: geminiModel, VoiceName: "Fola", Description: "Voz comercial brasileira, humana e consultiva. Deve transmitir clareza, proximidade e confiança sem parecer locução publicitária.", Style: "PT-BR natural e consultivo. Responda em uma ou duas frases curtas, com uma pergunta por vez. <breath> indica uma respiração discreta numa pausa natural; não pronuncie a marcação nem acrescente pausas longas."})
 	if err != nil {
 		return fmt.Errorf("configure owner tuning: %w", err)
 	}
-	mediaAdapter, err := baresipmedia.New(signalCtx, baresipmedia.Config{})
+	mediaAdapter, err := baresipmedia.New(signalCtx, baresipmedia.Config{BufferFrames: 2, RXBufferFrames: 4, TXSocketBufferBytes: 1024})
 	if err != nil {
 		return fmt.Errorf("configure Baresip media adapter: %w", err)
 	}
@@ -422,7 +423,24 @@ func runBaresipCallSession(ctx context.Context, session *baresipmedia.Session, c
 	}
 	log.Printf("ai_runtime_status=running api_call_id=%s ai_runtime_stage=bridge_run at=%s", callID, time.Now().UTC().Format(time.RFC3339Nano))
 	recordAIRuntimeStatus(ctx, calls, callID, "running", "bridge_run", "", nil)
+	recording, recordingErr := ownerTestRecording(ctx, calls, callID)
+	if recordingErr != nil {
+		return failAtStage("bridge_init", recordingErr)
+	}
+	defer recording.Close()
+	bridge.SetOwnerRecording(recording)
+	timings := telemetry.NewTurnCollector(256)
+	bridge.SetTurnCollector(timings)
 	err = bridge.Run(ctx)
+	for _, t := range timings.Snapshot() {
+		if data, e := json.Marshal(struct {
+			telemetry.TurnSnapshot
+			Metrics map[string]float64 `json:"metrics_ms"`
+		}{t, t.Metrics()}); e == nil {
+			log.Printf("ai_turn_timing api_call_id=%s data=%s", callID, data)
+		}
+	}
+	log.Printf("ai_turn_timing_dropped api_call_id=%s count=%d", callID, timings.Dropped())
 	if data, e := json.Marshal(bridge.Diagnostics()); e == nil {
 		log.Printf("ai_response_diagnostics api_call_id=%s data=%s", callID, data)
 	}
@@ -682,4 +700,25 @@ func finishSourceStats(ctx context.Context, client *baresipctrl.Client, calls *c
 		log.Printf("call_c_source_metrics api_call_id=%s delta_available=no", callID)
 	}
 	return after, true
+}
+
+// Disabled unless the protected local environment explicitly names this owner
+// destination. CallService has already enforced owner auth and the allowlist.
+func ownerTestRecording(ctx context.Context, calls *callservice.Service, callID string) (*telephonybridge.OwnerRecording, error) {
+	if os.Getenv("OWNER_TEST_RECORDING") != "true" {
+		return nil, nil
+	}
+	destination := os.Getenv("OWNER_TEST_RECORDING_DESTINATION")
+	call, err := calls.Get(callID)
+	if err != nil || destination == "" {
+		return nil, errors.New("owner diagnostic recording destination unavailable")
+	}
+	if call.To != destination {
+		return nil, nil
+	}
+	dir := ".runtime/owner-recordings"
+	if err := telephonybridge.ExpireOwnerRecordings(dir, time.Now()); err != nil {
+		return nil, errors.New("owner recording retention cleanup failed")
+	}
+	return telephonybridge.NewOwnerRecording(ctx, telephonybridge.OwnerRecordingConfig{Enabled: true, OwnerTest: true, Directory: dir, BufferFrames: 32})
 }

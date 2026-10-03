@@ -42,6 +42,7 @@ type Config struct {
 	VoiceName          string
 	VoiceDescription   string
 	VoiceStyle         string
+	VAD                VADConfig
 	Tools              []ToolDefinition
 	ResponseModalities []string
 }
@@ -216,6 +217,9 @@ type providerSession struct {
 }
 
 func connect(ctx context.Context, cfg Config, role providerRole) (*providerSession, error) {
+	if err := cfg.VAD.Validate(); err != nil {
+		return nil, wrap(ErrorSetup, err)
+	}
 	if role != roleInputTranscription && role != roleControlledResponse {
 		return nil, ErrCapabilityNotAllowed
 	}
@@ -315,6 +319,13 @@ func setupMessage(cfg Config, role providerRole) map[string]any {
 	switch role {
 	case roleInputTranscription:
 		setup["inputAudioTranscription"] = map[string]any{}
+		if cfg.VAD.SilenceDurationMS > 0 {
+			detection := map[string]any{"disabled": false, "silenceDurationMs": cfg.VAD.SilenceDurationMS, "prefixPaddingMs": cfg.VAD.PrefixPaddingMS}
+			if cfg.VAD.EndSensitivity != "" {
+				detection["endOfSpeechSensitivity"] = cfg.VAD.EndSensitivity
+			}
+			setup["realtimeInputConfig"] = map[string]any{"automaticActivityDetection": detection}
+		}
 	case roleControlledResponse:
 		setup["outputAudioTranscription"] = map[string]any{}
 	default:

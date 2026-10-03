@@ -14,7 +14,7 @@ jbuf_flag=
 if ! printf '#include <re.h>\nint main(void) { return JBUF_FIXED; }\n' | "$cc" -x c -fsyntax-only -DHAVE_INTTYPES_H -DHAVE_STDBOOL_H -I"$RE_INCLUDE_ROOT/re" - 2>/dev/null; then
 	jbuf_flag=-DGRU151_DECLARE_JBUF_TYPE
 fi
-"$cc" $jbuf_flag -std=c11 -Wall -Wextra -Werror -Wno-sign-compare \
+"$cc" $jbuf_flag ${C_TEST_FLAGS:-} -std=c11 -Wall -Wextra -Werror -Wno-sign-compare \
 	-DHAVE_INTTYPES_H -DHAVE_STDBOOL_H -fPIC -shared -pthread \
 	-I"$BARESIP_SOURCE/include" \
 	-I"$RE_INCLUDE_ROOT/re" -I"$RE_INCLUDE_ROOT/rem" \

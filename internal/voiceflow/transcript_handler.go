@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
 	voicecalldomain "github.com/joel299/agentic-voice-sdr/internal/domain/voicecall"
@@ -35,6 +37,7 @@ type FinalTranscriptHandler struct {
 	transcripts voicecalldomain.TranscriptRepository
 	callID      string
 	observe     bridge.StageObserver
+	timings     *telemetry.TurnCollector
 }
 
 // NewFinalTranscriptHandler creates a handler with a fixed capability context.
@@ -136,6 +139,9 @@ func (h *FinalTranscriptHandler) handleFinalText(ctx context.Context, rawText, t
 	if turnID == "" {
 		return ErrMissingLeadTurnID
 	}
+	if h.timings != nil {
+		ctx, _ = h.timings.Begin(ctx, turnID, time.Now())
+	}
 	if h.transcripts != nil {
 		_, created, err := h.transcripts.AppendFinalTurn(ctx, h.callID, "lead", text, "gemini_input", "lead:"+h.callID+":"+turnID)
 		if err != nil {
@@ -178,3 +184,5 @@ func (h *FinalTranscriptHandler) forward(ctx context.Context, event geminilive.E
 }
 
 func (h *FinalTranscriptHandler) SetStageObserver(o bridge.StageObserver) { h.observe = o }
+
+func (h *FinalTranscriptHandler) SetTurnCollector(c *telemetry.TurnCollector) { h.timings = c }

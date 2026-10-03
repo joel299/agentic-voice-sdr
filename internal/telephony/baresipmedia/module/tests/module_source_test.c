@@ -39,6 +39,8 @@ int auplay_register(struct auplay **p, struct list *l, const char *n, auplay_all
 struct fixture {
 	atomic_int frames, errors, corrupt, silence;
 	int target;
+	bool observe;
+	bool inspect;
 	struct timespec first, last;
 	long min_gap_ns;
 	int fd;
@@ -52,6 +54,13 @@ static void read_audio(struct auframe *af, void *arg)
 	struct timespec now;
 	assert(af->fmt == AUFMT_S16LE && af->sampc == 480);
 	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (f->observe) {
+		bool real=false; for (size_t i=0;i<480;i++) if (p[i]) {real=true;break;}
+		if (!real) {atomic_fetch_add(&f->silence,1);return;}
+		if(f->inspect) { struct timespec real;clock_gettime(CLOCK_REALTIME,&real);printf("callback_sample=%d callback_unix_ns=%lld\n",p[0],(long long)real.tv_sec*1000000000LL+real.tv_nsec);fflush(stdout); }
+		if (!atomic_load(&f->frames)) f->first=now;
+		f->last=now;atomic_fetch_add(&f->frames,1);return;
+	}
 	if (p[0] == 0) {
 		for (size_t i=0; i<480; i++) if (p[i]) atomic_fetch_add(&f->corrupt, 1);
 		/* Pause the first callback so a complete burst is already buffered
@@ -109,8 +118,8 @@ static int print_stats(const char *p, size_t n, void *arg)
 { (void)arg; return fwrite(p, 1, n, stdout) == n ? 0 : EIO; }
 int main(int argc, char **argv)
 {
-	assert(argc == 3 || argc == 5);
-	bool external = argc == 5;
+	assert(argc == 3 || argc == 5 || argc == 6);
+	bool external = argc >= 5;
 	if (external) assert(!strcmp(argv[3], "--external"));
 	void *module = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
 	if (!module) { fprintf(stderr, "%s\n", dlerror()); return 1; }
@@ -127,6 +136,8 @@ int main(int argc, char **argv)
 	else { assert(strlen(argv[4]) < sizeof(path)); strcpy(path, argv[4]); }
 	struct fixture f = {.target = atoi(argv[2]), .min_gap_ns = 1000000000L};
 	struct ausrc_prm prm = {.srate = 24000, .ch = 1, .ptime = 20, .fmt = AUFMT_S16LE};
+	f.inspect = argc>5 && !strcmp(argv[5],"--inspect");
+	f.observe = f.inspect || (argc>5 && !strcmp(argv[5],"--observe"));
 	struct ausrc_st *source = NULL;
 	assert(!source_alloc(&source, NULL, NULL, &prm, path, read_audio, audio_error, &f));
 	pthread_t writer;
@@ -134,8 +145,8 @@ int main(int argc, char **argv)
 		f.fd = accept(listener, NULL, NULL); assert(f.fd >= 0);
 		assert(!pthread_create(&writer, NULL, producer, &f));
 	}
-	for (int i=0; i < f.target*30+1000; i++) {
-		if (atomic_load(&f.frames) == f.target || atomic_load(&f.errors)) break;
+	for (int i=0; i < (f.observe ? 30000 : f.target*30+1000); i++) {
+		if (atomic_load(&f.frames) >= f.target || atomic_load(&f.errors)) break;
 		usleep(1000);
 	}
 	/* Remain connected for 3 silent ticks: underrun must not tear down. */
@@ -145,8 +156,8 @@ int main(int argc, char **argv)
 	int received = atomic_load(&f.frames), errors = atomic_load(&f.errors);
 	long duration = received > 1 ? diff_ns(f.last, f.first)/1000000 : 0;
 	printf("actual_module_frames=%d expected=%d errors=%d corrupt=%d duration_ms=%ld min_gap_ms=%ld silence=%d\n", received, f.target, errors, atomic_load(&f.corrupt), duration, f.min_gap_ns/1000000, atomic_load(&f.silence));
-	int ok = received == f.target && !errors && !atomic_load(&f.corrupt) &&
-		(f.target == 1 || (duration >= (f.target-1)*18 && f.min_gap_ns >= 15000000));
+	int ok = (f.observe ? received >= f.target : received == f.target) && !errors && !atomic_load(&f.corrupt) &&
+		(f.observe || f.target == 1 || (duration >= (f.target-1)*18 && f.min_gap_ns >= 15000000));
 	if (stats_cmd) { struct re_printf pf = {.vph = print_stats}; assert(!stats_cmd->h(&pf, NULL)); }
 	if (!external) { close(f.fd); close(listener); unlink(path); rmdir(dir); }
 	exports->close(); dlclose(module);

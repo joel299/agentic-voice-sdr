@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"io"
 	"net"
 	"net/http"
@@ -36,7 +37,11 @@ var (
 )
 
 // Config contains provider settings. APIKey is never included in returned errors.
-type Config struct{ APIKey, BaseURL, Model, Description, DecisionGuidance string }
+type Config struct {
+	APIKey, BaseURL, Model, Description, DecisionGuidance string
+	CompactInstructions                                   bool
+	ObserveRequest                                        func(RequestTiming)
+}
 
 // ConfigFromEnv loads OpenRouter settings. A model is mandatory; no model ID is
 // selected implicitly. The official OpenRouter API base URL is used if omitted.
@@ -190,6 +195,9 @@ func (c *Client) DecideDetailed(ctx context.Context, input conversation.Decision
 	mapped.LatestFinalLeadText = salesintent.SanitizeLeadText(input.LatestFinalLeadText)
 	mapped.MatchingExecutableCapability = input.HasMatchingExecutableCapability
 	question := decisionQuestion{Type: semanticIntentQuestion.Type, Instructions: semanticIntentQuestion.Instructions, Criteria: semanticIntentQuestion.Criteria}
+	if c.config.CompactInstructions {
+		question.Instructions = "Classify the latest final lead text semantically in context. Choose one intent using the criteria; never write spoken copy or select tools. Respect opted_out. If unclear, choose clarification_or_information_request or neutral_continue."
+	}
 	if strings.TrimSpace(c.config.Description) != "" {
 		question.Instructions += " Classifier description: " + strings.TrimSpace(c.config.Description)
 	}
@@ -205,6 +213,17 @@ func (c *Client) DecideDetailed(ctx context.Context, input conversation.Decision
 	if err != nil {
 		return DetailedResult{}, ErrInvalidProviderResponse
 	}
+	observeTiming := c.config.ObserveRequest
+	if tr := telemetry.TraceFromContext(ctx); tr != nil {
+		observeTiming = func(v RequestTiming) {
+			tr.SetJEVNetwork(v)
+			if c.config.ObserveRequest != nil {
+				c.config.ObserveRequest(v)
+			}
+		}
+	}
+	ctx, finishTiming := requestTiming(ctx, len(body), observeTiming)
+	defer finishTiming()
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, decisionsEndpoint(c.config.BaseURL), bytes.NewReader(body))

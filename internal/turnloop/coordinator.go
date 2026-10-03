@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
@@ -104,6 +105,7 @@ func (c *Coordinator) Begin(ctx context.Context, state *conversation.Conversatio
 		c.failAfterReservation(reservation.Key)
 		return conversation.ResponseKey{}, ErrInvalidCoordinatorInput
 	}
+	telemetry.MarkTurn(ctx, "turn_directive_sent_at")
 	c.reportStage("gemini_response_send", "started")
 	if err := c.responder.SendControlledTurn(ctx, finalLeadText, directive); err != nil {
 		c.failAfterReservation(reservation.Key)

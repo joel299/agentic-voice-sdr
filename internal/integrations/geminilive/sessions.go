@@ -79,7 +79,11 @@ func ConnectInputTranscriberWithTurnSequencer(ctx context.Context, cfg Config, s
 	if err != nil {
 		return nil, err
 	}
-	return &inputTranscriber{provider: provider, sequencer: sequencer}, nil
+	var session InputTranscriberSession = &inputTranscriber{provider: provider, sequencer: sequencer}
+	if cfg.VAD.Hybrid {
+		session = WithHybridVAD(session, cfg.VAD.SilenceDurationMS)
+	}
+	return session, nil
 }
 
 // ConnectControlledResponse opens a separate Gemini Live session for controlled

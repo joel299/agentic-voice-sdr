@@ -37,7 +37,7 @@ func TestActualCModuleGeminiBurst(t *testing.T) {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			a, err := New(ctx, Config{ParentDir: t.TempDir(), BufferFrames: 4})
+			a, err := New(ctx, Config{ParentDir: t.TempDir(), BufferFrames: 2, RXBufferFrames: 4, TXSocketBufferBytes: 1024})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/joel299/agentic-voice-sdr/internal/integrations/geminilive"
 	"github.com/joel299/agentic-voice-sdr/internal/telephony/audiosocket"
@@ -64,6 +66,9 @@ type SplitBridge struct {
 	lifecycle   ResponseLifecycle
 	observe     StageObserver
 	diagnostics responseDiagnostics
+	timings     *telemetry.TurnCollector
+	recording   *OwnerRecording
+	speech      speechObservation
 }
 
 func NewSplit(input AudioReader, output AudioWriter, transcriber geminilive.InputTranscriberSession, responder geminilive.ControlledResponseSession, transcript TranscriptHandler, events EventHandler, lifecycle ...ResponseLifecycle) *SplitBridge {
@@ -176,6 +181,8 @@ func (b *SplitBridge) runSplitIngress(ctx context.Context) error {
 			if len(frame.Payload) == 0 {
 				continue
 			}
+			b.speech.Note(frame.Payload, time.Now())
+			b.recording.Capture(frame)
 			b.observeStage("media_ingress", "frame_received")
 			if err := b.transcriber.SendAudio(ctx, frame.Payload); err != nil {
 				return stageError("input_transcription_send", err)
@@ -202,6 +209,13 @@ func (b *SplitBridge) runSplitTranscripts(ctx context.Context) error {
 		}
 		b.observeStage("input_transcription_receive", string(event.State))
 		if event.State == geminilive.TranscriptFinal {
+			if b.timings != nil {
+				_, tr := b.timings.Begin(ctx, event.TurnID, time.Now())
+				if at := b.speech.EndEstimate(); !at.IsZero() {
+					tr.Mark("lead_speech_end_at", at)
+					tr.SetSpeechEndBasis("pcm_energy_estimate")
+				}
+			}
 			b.observeStage("first_final_transcription", "received")
 		}
 		if err := b.transcript.HandleTranscript(ctx, event); err != nil {
@@ -214,6 +228,9 @@ func (b *SplitBridge) runSplitTranscripts(ctx context.Context) error {
 }
 
 func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
+	ctx, cancelReceive := context.WithCancel(ctx)
+	receiver := newResponseReceiver(ctx, b.responder)
+	defer func() { cancelReceive(); <-receiver.done }()
 	disposition := providerTurnIdle
 	var lease ResponseTurnLease
 	var audioCarry []byte
@@ -259,7 +276,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 	}
 
 	for {
-		event, err := b.responder.Receive(ctx)
+		event, receivedAt, err := receiver.receive(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -268,6 +285,26 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 			return stageError("gemini_response_receive", err)
 		}
 		b.recordEvent(event)
+		if b.timings != nil {
+			if event.Kind == geminilive.EventAudio || event.Kind == geminilive.EventOutputTranscription {
+				begin()
+			}
+			if identity, ok := lease.(ResponseTurnIdentity); ok {
+				if trace := b.timings.Find(identity.ResponseTurnID()); trace != nil {
+					switch event.Kind {
+					case geminilive.EventAudio:
+						trace.Mark("gemini_first_audio_at", receivedAt)
+						trace.SetFirstAudioBytes(len(event.Audio))
+					case geminilive.EventOutputTranscription:
+						trace.Mark("gemini_first_output_transcription_at", receivedAt)
+					case geminilive.EventGenerationComplete:
+						trace.Mark("gemini_generation_complete_at", receivedAt)
+					case geminilive.EventTurnComplete:
+						trace.Mark("gemini_turn_complete_at", receivedAt)
+					}
+				}
+			}
+		}
 		if event.Kind == geminilive.EventGoAway {
 			b.observeStage("gemini_go_away", "received")
 		}
@@ -297,17 +334,51 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 				return stageError("media_egress", fmt.Errorf("%w: Gemini %q cannot be sent as AudioSocket SLIN24", ErrFormatIncompatible, event.AudioMimeType))
 			}
 			begin()
-			if len(event.Audio) > 0 && disposition == providerTurnOwned {
-				if err := writePCM24(ctx, b.output, event.Audio, &audioCarry); err != nil {
+			if len(event.Audio) > 0 && disposition == providerTurnOwned && !receiver.interrupted.Load() {
+				audioCtx := ctx
+				if b.timings != nil {
+					if id, ok := lease.(ResponseTurnIdentity); ok {
+						if tr := b.timings.Find(id.ResponseTurnID()); tr != nil {
+							audioCtx = telemetry.WithTurnTrace(ctx, tr)
+						}
+					}
+				}
+				writeCtx, cancelWrite := receiver.audioContext(audioCtx)
+				err := writePCM24(writeCtx, b.output, event.Audio, &audioCarry, b.recording)
+				cancelWrite()
+				if err != nil && receiver.interrupted.Load() && ctx.Err() == nil {
+					clear(audioCarry)
+					audioCarry = nil
+					continue
+				}
+				if err != nil {
 					fail(ErrAudioOutputFailed)
 					return stageError("media_egress", err)
 				}
+
 				b.observeStage("media_egress", "audio_written")
 			}
 		case geminilive.EventOutputTranscription, geminilive.EventToolCall:
 			begin()
 		case geminilive.EventInterrupted:
+			var trace *telemetry.TurnTrace
+			if b.timings != nil {
+				if id, ok := lease.(ResponseTurnIdentity); ok {
+					trace = b.timings.Find(id.ResponseTurnID())
+				}
+			}
+			trace.Mark("barge_in_started_at", time.Unix(0, receiver.interruptAt.Load()))
+			clear(audioCarry)
+			audioCarry = nil
+			if flusher, ok := b.output.(interface{ DiscardPendingAudio(context.Context) error }); ok {
+				if err := flusher.DiscardPendingAudio(ctx); err != nil {
+					fail(ErrAudioOutputFailed)
+					return stageError("media_egress", err)
+				}
+			}
+			trace.Mark("barge_in_cleared_at", time.Now())
 			fail(ErrResponseInterrupted)
+			receiver.interrupted.Store(false)
 		case geminilive.EventAPIError:
 			failSession(ErrProviderAPI)
 			return stageError("gemini_response_receive", ErrProviderAPI)
@@ -348,7 +419,7 @@ func (b *SplitBridge) runSplitResponses(ctx context.Context) error {
 // writePCM24 splits provider audio events into bounded AudioSocket frames and
 // carries a trailing byte across event boundaries so each SLIN24 payload keeps
 // its signed 16-bit sample alignment.
-func writePCM24(ctx context.Context, writer AudioWriter, pcm []byte, carry *[]byte) error {
+func writePCM24(ctx context.Context, writer AudioWriter, pcm []byte, carry *[]byte, recorders ...*OwnerRecording) error {
 	if carry == nil {
 		return ErrNilDependency
 	}
@@ -368,6 +439,12 @@ func writePCM24(ctx context.Context, writer AudioWriter, pcm []byte, carry *[]by
 		}
 		if err := writeFrame(ctx, writer, audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: merged[:chunkSize]}); err != nil {
 			return err
+		}
+		if len(recorders) > 0 {
+			recorders[0].Capture(audiosocket.Frame{Type: audiosocket.TypeSlin24, Payload: merged[:chunkSize]})
+		}
+		if _, reportsWire := writer.(interface{ ReportsActualPCMWrite() }); !reportsWire {
+			telemetry.MarkTurn(ctx, "go_first_pcm_write_at")
 		}
 		merged = merged[chunkSize:]
 	}
@@ -396,3 +473,14 @@ func safeCloseStatus(status geminilive.CloseStatusClass) geminilive.CloseStatusC
 		return geminilive.CloseStatusUnknown
 	}
 }
+
+func (b *SplitBridge) SetTurnCollector(c *telemetry.TurnCollector) {
+	b.timings = c
+	if h, ok := b.transcript.(interface {
+		SetTurnCollector(*telemetry.TurnCollector)
+	}); ok {
+		h.SetTurnCollector(c)
+	}
+}
+
+func (b *SplitBridge) SetOwnerRecording(r *OwnerRecording) { b.recording = r }

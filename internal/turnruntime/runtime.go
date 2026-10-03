@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/joel299/agentic-voice-sdr/internal/telemetry"
 	"strings"
 
 	"github.com/joel299/agentic-voice-sdr/internal/domain/conversation"
@@ -116,8 +117,10 @@ func (runtime *TurnRuntime) ProcessTurn(ctx context.Context, input TurnInput) (c
 		return conversation.TurnDirective{}, fmt.Errorf("%w: decision input: %v", ErrInvalidTurnRuntime, err)
 	}
 	decisionInput.HasMatchingExecutableCapability = input.Capability != nil && input.Capability.Validate() == nil
+	telemetry.MarkTurn(ctx, "jev_started_at")
 	runtime.stage("jev_provider", "started")
 	decision, err := runtime.provider.Decide(ctx, decisionInput)
+	telemetry.MarkTurn(ctx, "jev_completed_at")
 	if err != nil {
 		runtime.stage("jev_provider", "failed")
 		return conversation.TurnDirective{}, &StageError{Stage: "jev_provider", Cause: err}

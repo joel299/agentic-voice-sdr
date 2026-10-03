@@ -301,7 +301,7 @@ paths:
       tags: [Owner tuning]
       operationId: updateGeminiConfig
       summary: Update Gemini Live voice settings
-      description: Tunes how generated speech sounds for sessions/tests created after this update; settings live in process memory and reset to defaults on API restart. model selects Gemini Live; voice_name maps to generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName; description and style are frozen into the system instruction. Do not put product facts, pricing, JEV rules, calendar data, tools, or secrets in style. Test-only overrides are not persisted.
+      description: Tunes how generated speech sounds for sessions/tests created after this update; settings live in process memory and reset to defaults on API restart. model selects Gemini Live; voice_name maps to generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName; description and style are frozen into the system instruction. Do not put product facts, pricing, JEV rules, calendar data, tools, or secrets in style. Test-only overrides are not persisted. Fola is the owner-selected default. The marker <breath> in style requests a subtle natural breath and must not be spoken; it is not a dedicated Live API control.
       security: [{ BearerAuth: [] }]
       requestBody:
         required: true
@@ -309,12 +309,12 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/GeminiConfig' }
             examples:
-              Consultivo: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz comercial brasileira, humana e consultiva.', style: 'Calmo e confiante. Ritmo moderado. Frases curtas.' } }
-              Executivo: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz profissional clara e segura.', style: 'Objetivo e seguro. Ritmo moderado, sem pressa. Preserve pausas naturais.' } }
-              Acolhedor: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz cordial e atenta.', style: 'Próximo e cordial. Demonstre atenção ao lead sem soar ensaiado.' } }
-              Calmo: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz serena e confiável.', style: 'Calmo, ritmo moderado, sem entusiasmo exagerado.' } }
-              Objetivo: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz direta e profissional.', style: 'Frases curtas, dicção clara e uma pergunta por vez.' } }
-              Moderadamente energético: { value: { model: 'gemini-3.8-live', voice_name: 'Kore', description: 'Voz brasileira positiva, sem tom publicitário.', style: 'Energia moderada e natural. Sem urgência ou entusiasmo exagerado.' } }
+              Consultivo: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz comercial brasileira, humana e consultiva.', style: 'Calmo e confiante. Ritmo moderado. Frases curtas.' } }
+              Executivo: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz profissional clara e segura.', style: 'Objetivo e seguro. Ritmo moderado, sem pressa. Preserve pausas naturais.' } }
+              Acolhedor: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz cordial e atenta.', style: 'Próximo e cordial. Demonstre atenção ao lead sem soar ensaiado.' } }
+              Calmo: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz serena e confiável.', style: 'Calmo, ritmo moderado, sem entusiasmo exagerado.' } }
+              Objetivo: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz direta e profissional.', style: 'Frases curtas, dicção clara e uma pergunta por vez.' } }
+              Moderadamente energético: { value: { model: 'gemini-3.8-live', voice_name: 'Fola', description: 'Voz brasileira positiva, sem tom publicitário.', style: 'Energia moderada e natural. Sem urgência ou entusiasmo exagerado.' } }
       responses:
         '200': { description: Applied safe settings, content: { application/json: { schema: { $ref: '#/components/schemas/GeminiConfig' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
